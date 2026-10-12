@@ -18,10 +18,11 @@
 - **改动连带同步点**：谁引用了你改过的路径 / 名字 / 规则，同批改。双语门面（[README.md](README.md)
   与 [README_zh.md](README_zh.md)）与两份 `locale/*.json` 是典型的成对件。
 - **不抄会漂的值**：宿主版本号、计数、行号一律现查；写「形状」，不写「值」。
-- **门面的语言切换行用 Markdown 链接**（`English | [中文](README_zh.md)`），**故意**与姊妹仓
-  的 HTML `<a href>` 写法不同：那样写会被链接校验报「引用未做成链接」两条警告。
-  代价是这一行不再居中；换来的是本仓链接校验 **0 警告**（见「常用命令」）。**这是有意的分歧**，
-  要改回去就同批改这里。
+- **门面的语言切换行与姊妹仓写法一致**（放在居中 div 里的 HTML `<a href>`）。**这曾经是有意的分歧**：
+  本仓原先用 Markdown 链接行（`English | 中文` 那种写法）以换取链接校验 **0 警告**，代价是那一行不居中；
+  维护者 2026-10-13 要求门面与姊妹仓视觉一致，于是改回 HTML 形。**代价如实记下**：链接校验会把
+  HTML 锚点报成「引用未做成链接」，即本仓现在**稳定有那两条警告**（错误数仍为 0）。
+  想回到 0 警告就把两份门面的语言切换改回 Markdown 行 —— 要改就同批改这里。
 
 ## 常用命令
 
@@ -50,6 +51,8 @@ git diff --check
 - 发布流程与判例 → [docs/PUBLISHING.md](docs/PUBLISHING.md)
 - 决策与依据 → [.agents/notes/](.agents/notes/)
 - 展示元数据 → `locale/en.json` · `locale/zh.json`（只住这里，别处只留指针）
+- 真机红线（**本机跑，不进 CI**）→ [test/integration/README.md](test/integration/README.md)
+- 发布态不变量 → [scripts/check-release.mjs](scripts/check-release.mjs)
 
 ## 待办
 
@@ -211,3 +214,8 @@ git diff --check
     加 BOM 后 PS5.1 与 pwsh 7 **都 PARSE-OK**。
     注意这与第 16/30 条那类「工具默认行为」的坑不同：**prettier 会跳过 `.ps1`，CI 也不会解析它**
     —— 所以这条**本机与 CI 全绿也照不出来**，只有真拿 5.1 跑一次才现形。
+33. **本仓被以 `link:` 装进 profile 后，宿主会就地跑 pnpm，往仓里写一份 `pnpm-lock.yaml`** ——
+    而本仓的锁文件是 npm 的 `package-lock.json`（单一锁文件原则）。实测：改动 `package.json` 之后
+    那份 pnpm 锁被**重新生成**（时间戳紧跟在编辑之后），所以删掉它会再长出来。
+    处置：`.gitignore` 里忽略 `/pnpm-lock.yaml`（安装方式的副产物，不是本仓的包管理器选择）。
+    **别把它提交进历史** —— 两个锁文件会让人以为本仓用 pnpm，而 CI 走的是 `npm ci`。
