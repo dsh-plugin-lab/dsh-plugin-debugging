@@ -47,12 +47,32 @@ src/
 
 **代价**：放弃 filesystem provider 的自动解析与 watch，frontmatter 得自己解析，fail-closed 也得自己担。
 
-**rank 的两条边界**（都必须知道，否则会得到一个静默错误的心智模型）：
+**rank 的三条边界**（都必须知道，否则会得到一个静默错误的心智模型）：
+
 - 比较是**升序、数值小者胜**；且 rank **只在同一层内**裁决 —— 最近层的同名条目**直接胜出**，不比 rank。
-  runtime 注册与宿主行、repository 插件同落**全局层**；由 agent preset 常驻组合挂载的插件落**该 preset 的层**。
-  所以「挂载位置」比 rank 更靠前。
-- 250 压得住 custom(300) 与 user(400/500)，**压不住** project-dsh(100) / project-agents(200)。项目级赢是预期行为。
-- 被 shadow 是**完全静默**的：没有 API 能列出被遮蔽的同名技能。
+- **「250 压得住用户级」只在同一层内成立 —— 按发布形态不成立（已实测，2026-10-12）**：
+  标准部署里，根上的 `skill-filesystem` 被 `dsh-web-app` **关掉**了，唯一开着的那份在
+  **`preset-standard` 的 `plugins:` 里**。于是**项目级 / 用户级技能全在 preset 层**，而本插件的
+  runtime 注册落**全局层** → **用户级同名技能会遮蔽本插件的技能**。
+  同一实例上实测到的对照（同一注册表两个视图的集合差，不依赖日志）：
+
+  | 场景 | winner |
+  |---|---|
+  | global 层（用 `--patch` 把 fs provider 拉回全局层） | `runtime(250)` —— 与文档一致：250 赢 400/500 |
+  | global 层 + 项目级存在 | `project-dsh(100)` —— 100 赢 250 |
+  | **发布形态**（fs provider 在 preset 层）+ 用户级存在 | **`user-dsh(400)`** —— 更近的层直接覆盖，rank 不参与 |
+
+- 250 压得住同层的 custom(300) 与 user(400/500)，**压不住** project-dsh(100) / project-agents(200)。
+  项目级赢是预期行为。
+- 被 shadow 是**完全静默**的：没有 API 能列出被遮蔽的同名技能（登记表只暴露 `list/snapshot/get`，
+  全部返回 winner；唯一的 skill RPC `skills/list` 同样只给 winner）。**跨层遮蔽连 warn 都不打**
+  （warn 只在同层去重时出现）。
+
+**产品后果与处置**：本机 `~/.agents/skills/dsh-plugin-debugging/` 曾有一份与本包**字节相同**的个人副本
+（rank 500）—— 在标准 preset 会话里它遮蔽本插件的技能。两份内容相同的时候看不出来，
+**一旦插件更新了 SKILL.md 而那份副本没更新，模型看到的会是旧副本**。处置见
+[.agents/notes/](../.agents/notes/) 里 coverage/personal-skill 那份决策记录：
+**先证明插件自己那份能赢，再撤掉个人副本**（撤除走 `~/.agents` 自己的仓库流程）。
 
 ## 4. 技能半边的三个 fail-closed 点
 

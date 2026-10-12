@@ -546,32 +546,38 @@ function collectMentionedToolNames(markdown: string): string[] {
 const ALL_TOOL_SOURCES = readSourcesUnder('src/tools')
 
 /**
- * 「工具半边实现了没有」的判据是**结构标记 `defineTool(`**，不是名字能不能提出来。
+ * 工具半边里的**基础设施文件**：聚合入口与共享助手。它们不属于「一个工具一个文件」那批。
  *
- * 这两件事必须分开：把「提不出名字」当成「尚未实现」，正是上一版那个假绿的成因 ——
- * 注册名一个字没变、只换了引号风格，就会静默降级成 skip。
+ * 按文件名排除，而不是按内容特征 —— 见 {@link toolHalfImplemented} 的理由。
  */
-const TOOL_IMPL_SOURCES = ALL_TOOL_SOURCES.filter((source) =>
-  stripComments(source.text).includes('defineTool('),
+const TOOL_INFRASTRUCTURE_FILES = ['index.ts', 'shared.ts'] as const
+
+/** 工具实现文件：`src/tools/` 下除掉基础设施文件之后剩下的。 */
+const TOOL_IMPL_FILES = ALL_TOOL_SOURCES.filter(
+  (source) => !TOOL_INFRASTRUCTURE_FILES.some((name) => source.path.endsWith(`/${name}`)),
 )
 
 const declaredToolNames = [...new Set(collectDeclaredToolNames(ALL_TOOL_SOURCES))].sort()
 
 /**
- * 「工具半边实现了没有」的判据是**两条证据取并**：有人调用 `defineTool(`，**或**提得出工具名。
+ * 「工具半边实现了没有」的判据 = **`src/tools/` 下存在非基础设施文件**。
  *
- * 取并而不是取 `defineTool` 一条：只要有任何一条证据在，就说明工具半边存在，
- * 于是下面的闭集断言必须真跑。**只有两条证据都没有**（`src/tools/` 里既没人调 defineTool、
- * 也提不出任何名字）才允许跳过 —— 那才是「还没写」，而不是「写了但提取器认不出来」。
- * 这正是上一版假绿的成因：把「提不出名字」当成「尚未实现」，于是静默降级成 skip。
+ * 只看**文件存在性**，不看内容 —— 这是刻意的，也是上一版留下的最后一个洞的堵法：
+ * 上一版用 `defineTool(` 这个**结构标记**当判据，于是「换一个工厂函数」就会让判据变假、
+ * 静默降级成 skip（注册名、文件全都在，只是提取不出来）。而「文件存在」这件事本身就是
+ * 独立真源，不依赖任何代码写法。
+ *
+ * 新边界：**文件在 = 已实现**。此时提不出名字就是**红**（要么提取器的形态表落后于实现，
+ * 要么真没人声明名字 —— 两种都要人来看）。于是 skip 只剩一种合法情形：
+ * **文件真的不存在**，即工具半边尚未写。
  */
-const toolHalfImplemented = TOOL_IMPL_SOURCES.length > 0 || declaredToolNames.length > 0
+const toolHalfImplemented = TOOL_IMPL_FILES.length > 0
 
 if (!toolHalfImplemented) {
-  // 响了要看得见：跳过不是绿。走到这里意味着 src/tools/ 下**毫无工具半边的痕迹**。
+  // 响了要看得见：跳过不是绿。走到这里意味着 src/tools/ 下**一个实现文件都没有**。
   console.warn(
-    '[redlines] 工具半边尚未实现：src/tools/ 下既没有 defineTool 调用、也提不出任何工具名，' +
-      'B9 实现侧断言被跳过（不是通过）。',
+    `[redlines] 工具半边尚未实现：src/tools/ 下除了 ${TOOL_INFRASTRUCTURE_FILES.join(' / ')} ` +
+      '没有别的 .ts 文件，B9 实现侧断言被跳过（不是通过）。',
   )
 }
 
@@ -643,13 +649,14 @@ describe('B9 工具名是闭集', () => {
   })
 
   it.skipIf(!toolHalfImplemented)('实现侧：文件在却提不出名字 = 红（不许降级成 skip）', () => {
-    // 走到这里说明 src/tools/ 下**确有**文件调用 defineTool —— 那么名字必须提得出来。
+    // 走到这里说明 src/tools/ 下**确有**实现文件（非 index/shared）—— 那么名字必须提得出来。
     // 提不出来只有两种可能：提取器的形态清单落后于实现（该扩 TOOL_NAME_SHAPES），
     // 或者真的没声明名字。**两种都要人来看**，所以判红并报出文件、以及提取器认得的形态。
     expect(
       declaredToolNames,
-      `src/tools/ 下有 ${TOOL_IMPL_SOURCES.length} 个文件调用了 defineTool，但提取到的名字是 ` +
-        `${JSON.stringify(declaredToolNames)}（期望 ${JSON.stringify([...EXPECTED_TOOLS].sort())}）。\n` +
+      `src/tools/ 下有 ${TOOL_IMPL_FILES.length} 个实现文件（${TOOL_IMPL_FILES.map((f) => f.path).join(', ')}），` +
+        `但提取到的名字是 ${JSON.stringify(declaredToolNames)}` +
+        `（期望 ${JSON.stringify([...EXPECTED_TOOLS].sort())}）。\n` +
         '这不是「尚未实现」—— 文件在。提取器当前认得这些形态：\n' +
         TOOL_NAME_SHAPES.map((shape) => `  - ${shape.label}`).join('\n') +
         '\n若实现换了写法，请把新形态加进 TOOL_NAME_SHAPES 并同步扩自检。',
@@ -1015,7 +1022,7 @@ describe('B12 技能文件本体', () => {
  * | 2 | B10 的 fs 写入族 | 判据只在「确有 `node:fs` 来源的名字」上生效；来源靠 import 语句文本识别 | 换一种拿 fs 的写法（`require`、把方法先赋给别的变量）会**漏**；见下方「已知未覆盖」 |
  * | 3 | B10 的 `fs.open` 可写标志 | 标志字符串是我列的集合 | 表外标志（如 `'rs+'` 之外的组合）会**漏** |
  * | 4 | B9 的提取器形态表 `TOOL_NAME_SHAPES` | 名字必须是**字面量**（三种引号之一），或是 `name:` 内联字面量 | 名字改成运行时拼接/从别处 import → 提不出来 → **判红**（响亮，不是假绿），需扩形态表并同步扩自检 |
- * | 5 | B9「文件在却提不出名字 = 红」 | `defineTool(` 这个结构标记 | 若某天工具不再用 `defineTool` 造（换别的工厂），`toolHalfImplemented` 会变假 → **降级成 skip**（假绿）。届时 `TOOL_IMPL_SOURCES` 的标记要一起换 |
+ * | 5 | B9「文件在却提不出名字 = 红」 | **只看文件存在性**：`src/tools/` 下（排除 `index.ts` / `shared.ts`）有 `.ts` 就算子实现 | 判据已与代码写法解耦（上一版依赖 `defineTool(` 结构标记，换个工厂就会降级成 skip —— 已修）。**新边界**：只看存在、不看内容；若有人把实现挪出 `src/tools/`（或新增基础设施文件名），判据要跟着调 |
  * | 6 | B7 的 `files` 覆盖判定 | 我自写的 minimatch **代理**（只实现裸目录名/显式路径/`**` 后缀） | 不是 npm 本身：语义有偏差时**假绿**。唯一真判据是 `npm pack` 后看 tarball —— 未接进红线，属【推断】 |
  * | 7 | A2 的「族不只一族」（`split('||').length > 1`） | 借姊妹仓注释里的 npm 预发布匹配推理，**未在本机核** | 合理地收窄到单族会**红**（响亮误报）。【推断】 |
  * | 8 | B9 的 `EXPECTED_TOOLS` | 我手抄的**第 4 个副本**（另三份：`docs/ARCHITECTURE.md` 表、README×2、`src/tools` 常量） | **没有单一真源**。加第五个工具漏改这里会红（响亮）。【推断】 |
@@ -1029,6 +1036,12 @@ describe('B12 技能文件本体', () => {
  * `process.binding`、原生 addon、`require()`（本仓纯 ESM）、把 fs 方法先赋给别的变量再调用
  * （`const w = writeFileSync`）、以及经 `ctx.subprocess`/`ctx.shell` 发起的写命令。
  * 这些在本仓目前不出现；真出现时要靠人看出来，或把判据扩成 AST 级。
+ *
+ * **B9 第二个出口（提取器之外的）**：`src/tools/` 里**别处**出现的 `dsh_*` 字面量
+ * （例如 `nextStep` 文案里的 `tool: 'dsh_dump_config'`）**不被提取器看见** ——
+ * 判据只认「声明工具名」的形态（`TOOL_NAME_SHAPES`）。也就是说：把名字改成运行时拼接、
+ * 却仍在文案里写旧名字，会**判红**（响亮，正是我们要的）；但反过来，
+ * 文案里引用了闭集外的名字**不会**被这条判据照出来。这是**已知未覆盖**。
  *
  * **不要**为了消掉上面这些限度去扩大断言范围 —— 先把限度写清楚，再按需收紧。
  */
