@@ -68,5 +68,9 @@
 - 宿主把 `agent/created` 改成非 serial、或作用域注册表不再能经 `agent.ctx.get('skills')` 取得
   → 动态注入失效，本决定要重做。
 
-**证据**：`.coord/verify-s2.md`（层与 rank 的实证）· `.coord/verify-preset-layer.md`（静态方案能赢及其代价）·
-`.coord/verify-dynamic-scope.md`（动态注入五问与三条纪律）· `.coord/verify-dynamic-scope-impl.md`（真实包复核）。
+**证据**：本轮的真机验证报告（住工作区的中转站，**不随本仓发布**，故此处不写路径）——
+四份分别覆盖「层与 rank 的实证」「静态方案能赢及其代价」「动态注入五问与三条纪律」「真实包复核（含抓到的泄漏）」。
+可复查的**耐久**落点有三处，都在本仓内：本文上面对宿主源码的逐条引用、
+[AGENTS.md](../../AGENTS.md) 活跃坑第 6 / 19 / 26 / 28 条、以及
+[test/integration/](../../test/integration/) 下两条**可复跑**的本机红线
+（`bench-s1.ps1` 组合层、`leak-fix.ps1`「停用即解开」）。

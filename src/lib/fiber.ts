@@ -28,8 +28,8 @@
  *
  * ## 最凶的一种，以及为什么不能只看 `state === 3`
  *
- * **import 期就失败的 entry，`entry.fiber` 是 `undefined`**（verifier 实测，
- * 见 `.coord/verify-s2.md` §4 Q2）：宿主对它报 `failed to import`，而
+ * **import 期就失败的 entry，`entry.fiber` 是 `undefined`**（verifier 实测；
+ * 见 AGENTS.md 活跃坑第 19 条）：宿主对它报 `failed to import`，而
  * `FIBER_PHASE[undefined]` 会得到 `null` —— 用那张映射表**看不出来**。
  * 只看 `state === 3` 会把「模块一加载就崩」这一类**整条漏掉**，而它恰恰是
  * 「插件装了却毫无输出」最常见的一种。所以 `fiber === undefined` 独立成一档。

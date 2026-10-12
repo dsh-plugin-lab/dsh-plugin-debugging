@@ -95,7 +95,7 @@ $script:RpcBase = $null
 $script:RpcSess = $null
 function Connect-Api([string]$Url) {
   # **必须带 token 请求一次**才会拿到 dsh-auth-* cookie：宿主对不带 cookie 的 `/` 返回 401
-  # （这是有意的鉴权行为，不是故障 —— 见 .coord/verify-s3.md 的 auth/EXPECTED-auth-401）。
+  # （这是有意的鉴权行为，不是故障 —— 不带 cookie 的 `/` 返回 401 是宿主的鉴权设计）。
   $null = Invoke-WebRequest $Url -UseBasicParsing -SessionVariable s -TimeoutSec 15
   $script:RpcSess = $s
   $script:RpcBase = ($Url -replace '\?.*$', '').TrimEnd('/')

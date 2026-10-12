@@ -89,7 +89,8 @@ src/
 **为什么不是「把插件行写进 preset 组合」**：也试过，能赢，但一旦插件包不可解析，
 **默认 `standard` 会话直接建不起来**（`agent-presets[standard].broken` → `session/create` 失败），
 等于插件坏了就没人能用；而且四个工具会被一起限进 preset 层。动态注入下插件行**不动**，
-坏包只影响插件自己。实测对照见 `.coord/verify-preset-layer.md` 与 `.coord/verify-dynamic-scope.md`。
+坏包只影响插件自己。决策、代价与重开条件见
+[.agents/notes/2026-10-13-skill-registers-twice-dynamic-scope.md](../.agents/notes/2026-10-13-skill-registers-twice-dynamic-scope.md)。
 
 ### 3.1 动态 scope 注入（两次注册）
 

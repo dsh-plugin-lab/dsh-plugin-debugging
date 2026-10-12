@@ -6,7 +6,7 @@
 #   CI 的门禁由 scripts/check-release.mjs 与 npm test（含红线）承担；本脚本是发布前在本机手动跑的那一道。
 #
 # 判据与配方的一处事实来源：test/integration/README.md（排错表、失败特征、为什么需要 junction）
-# 原始证据留档：枢纽仓 .coord/verify-s1.md
+# 原始证据（本轮验证报告）留在工作区本机，**不随本仓发布** —— 本脚本自身即是可复跑的判据。
 # 本脚本只做验证，不改被测仓的 src/**、package.json、.github/**。
 #
 # 它做三件事，任一步失败即以非 0 退出：

@@ -25,11 +25,11 @@
  *    **同层**，于是 rank 250 在同层仲裁里**真的赢**用户级 400/500。
  *
  * 为什么第 2 步是必需的：**发布形态下用户级技能由 preset 层发现**，而 preset 层比全局层**更近** →
- * 全局那次注册会被**跨层遮蔽**（实测见 `.coord/verify-s2.md`）。只在同一个层里，rank 才参与比较。
+ * 全局那次注册会被**跨层遮蔽**（实测；宿主机制见 AGENTS.md 活跃坑第 6 条）。只在同一个层里，rank 才参与比较。
  *
  * 为什么用「动态注入」而不是「把插件行写进 preset 组合」：后者一旦插件包不可解析，
  * **默认 `standard` 会话直接建不起来**（`agent-presets[standard].broken`），等于插件坏了就没人能用；
- * 现在插件行**不动**，坏包只影响插件自己（实测见 `.coord/verify-preset-layer.md` vs `verify-dynamic-scope.md`）。
+ * 现在插件行**不动**，坏包只影响插件自己（决策与代价见 `.agents/notes/` 里那条「技能注册两次」的记录）。
  *
  * **三个必须 fail-closed 的点**
  * 1. `content` 宿主**不校验**（`…\dsh-skill\lib\index.js:465-469` 只查 name/description/invocation），
@@ -99,7 +99,7 @@ export interface RegisterSkillOptions {
  * 「活跃 agent 注册表」的**结构型**视图。
  *
  * 刻意**不**从 `@deepseek-ai/dsh-agent` import 具体类型：这套机制（`ctx.agents` / `agent.ctx` /
- * `agent/created`）是**宿主内部 primitive、不是公开契约**（实测见 `.coord/verify-dynamic-scope.md`），
+ * `agent/created`）是**宿主内部 primitive、不是公开契约**（实测；见 AGENTS.md 活跃坑第 19、26 条），
  * 而结构型声明让我们**只依赖真正用到的那一点点形状** —— 宿主换版本时，
  * 失效会表现为「读不到」，而不是类型编译不过或运行期炸。
  */
@@ -280,7 +280,7 @@ export function registerSkills(
 /**
  * 把同一个技能注册进每个活跃 agent 的 preset 作用域。
  *
- * 三条实测出来的纪律（`.coord/verify-dynamic-scope.md`）：
+ * 三条实测出来的纪律（见 AGENTS.md 活跃坑第 19、26、28 条）：
  * 1. **`agent/created` 是 serial 派发，处理器里不许 `await`** —— 实测在处理器里 await 会让
  *    `agents.create()` 直接卡住。所以下面是**全同步**的：不 await、不推迟。
  * 2. **作用域注册表要从 `agent.ctx.get('skills')` 取**：`presets.serviceFor(agent,'skills')`
@@ -309,8 +309,8 @@ function registerScoped(
    * 否则会**泄漏**：`SkillRegistry.register` 内部是 `this.layers.effect(this.ctx, …)`，
    * 而 `this.ctx` 是**那个作用域自己的 ctx（= agent）** —— 于是注册的生命周期只绑在 agent 上，
    * 与插件 fiber **无关**：停用/卸载插件时，**已存在的 agent** 作用域里还留着我们的技能
-   * （实测复现见 `.coord/verify-dynamic-scope-impl.md` 判据 5b：停用插件后老会话仍赢、
-   * 新会话已退回用户级 —— 同一时刻两种结果，就是泄漏的定义）。
+   * （实测复现：停用插件后**老会话仍赢**、**新会话已退回用户级** —— 同一时刻两种结果，
+   * 就是泄漏的定义；本条已入 AGENTS.md 活跃坑第 28 条）。
    *
    * 收进自己的 fiber 之后**两条路都能解开**：插件卸载 → 我们 yield 的 disposer 被调；
    * agent 销毁 → agent 作用域自己解开。Cordis 的 disposer 是幂等的，重复调用无副作用。

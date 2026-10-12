@@ -9,7 +9,7 @@
  * ## 这是内部 primitive，不是公开契约
  *
  * 读的是 `ctx.get('loader')` → `loader.entries()` → `entry.fiber.state` 这条链
- * （verifier 实测：插件侧可见、**无需声明 `inject`**，见 `.coord/verify-s2.md` §4 Q1/Q2）。
+ * （verifier 实测：插件侧可见、**无需声明 `inject`**；见 AGENTS.md 活跃坑第 19 条）。
  * 宿主自己启动审计（`dsh-app-boot` 的 `inactiveEntries()`，0.2.1-alpha.2 `lib/index.js:4043-4107`）
  * 走的就是同一条链 —— 但它是**宿主内部**的实现，不是给插件用的 API。
  *

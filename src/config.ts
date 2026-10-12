@@ -5,7 +5,7 @@
  * `startup-*.log`），自己不产生也不存任何密钥。
  *
  * 字段顺序无关紧要：`.default()` 与 `.volatile()` 各写各的 `meta` 键，没有先后约束
- * （已回源码核过，见 `.coord/recon-C-host-truth.md` 命题 7）。真正的约束是
+ * （已回宿主源码核过）。真正的约束是
  * `.volatile()` 只能落在固定对象路径上 —— 本 schema 全部是顶层标量，不受影响。
  */
 import { homedir } from 'node:os'

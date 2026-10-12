@@ -301,7 +301,7 @@ describe('registerSkills —— 异常不外泄', () => {
 
 /**
  * 动态 scope 注入 —— 技能进「活跃 agent 的 preset 作用域」，与 `skill-filesystem` 同层，
- * 这样 rank 250 才在同层仲裁里真正赢用户级 400/500（实测见 `.coord/verify-dynamic-scope.md`）。
+ * 这样 rank 250 才在同层仲裁里真正赢用户级 400/500（决策与代价见 `.agents/notes/` 里那条记录）。
  *
  * 这里钉住四条**实测出来的纪律**，它们错了都会**静默**（技能看着注册了、却赢不了或被遮蔽）：
  * 1. 已经在跑的 agent：apply 时遍历 `agents.list()` 注册；
@@ -452,7 +452,7 @@ describe('registerSkills —— 动态 scope 注入', () => {
    * 为什么这条是承重的：`SkillRegistry.register` 内部是 `this.layers.effect(this.ctx, …)`，
    * 而 `this.ctx` 是**那个作用域自己的 ctx（= agent）**，所以它的生命周期原本只绑 agent、
    * 与插件 fiber 无关 → **停用插件时已存在的 agent 里还留着我们的技能**（真机复现过：
-   * `.coord/verify-dynamic-scope-impl.md` 判据 5b —— 同一时刻，老会话仍赢、新会话已退回用户级）。
+   * 同一时刻，老会话仍赢、新会话已退回用户级；见 AGENTS.md 活跃坑第 28 条）。
    */
   it('停用插件（销毁我们的 fiber）→ 各 agent 作用域里的注册也被解开', () => {
     const handle = makeCtx()
