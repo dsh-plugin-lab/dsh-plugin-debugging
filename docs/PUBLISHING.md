@@ -57,6 +57,19 @@
 
 推论：**发一个版本 = 一次 bump 提交 + 一次 workflow 运行**；workflow 重跑不会改任何版本号。
 
+### 首次发布是引导步：由维护者手动做一次
+
+`0.1.0` 由维护者在本机手动 `npm publish`（维护者 2026-10-13 指定；之后的版本一律走 workflow）。
+
+⚠️ **手动发过之后，tag 与 Release 不会被流程补出来**：`release.yml` 的 Tag 步骤带
+`if: steps.probe.outputs.exists == 'false'`，版本一旦已经在 npm 上，**publish 与 tag 两步都会跳过**。
+所以首次发布只有两条路，二选一：
+
+- **手动补 `v<version>` tag 与 Release**（形状必须是 `v` + `package.json` 的版本号 —— 守卫与巡检靠
+  `git describe --match 'v[0-9]*'` 看它，漏了 `v` 前缀那个 `--match` 就看不见）；
+- 或者**直接 bump 到下一个号**（如 `0.1.1`）再走 workflow，让流程从那个号开始产出 tag 与 Release
+  （`0.1.0` 就永远没有 tag）。
+
 ## workflow 逐步做什么
 
 按固定顺序，前面任何一步红了都走不到发布：

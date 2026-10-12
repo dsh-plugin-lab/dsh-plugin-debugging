@@ -18,6 +18,9 @@
 - **改动连带同步点**：谁引用了你改过的路径 / 名字 / 规则，同批改。双语门面（[README.md](README.md)
   与 [README_zh.md](README_zh.md)）与两份 `locale/*.json` 是典型的成对件。
 - **不抄会漂的值**：宿主版本号、计数、行号一律现查；写「形状」，不写「值」。
+- **改动走 PR，不直推 `main`**（维护者 2026-10-13 指定）。ruleset 里那条 `RepositoryRole` bypass 让直推
+  **技术上能过** —— 但那是逃生门，不是常规路径。流程：开分支 → 推 → `gh pr create` → 等 `CI Success` → 合并。
+  本地门禁（`npm run check` / `lint` / `format:check` / `check:release` / 链接校验）照旧在开 PR 前跑完。
 - **门面的语言切换行与姊妹仓写法一致**（放在居中 div 里的 HTML `<a href>`）。**这曾经是有意的分歧**：
   本仓原先用 Markdown 链接行（`English | 中文` 那种写法）以换取链接校验 **0 警告**，代价是那一行不居中；
   维护者 2026-10-13 要求门面与姊妹仓视觉一致，于是改回 HTML 形。**代价如实记下**：链接校验会把
