@@ -302,12 +302,26 @@ function registerScoped(
   let initial = 0
   let failed = 0
 
-  /** 同步注册进一个 agent 的作用域；绝不抛。 */
+  /**
+   * 同步注册进一个 agent 的作用域；绝不抛。
+   *
+   * **必须把这次注册的 disposer 收进我们自己的 fiber**（`ctx.effect` 里 yield 它），
+   * 否则会**泄漏**：`SkillRegistry.register` 内部是 `this.layers.effect(this.ctx, …)`，
+   * 而 `this.ctx` 是**那个作用域自己的 ctx（= agent）** —— 于是注册的生命周期只绑在 agent 上，
+   * 与插件 fiber **无关**：停用/卸载插件时，**已存在的 agent** 作用域里还留着我们的技能
+   * （实测复现见 `.coord/verify-dynamic-scope-impl.md` 判据 5b：停用插件后老会话仍赢、
+   * 新会话已退回用户级 —— 同一时刻两种结果，就是泄漏的定义）。
+   *
+   * 收进自己的 fiber 之后**两条路都能解开**：插件卸载 → 我们 yield 的 disposer 被调；
+   * agent 销毁 → agent 作用域自己解开。Cordis 的 disposer 是幂等的，重复调用无副作用。
+   */
   const intoAgent = (agent: AgentLike): boolean => {
     try {
       const scopedRegistry = agent.ctx.get('skills') as SkillRegistryLike | undefined
       if (scopedRegistry === undefined) return false
-      scopedRegistry.register(registration)
+      ctx.effect(function* () {
+        yield scopedRegistry.register(registration)
+      })
       return true
     } catch {
       return false

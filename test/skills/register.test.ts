@@ -314,11 +314,15 @@ describe('registerSkills —— 动态 scope 注入', () => {
   /** 一个 agent 替身：它的 ctx 能取到「作用域技能注册表」。 */
   function makeAgent(options: { noRegistry?: boolean; throwOnRegister?: boolean } = {}) {
     const calls: SkillRegistration[] = []
+    /** 每次作用域注册返回的 disposer 被调用的次数（用来验「不泄漏」）。 */
+    const disposed: number[] = []
     const registry = {
       register(skill: SkillRegistration) {
         calls.push(skill)
         if (options.throwOnRegister === true) throw new Error('作用域注册表拒绝')
-        return () => {}
+        return () => {
+          disposed.push(1)
+        }
       },
     }
     const agent = {
@@ -329,7 +333,7 @@ describe('registerSkills —— 动态 scope 注入', () => {
         },
       },
     }
-    return { agent, calls }
+    return { agent, calls, disposed }
   }
 
   it('apply 时已存在的 agent 会被注册进它的作用域，且计数如实', () => {
@@ -440,5 +444,45 @@ describe('registerSkills —— 动态 scope 注入', () => {
 
     expect(report?.ok).toBe(true)
     expect(report?.scoped?.failed).toBeGreaterThan(0)
+  })
+
+  /**
+   * **防泄漏**：作用域注册的 disposer 必须收进**我们自己的 fiber**。
+   *
+   * 为什么这条是承重的：`SkillRegistry.register` 内部是 `this.layers.effect(this.ctx, …)`，
+   * 而 `this.ctx` 是**那个作用域自己的 ctx（= agent）**，所以它的生命周期原本只绑 agent、
+   * 与插件 fiber 无关 → **停用插件时已存在的 agent 里还留着我们的技能**（真机复现过：
+   * `.coord/verify-dynamic-scope-impl.md` 判据 5b —— 同一时刻，老会话仍赢、新会话已退回用户级）。
+   */
+  it('停用插件（销毁我们的 fiber）→ 各 agent 作用域里的注册也被解开', () => {
+    const handle = makeCtx()
+    const { skills } = makeSkills()
+    const a = makeAgent()
+    const b = makeAgent()
+
+    registerSkills(handle.ctx, skills, { agents: () => ({ list: () => [a.agent, b.agent] }) })
+    expect(a.calls).toHaveLength(1)
+    expect(a.disposed).toHaveLength(0)
+
+    // 模拟插件 fiber 卸载：把 `ctx.effect` 收集到的 disposer 全部调一遍。
+    expect(handle.disposers.length).toBeGreaterThan(0)
+    for (const dispose of handle.disposers) dispose()
+
+    expect(a.disposed).toHaveLength(1)
+    expect(b.disposed).toHaveLength(1)
+  })
+
+  it('新开的 agent 同样是「可解开的」（事件路径也收进 fiber）', () => {
+    const handle = makeCtx()
+    const { skills } = makeSkills()
+    const later = makeAgent()
+
+    registerSkills(handle.ctx, skills, { agents: () => ({ list: () => [] }) })
+    handle.emit('agent/created', { agent: later.agent, source: 'startup' })
+    expect(later.calls).toHaveLength(1)
+
+    // 事件路径的注册也必须挂在我们的 fiber 上 —— 否则「插件加载后才开的会话」会泄漏得更隐蔽。
+    for (const dispose of handle.disposers) dispose()
+    expect(later.disposed).toHaveLength(1)
   })
 })

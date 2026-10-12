@@ -55,9 +55,14 @@ git diff --check
 
 - [ ] v1.1：`dsh_hot_reload`（前置门：profile 里真的挂了 `hmr`）与 `dsh_restart`
       （先 dry-run；`danger-full-access` 档下 `ask` 会被确定性拒绝，语义要先定）
-- [ ] **技能压过用户级同名技能**：S2 实测已推翻「250 天然赢」的旧说法（用户级技能在 **preset 层**、
-      更近，跨层直接遮蔽全局层的 runtime 注册）。当前方向：按官方机制把本插件行挂进 preset 层
-      （override `preset-standard`），**先做实验证实再改 `cordis.patch.yml`**。
+- [ ] **技能压过用户级同名技能**：已实现（**动态 scope 注入**：技能同时注册进全局层与每个活跃 agent
+      的 preset 作用域，与 `skill-filesystem` 同层 → rank 250 才真正赢）。静态写进 preset 组合的方案
+      **已实测否决**（坏包会让默认 standard 会话建不起来）。决策见
+      [.agents/notes/2026-10-13-skill-registers-twice-dynamic-scope.md](.agents/notes/2026-10-13-skill-registers-twice-dynamic-scope.md)。
+      剩余：撤掉本机个人副本（顺序在后，先证明赢）。
+- [ ] **`SkillReport.scoped` 真机不可观测**（`state.skill` 没有对外暴露面，pluginInventory 也不含插件内部状态）
+      → v1.1 可考虑让本仓自己的某个工具报出「技能半边注册成了没有、几个 agent」，
+      这样「注册了但没生效」这类问题不必靠 winner 反推。
 - [ ] `SKILL.md` §3.8 的「Fiber 级状态没有查询入口」已被证伪（见活跃坑 19）；正文是逐字复制的
       v2.1.4 本体，**修正与否待用户拍板**。
 - [ ] **非 Windows 的端口识别**（v1 只在 Windows 上查监听端口，见 `src/lib/ports.ts` 的早返回）。
@@ -174,3 +179,12 @@ git diff --check
     根本没触发」。本轮探针真踩过：差点据此得出「`agent/created` 收不到」的**反结论**。
     做法：活对象放模块级 map、只序列化抽出来的纯数据；flush 失败**另写一个错误文件**而不是吞掉。
     与第 18 条同族：**最危险的静默失败，是让判据自己看起来通过了。**
+28. **往别人的作用域里注册，必须把返回的 disposer 收进自己的 fiber**（本仓真踩过，且**是半坏**的）：
+    `SkillRegistry.register` 内部是 `this.layers.effect(this.ctx, …)`，`this.ctx` 是**那个作用域自己的
+    ctx** —— 于是动态注册的生命周期只绑在 **agent** 上，**与插件 fiber 无关**。症状极隐蔽：
+    **停用插件后，停用前已存在的 agent 仍认为本插件赢，而同一次停用之后新开的会话已退回用户级**
+    —— 同一时刻两种结论，看起来像随机故障。正确写法是
+    `ctx.effect(function* () { yield scopedRegistry.register(registration) })`：**两条路都能解开**
+    （插件卸载调我们 yield 的 disposer；agent 销毁由它自己的作用域解开）。
+    一般化：**「在 A 的作用域里注册、由 B 负责撤销」时，注册与撤销必须落在同一条 effect 链上**，
+    否则撤销只在不发生事故的路径上成立。
