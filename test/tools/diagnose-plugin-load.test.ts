@@ -147,8 +147,18 @@ describe('dsh_diagnose_plugin_load', () => {
 
       const data = expectOk(await run(tool, {}))
       const port = data['port'] as Record<string, unknown>
-      expect((port['lookup'] as Record<string, unknown>)['probed']).toBe(true)
-      expect((port['lookup'] as Record<string, unknown>)['listening']).toBe(false)
+      const lookup = port['lookup'] as Record<string, unknown>
+      // 端口查询是**平台相关**的：v1 只在 Windows 上查监听端口，非 Windows 恒为
+      // `probed: false`（见 src/lib/ports.ts 的早返回）。所以这里必须按平台断言 ——
+      // 写死 `probed === true` 会在 CI(ubuntu) 上红，而那是**设计如此**，不是缺陷。
+      if (process.platform === 'win32') {
+        expect(lookup['probed']).toBe(true)
+        expect(lookup['listening']).toBe(false)
+      } else {
+        expect(lookup['probed']).toBe(false)
+        expect(lookup['listening']).toBe(false)
+        expect(String(lookup['detail'])).toContain(process.platform)
+      }
       // 端口值与其来源在 resolved 里（一处一事实，不在这里重复）。
       const resolved = data['resolved'] as Record<string, unknown>
       expect(resolved['port']).toBe(3080)

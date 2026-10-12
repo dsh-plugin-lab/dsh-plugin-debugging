@@ -42,6 +42,13 @@ It also ships a skill (`dsh-plugin-debugging`) carrying the full troubleshooting
 
 **v1 is read-only on purpose.** Nothing here restarts a process, rewrites a profile, or writes to `DSH_HOME`. Restart and hot-reload helpers are deliberately deferred: they are the only actions that can kill the host you are debugging, and their approval, cooldown, and failure-recovery semantics need to be settled first.
 
+## Platform support
+
+**v1 identifies processes by port on Windows only.** On other platforms the port lookup reports
+`probed: false` with the platform in the message — deliberately *not* "no listener", because
+"couldn't check" and "not running" are opposite conclusions. Everything else (config composition,
+bundle/installation form, startup logs, authentication probing, config dumps) is platform-neutral.
+
 ## Install
 
 ```shell

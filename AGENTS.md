@@ -60,6 +60,13 @@ git diff --check
       （override `preset-standard`），**先做实验证实再改 `cordis.patch.yml`**。
 - [ ] `SKILL.md` §3.8 的「Fiber 级状态没有查询入口」已被证伪（见活跃坑 19）；正文是逐字复制的
       v2.1.4 本体，**修正与否待用户拍板**。
+- [ ] **非 Windows 的端口识别**（v1 只在 Windows 上查监听端口，见 `src/lib/ports.ts` 的早返回）。
+      实现方向：Linux 用 `ss -ltnp`、macOS 用 `lsof -i`。
+      **注意这事有个便宜可占**：CI 就在 ubuntu 上跑，所以这层**能被 CI 真正验证** ——
+      与「只能本机红线」的那几项不同。做完要把 README 的「平台支持」一节同批改。
+- [ ] **CI 与本地平台不同**：本机是 Windows，CI 是 ubuntu。**任何写死平台行为的断言都会在 CI 上红**
+      （首次推送就踩过：`probed === true` 那一条）。新增与平台相关的判据时，
+      要么按平台分支断言，要么让两种平台的行为都被钉住。
 
 ## 活跃坑
 
