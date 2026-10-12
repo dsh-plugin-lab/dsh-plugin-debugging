@@ -17,6 +17,8 @@ import type { FetchImpl } from '../../src/lib/http.ts'
 import { createToolDeps, type ToolDeps } from '../../src/tools/shared.ts'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { ToolResult } from '../../src/lib/errors.ts'
+import type { LoaderEntrySnapshot } from '../../src/lib/fiber.ts'
+import type { LoaderReadResult } from '../../src/lib/loader.ts'
 
 /** 建过的临时目录，测试结束统一清掉。 */
 const created: string[] = []
@@ -115,6 +117,7 @@ export function depsFor(
     fetch?: FetchImpl
     env?: NodeJS.ProcessEnv
     now?: () => number
+    loader?: () => LoaderReadResult
   } = {},
 ): ToolDeps {
   return createToolDeps(config, {
@@ -122,7 +125,46 @@ export function depsFor(
     fetch: overrides.fetch ?? neverFetch,
     env: overrides.env ?? {},
     ...(overrides.now === undefined ? {} : { now: overrides.now }),
+    ...(overrides.loader === undefined ? {} : { loader: overrides.loader }),
   })
+}
+
+/**
+ * 造一个「观测得到」的 loader 替身。
+ *
+ * 直接喂 `LoaderEntrySnapshot[]`，不模拟宿主结构 —— 结构那一层由 `loader.test.ts` 单独打。
+ *
+ * @param entries 快照数组。
+ */
+export function loaderWith(entries: LoaderEntrySnapshot[]): () => LoaderReadResult {
+  return () => ({ ok: true, entries })
+}
+
+/** 造一个「降级」的 loader 替身。 */
+export function loaderUnavailable(reason = '测试：读不到 loader'): () => LoaderReadResult {
+  return () => ({ ok: false, reason, entries: [] })
+}
+
+/**
+ * 造一个 entry 快照。
+ *
+ * @param overrides 覆盖字段。
+ */
+export function entrySnapshot(overrides: Partial<LoaderEntrySnapshot> = {}): LoaderEntrySnapshot {
+  const moduleName = overrides.moduleName ?? 'pkg-a'
+  return {
+    entryId: overrides.entryId ?? `include:${moduleName}`,
+    moduleName,
+    disabled: overrides.disabled ?? false,
+    hasFiber: overrides.hasFiber ?? true,
+    ...(overrides.fiberState === undefined ? {} : { fiberState: overrides.fiberState }),
+    ...(overrides.fiberError === undefined ? {} : { fiberError: overrides.fiberError }),
+    ...(overrides.disabledExpressionError === undefined
+      ? {}
+      : { disabledExpressionError: overrides.disabledExpressionError }),
+    inject: overrides.inject ?? [],
+    presentServices: overrides.presentServices ?? [],
+  }
 }
 
 /** 一次只会失败的 spawn：测试里没显式给 spawn 时用它，避免真起进程。 */

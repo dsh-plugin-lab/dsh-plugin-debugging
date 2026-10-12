@@ -5,7 +5,7 @@
  * **不依赖 Cordis**，可以用普通对象构造并直接单测；生命周期与注册只发生在
  * `src/index.ts` → `src/tools/index.ts` 一处。
  *
- * 注入点只有两个，都是「外部 IO」：`spawn`（子进程）与 `fetch`（HTTP）。
+ * 注入点都是「外部 IO」：`spawn`（子进程）、`fetch`（HTTP）、`loader`（宿主 Loader 树）。
  * 文件系统不注入 —— 单测用临时目录造一个假 `DSH_HOME` 更真，且不必 mock 类。
  */
 import type { JsonValue, ToolFail, ToolResult } from '../lib/errors.js'
@@ -15,6 +15,7 @@ import type { FetchImpl } from '../lib/http.js'
 import { defaultFetchImpl } from '../lib/http.js'
 import type { SpawnImpl } from '../lib/exec.js'
 import { defaultSpawnImpl } from '../lib/exec.js'
+import type { LoaderReadResult } from '../lib/loader.js'
 import { renderToolResult, type TextBlockLike } from '../lib/render.js'
 
 /** 四个工具共享的依赖。 */
@@ -26,6 +27,25 @@ export interface ToolDeps {
   readonly now: () => number
   /** 环境变量；只为测试注入（默认 `process.env`）。 */
   readonly env: NodeJS.ProcessEnv
+  /**
+   * 读宿主 Loader 树（用来**观测** `fiber.state`）。
+   *
+   * 做成**闭包**而不是把 `ctx` 传进工具：工具实现因此仍然不依赖 Cordis，
+   * 单测可以喂一个假实现；真实实现在 `src/tools/index.ts` 里从 `ctx` 绑一次。
+   *
+   * 契约是「**不抛**」：读不到就返回 `ok: false` + 原因，由工具降级成推断。
+   * 这是宿主内部 primitive，版本一变就失效 —— 失效必须是降级，不是报错。
+   */
+  readonly loader: () => LoaderReadResult
+}
+
+/** 没有宿主上下文时的 loader 实现：干净地降级，而不是抛。 */
+export function unavailableLoader(): LoaderReadResult {
+  return {
+    ok: false,
+    reason: '本次调用没有接到宿主上下文，读不到 loader 服务',
+    entries: [],
+  }
 }
 
 /**
@@ -44,6 +64,7 @@ export function createToolDeps(
     fetch: overrides.fetch ?? defaultFetchImpl,
     now: overrides.now ?? Date.now,
     env: overrides.env ?? process.env,
+    loader: overrides.loader ?? unavailableLoader,
   }
 }
 

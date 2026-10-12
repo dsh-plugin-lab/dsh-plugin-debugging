@@ -21,16 +21,19 @@ import {
   createDiagnosePluginLoadTool,
   DIAGNOSE_PLUGIN_LOAD_TOOL,
 } from '../../src/tools/dsh_diagnose_plugin_load.ts'
+import { FIBER_STATE } from '../../src/lib/fiber.ts'
 import { TOOL_ERROR_KINDS } from '../../src/lib/errors.ts'
 import {
   cmdResult,
   configFor,
   depsFor,
+  entrySnapshot,
   execWith,
   expectFail,
   expectOk,
   jumpingClock,
   linkDir,
+  loaderWith,
   recordingSpawn,
   run,
   tempDshHome,
@@ -67,8 +70,28 @@ describe('dsh_diagnose_plugin_load', () => {
       expect(data['bundles']).toEqual(['dsh-zhihu-search'])
       const pkg = (data['packages'] as Record<string, unknown>[])[0]
       expect((pkg?.['entry'] as Record<string, unknown>)['entryExists']).toBe(true)
-      // 必须是「三处只证前置条件」那句话，否则模型会误读成「插件活着」。
-      expect(String(data['loadProofCaveat'])).toContain('不证加载成功')
+      // 旧的推断字段必须原样还在（向后兼容）。
+      expect(pkg?.['inBundles']).toBe(true)
+      expect(pkg?.['artifactNewerThanProcess']).toBeDefined()
+    })
+
+    it('默认没有 loader → 降级成 inferred，并显式标注「未能直接观测」', async () => {
+      const dshHome = await tempDshHome()
+      const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
+      await writeInstalledPackage(profileDir, 'pkg-a')
+      const { spawn } = recordingSpawn(() => cmdResult({ stdout: '' }))
+      // 不给 loader → 用默认的「没有宿主上下文」实现。
+      const tool = createDiagnosePluginLoadTool(depsFor(configFor(dshHome), { spawn }))
+
+      const data = expectOk(await run(tool, {}))
+      const observation = data['observation'] as Record<string, unknown>
+      expect(observation['mode']).toBe('inferred')
+      // 这是要求②的核心：读不到时必须**在输出里标注**，不能默默给推断结论。
+      expect(String(observation['note'])).toContain('未能直接观测')
+      expect(String(observation['note'])).toContain('推断')
+      // 降级时不给 per-package 的观测字段 —— 推断的东西不许混进观测字段。
+      expect((data['packages'] as Record<string, unknown>[])[0]?.['observed']).toBeUndefined()
+      expect(String(data['verdict'])).toContain('推断')
     })
 
     it('link 形态被认出来（D:/repo 是 junction 的目标）', async () => {
@@ -161,6 +184,157 @@ describe('dsh_diagnose_plugin_load', () => {
       const data = expectOk(await run(tool, { package: 'pkg-b' }))
       expect((data['packages'] as unknown[]).length).toBe(1)
       expect((data['packages'] as Record<string, unknown>[])[0]?.['inBundles']).toBe(false)
+    })
+  })
+
+  describe('观测路径（Loader 树可读）', () => {
+    /** 造一个「有 loader」的诊断 fixture。 */
+    async function observedFixture(
+      snapshot: ReturnType<typeof entrySnapshot>,
+    ): Promise<{ tool: ReturnType<typeof createDiagnosePluginLoadTool> }> {
+      const dshHome = await tempDshHome()
+      const profileDir = await writeProfile(dshHome, 'web', { bundles: [snapshot.moduleName] })
+      await writeInstalledPackage(profileDir, snapshot.moduleName)
+      const { spawn } = recordingSpawn(() => cmdResult({ stdout: '' }))
+      return {
+        tool: createDiagnosePluginLoadTool(
+          depsFor(configFor(dshHome), { spawn, loader: loaderWith([snapshot]) }),
+        ),
+      }
+    }
+
+    it('import 期失败（fiber 不存在）→ observed failed / failed to import', async () => {
+      const { tool } = await observedFixture(
+        entrySnapshot({ moduleName: 'pkg-a', hasFiber: false }),
+      )
+
+      const data = expectOk(await run(tool, {}))
+      expect((data['observation'] as Record<string, unknown>)['mode']).toBe('observed')
+      const observed = (data['packages'] as Record<string, unknown>[])[0]?.['observed'] as Record<
+        string,
+        unknown
+      >
+      expect(observed['phase']).toBe('failed')
+      expect(observed['error']).toBe('failed to import')
+      expect(String(data['verdict'])).toContain('观测到加载失败')
+    })
+
+    it('apply 失败（state=3）→ observed failed，带上失败原因', async () => {
+      const { tool } = await observedFixture(
+        entrySnapshot({ moduleName: 'pkg-a', fiberState: FIBER_STATE.FAILED, fiberError: 'boom' }),
+      )
+
+      const data = expectOk(await run(tool, {}))
+      const observed = (data['packages'] as Record<string, unknown>[])[0]?.['observed'] as Record<
+        string,
+        unknown
+      >
+      expect(observed['phase']).toBe('failed')
+      expect(observed['error']).toBe('boom')
+      expect(observed['fiberState']).toBe(3)
+    })
+
+    it('pending（state=0）→ observed pending，带缺哪些 service', async () => {
+      const { tool } = await observedFixture(
+        entrySnapshot({
+          moduleName: 'pkg-a',
+          fiberState: FIBER_STATE.PENDING,
+          inject: ['tools', 'fs'],
+          presentServices: ['tools'],
+        }),
+      )
+
+      const data = expectOk(await run(tool, {}))
+      const observed = (data['packages'] as Record<string, unknown>[])[0]?.['observed'] as Record<
+        string,
+        unknown
+      >
+      expect(observed['phase']).toBe('pending')
+      expect(observed['missingInject']).toEqual(['fs'])
+      expect(String(data['verdict'])).toContain('仍在 pending')
+    })
+
+    it('active（state=2）→ 结论是「确实加载成功了」', async () => {
+      const { tool } = await observedFixture(
+        entrySnapshot({ moduleName: 'pkg-a', fiberState: FIBER_STATE.ACTIVE }),
+      )
+
+      const data = expectOk(await run(tool, {}))
+      const observed = (data['packages'] as Record<string, unknown>[])[0]?.['observed'] as Record<
+        string,
+        unknown
+      >
+      expect(observed['phase']).toBe('active')
+      expect(String(data['verdict'])).toContain('确实加载成功')
+    })
+
+    it('装了但树里一行都没有 → 硬证据：组合层没有它', async () => {
+      const dshHome = await tempDshHome()
+      const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
+      await writeInstalledPackage(profileDir, 'pkg-a')
+      const { spawn } = recordingSpawn(() => cmdResult({ stdout: '' }))
+      const tool = createDiagnosePluginLoadTool(
+        depsFor(configFor(dshHome), {
+          spawn,
+          // 树里有别的行，就是没有 pkg-a。
+          loader: loaderWith([entrySnapshot({ moduleName: 'other-pkg', fiberState: 2 })]),
+        }),
+      )
+
+      const data = expectOk(await run(tool, {}))
+      const observed = (data['packages'] as Record<string, unknown>[])[0]?.['observed'] as Record<
+        string,
+        unknown
+      >
+      expect(observed['matchedEntryIds']).toEqual([])
+      expect(String(observed['error'])).toContain('任何一行')
+      expect(String(data['verdict'])).toContain('Loader 树里没有这一行')
+    })
+
+    it('一个包有多行时取最坏的一档（报 active 而另一行崩了最误导）', async () => {
+      const dshHome = await tempDshHome()
+      const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
+      await writeInstalledPackage(profileDir, 'pkg-a')
+      const { spawn } = recordingSpawn(() => cmdResult({ stdout: '' }))
+      const tool = createDiagnosePluginLoadTool(
+        depsFor(configFor(dshHome), {
+          spawn,
+          loader: loaderWith([
+            entrySnapshot({ moduleName: 'pkg-a', entryId: 'a1', fiberState: 2 }),
+            entrySnapshot({ moduleName: 'pkg-a', entryId: 'a2', hasFiber: false }),
+          ]),
+        }),
+      )
+
+      const data = expectOk(await run(tool, {}))
+      const observed = (data['packages'] as Record<string, unknown>[])[0]?.['observed'] as Record<
+        string,
+        unknown
+      >
+      expect(observed['phase']).toBe('failed')
+      expect(observed['matchedEntryIds']).toEqual(['a1', 'a2'])
+    })
+
+    it('观测模式给出相位直方图（判断快照是否已稳定）', async () => {
+      const dshHome = await tempDshHome()
+      const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
+      await writeInstalledPackage(profileDir, 'pkg-a')
+      const { spawn } = recordingSpawn(() => cmdResult({ stdout: '' }))
+      const tool = createDiagnosePluginLoadTool(
+        depsFor(configFor(dshHome), {
+          spawn,
+          loader: loaderWith([
+            entrySnapshot({ moduleName: 'pkg-a', fiberState: 2 }),
+            entrySnapshot({ moduleName: 'pkg-b', fiberState: 3 }),
+            entrySnapshot({ moduleName: 'pkg-c', hasFiber: false }),
+          ]),
+        }),
+      )
+
+      const data = expectOk(await run(tool, {}))
+      const observation = data['observation'] as Record<string, unknown>
+      expect(observation['entryCount']).toBe(3)
+      expect(observation['phaseHistogram']).toEqual({ active: 1, failed: 2 })
     })
   })
 

@@ -16,6 +16,8 @@ import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools'
 
 import { fail, ok } from '../lib/errors.js'
 import { budgetFor, createDeadline } from '../lib/timeouts.js'
+import { indexByIdentifier, projectFiberPhase, worstOf, type FiberPhase } from '../lib/fiber.js'
+import type { LoaderEntrySnapshot } from '../lib/fiber.js'
 import { lookupPort, type PortLookupResult } from '../lib/ports.js'
 import {
   checkInstalledEntry,
@@ -59,6 +61,40 @@ interface PackageDiagnosis {
    * 读不到进程启动时间时为 `null`（**不是** `false`：unknown ≠ 没这回事）。
    */
   artifactNewerThanProcess: boolean | null
+  /**
+   * **观测**到的相位（只有 `observation.mode === 'observed'` 时才有值）。
+   *
+   * 与上面那些字段的关系是「观测 vs 推断」，两者**不混**：
+   * `install` / `entry` / `inBundles` 只证前置条件，这一项才回答「崩没崩」。
+   */
+  observed?: {
+    /** 命中Loader 树里的哪几行（可能 0 行 = 装了但树里没有这一行）。 */
+    matchedEntryIds: string[]
+    phase: FiberPhase
+    error?: string
+    missingInject?: string[]
+    fiberState?: number
+    basis: string
+  }
+}
+
+/** 观测的整体状态。 */
+interface ObservationBlock {
+  /** `observed` = 读到了宿主 Loader 树；`inferred` = 读不到，以下全是推断。 */
+  mode: 'observed' | 'inferred'
+  /** `inferred` 时的原因（原样展示，让人知道为什么没能观测）。 */
+  reason?: string
+  /** 一句话说明这次输出属于哪一类。 */
+  note: string
+  /** 读到的 entry 总数（`observed` 时）。 */
+  entryCount?: number
+  /**
+   * 相位直方图 —— `{"active":162,"failed":2,"null":29}` 形态。
+   *
+   * 为什么要它：单个包的相位可能因为「还没轮到挂载」而看起来正常或异常，
+   * 一眼看到整棵树的分布，才能判断这次快照是不是**稳定态**。
+   */
+  phaseHistogram?: Record<string, number>
 }
 
 /**
@@ -70,11 +106,12 @@ export function createDiagnosePluginLoadTool(deps: ToolDeps): ToolDefinition {
   return defineTool({
     name: DIAGNOSE_PLUGIN_LOAD_TOOL,
     description:
-      '查一个插件是不是真的加载了：profile 的 bundles 列表、安装形态（link/copy）、' +
-      'entry 与 patch 文件在不在、启动失败日志。' +
-      '注意：这些都只证前置条件，不证加载成功 —— Fiber 状态没有查询入口，' +
-      'inactive 从不报 FAILED。硬证据只有启动失败时才生成的 startup-*.log。' +
-      '进程按端口查，不用命令行子串。只读。',
+      '查一个插件是不是真的加载了。**首选直接观测**：读宿主 Loader 树里那一行的 fiber 相位，' +
+      '逐字复刻宿主自己的三档判定 —— fiber 不存在 = import 期就崩（failed to import）、' +
+      'state=3 = apply 崩（带失败原因）、state=0 = pending（带缺哪些 service）。' +
+      '读不到 Loader 时**自动降级**成推断：只看 bundles 列表、安装形态（link/copy）、' +
+      'entry 与 patch 在不在、启动失败日志 —— 这些只证前置条件、不证加载成功，' +
+      '降级时输出会显式标注 mode=inferred。进程按端口查，不用命令行子串。只读。',
     parameters: {
       package: {
         type: 'string',
@@ -164,19 +201,69 @@ export function createDiagnosePluginLoadTool(deps: ToolDeps): ToolDefinition {
         )
       }
 
+      // ── 观测：试着直接读宿主 Loader 树（`fiber.state`） ──────────────────────
+      // 读不到就降级成推断；**降级不是错误** —— 那是宿主内部 primitive，见 lib/fiber.ts 文件头。
+      const loader = deps.loader()
+      const index = loader.ok ? indexByIdentifier(loader.entries) : undefined
+
       const packages: PackageDiagnosis[] = []
       for (const packageName of names) {
         const install = await readInstallShape(dir, packageName)
         const entry = await checkInstalledEntry(dir, packageName)
         const startedAt = portLookup?.listeners[0]?.startedAt
-        packages.push({
+        const diagnosed: PackageDiagnosis = {
           packageName,
           inBundles: manifest.bundles.includes(packageName),
           install,
           entry,
           artifactNewerThanProcess: compareArtifactWithProcess(entry, startedAt),
-        })
+        }
+        const matched = index?.get(packageName)
+        // `worstOf` 返回 `undefined` 只对空数组 —— 上面的 `length > 0` 已经排除，
+        // 但类型上仍要收窄；收窄失败时走「一行都没匹配上」那条路更安全。
+        const worst = matched === undefined ? undefined : worstOf(matched)
+        if (matched !== undefined && worst !== undefined) {
+          // 一个包在树里可能不止一行（宿主自己有 `…/tools` 这种子路径行）。
+          // 取「最坏的那一档」：只要有一行崩了，这个包就没在正常工作。
+          // 严重级与 tie-break 都在 `lib/fiber.ts` 的 `worstOf` 里，这里不重排。
+          diagnosed.observed = {
+            matchedEntryIds: matched.map((row) => row.entry.entryId),
+            phase: worst.observation.phase,
+            ...(worst.observation.error === undefined ? {} : { error: worst.observation.error }),
+            ...(worst.observation.missingInject === undefined
+              ? {}
+              : { missingInject: worst.observation.missingInject }),
+            ...(worst.observation.fiberState === undefined
+              ? {}
+              : { fiberState: worst.observation.fiberState }),
+            basis: worst.observation.basis,
+          }
+        } else if (index !== undefined) {
+          // 读到了树、但这个包一行都没有 —— 本身就是硬证据：它没进树。
+          diagnosed.observed = {
+            matchedEntryIds: [],
+            phase: 'failed',
+            error: '包在 Loader 树里没有任何一行',
+            basis: 'Loader 树读到了，但这个包名/模块名一行都没匹配上 —— 组合层没有它',
+          }
+        }
+        packages.push(diagnosed)
       }
+
+      const observation: ObservationBlock = loader.ok
+        ? {
+            mode: 'observed',
+            note: '以下相位是从宿主 Loader 树**直接观测**到的（同一个 primitive 宿主启动审计在用）',
+            entryCount: loader.entries.length,
+            phaseHistogram: histogram(loader.entries),
+          }
+        : {
+            mode: 'inferred',
+            ...(loader.reason === undefined ? {} : { reason: loader.reason }),
+            note:
+              '**未能直接观测，以下为推断**：读不到宿主 Loader 树，所以「插件崩没崩」只能靠' +
+              ' bundles 列表 / 安装形态 / entry 存在 这些**前置条件**反推 —— 它们都不能证明加载成功。',
+          }
 
       const startupLogs: StartupLog[] = await listStartupLogs(dshHome)
 
@@ -189,6 +276,12 @@ export function createDiagnosePluginLoadTool(deps: ToolDeps): ToolDefinition {
          * 而用户以为读的是另一个，正是这类工具最坏的一种失败。
          */
         resolved: effectiveConfig(deps.config, resolvedPort),
+        /**
+         * **本次输出是观测还是推断** —— 这个字段必须放在最显眼处。
+         * 观测与推断的置信度完全不同：前者能说「它 import 期就崩了」，
+         * 后者只能说「三处前置条件都在」。混在一起看会让人高估后者。
+         */
+        observation,
         bundles: manifest.bundles,
         bundleCount: manifest.bundles.length,
         packages,
@@ -199,10 +292,13 @@ export function createDiagnosePluginLoadTool(deps: ToolDeps): ToolDefinition {
           startupLogs.length === 0
             ? '没有 startup-*.log —— 这是好消息：它们只在**启动失败**时生成，不是常驻日志'
             : `有 ${String(startupLogs.length)} 份启动失败日志（按时间倒序），最新一份值得整篇读`,
-        loadProofCaveat:
-          'bundles 列表 / 安装形态 / entry 存在 都只证**前置条件**，不证加载成功：' +
-          'Fiber 状态没有查询入口，Config 的 inactive 混合了「禁用/未导入/已销毁」且从不报 FAILED。' +
-          '要硬证据就看 startup-*.log，或查该插件应有的注册面（工具 / slot / 服务）在不在。',
+        loadProofCaveat: loader.ok
+          ? '相位是从宿主 Loader 树直接观测的（`entry.fiber.state`，宿主启动审计用的同一个 primitive）。' +
+            '但它**不是公开 API**、且只在树稳定后成立：热重载/刚 patch 进来的行可能仍在挂载中，' +
+            '那时 `fiber` 尚不存在、会被读成 import 失败。看 phaseHistogram 判断快照是否已稳定。'
+          : 'bundles 列表 / 安装形态 / entry 存在 都只证**前置条件**，不证加载成功：' +
+            'Config 的 inactive 混合了「禁用/未导入/已销毁」且从不报 FAILED。' +
+            '要硬证据就看 startup-*.log，或查该插件应有的注册面（工具 / slot / 服务）在不在。',
       }
 
       const missingEntries = packages.filter((item) => !item.entry.entryExists)
@@ -226,16 +322,107 @@ export function createDiagnosePluginLoadTool(deps: ToolDeps): ToolDefinition {
       }
 
       const stale = packages.filter((item) => item.artifactNewerThanProcess === true)
-      return toOutput(
-        ok(data, {
-          why:
-            stale.length > 0
-              ? `产物比进程新：${stale.map((item) => item.packageName).join(', ')} —— 宿主端跑的是旧产物，改完代码没重启`
-              : '三处前置条件都满足；若行为仍不对，读 startup 日志或查注册面',
-        }),
+
+      // 观测到的结论分成三类。**注意这里仍然返回 `ok: true`**：
+      // 工具**诊断成功**了 —— 否则按失败分支返回会把 observation / packages 这些
+      // 证据一起丢掉（失败分支没有 data 槽）。结论放进 verdict，并让 nextStep 领走。
+      const failed = observedWith(packages, 'failed').filter(
+        (item) => item.observed?.matchedEntryIds.length !== 0,
       )
+      const absent = packages.filter((item) => item.observed?.matchedEntryIds.length === 0)
+      const pending = observedWith(packages, 'pending')
+
+      const verdict = buildVerdict({ loader, failed, absent, pending, stale })
+
+      return toOutput(ok({ ...data, verdict }, { why: verdict }))
     },
   })
+}
+
+/**
+ * 挑出观测相位等于给定值、且**真命中了树里的行**的包。
+ *
+ * @param packages 全部诊断条目。
+ * @param phase 目标相位。
+ */
+function observedWith(
+  packages: readonly PackageDiagnosis[],
+  phase: FiberPhase,
+): PackageDiagnosis[] {
+  return packages.filter((item) => item.observed?.phase === phase)
+}
+
+/**
+ * 拼一句结论（也是 nextStep 的 why）。
+ *
+ * 优先级按「用户下一步要做什么」排：崩了最重要，其次没进树，再次 pending，
+ * 最后才是「三处前置条件都在」这种弱结论。
+ *
+ * @param input 各档命中的包。
+ */
+function buildVerdict(input: {
+  loader: { ok: boolean }
+  failed: readonly PackageDiagnosis[]
+  absent: readonly PackageDiagnosis[]
+  pending: readonly PackageDiagnosis[]
+  stale: readonly PackageDiagnosis[]
+}): string {
+  if (!input.loader.ok) {
+    return (
+      '未能直接观测 Loader 树，以下为**推断**：' +
+      '三处前置条件（bundles / 安装形态 / entry 文件）只证「有可能加载」，不证加载成功'
+    )
+  }
+  const parts: string[] = []
+  if (input.failed.length > 0) {
+    const detail = input.failed
+      .map((item) => `${item.packageName}（${item.observed?.error ?? '原因未取到'}）`)
+      .join('；')
+    parts.push(`**观测到加载失败**：${detail}`)
+  }
+  if (input.absent.length > 0) {
+    parts.push(
+      `**装了但 Loader 树里没有这一行**：${input.absent.map((item) => item.packageName).join('、')}` +
+        '（组合层没它 —— 查 bundles 有没有进、patch 有没有被后层整行替换）',
+    )
+  }
+  if (input.pending.length > 0) {
+    const detail = input.pending
+      .map((item) => {
+        const missing = item.observed?.missingInject ?? []
+        return `${item.packageName}（等 ${missing.length === 0 ? '挂载' : missing.join(', ')}）`
+      })
+      .join('；')
+    parts.push(`**仍在 pending**：${detail}`)
+  }
+  if (input.stale.length > 0 && parts.length === 0) {
+    parts.push(
+      `产物比进程新：${input.stale.map((item) => item.packageName).join('、')} —— 宿主端跑的是旧产物，改完代码没重启`,
+    )
+  }
+  if (parts.length === 0) {
+    return '观测到这些行都是 active：插件确实加载成功了，问题不在「有没有加载」这一层'
+  }
+  return parts.join('。')
+}
+
+/**
+ * 算相位直方图。
+ *
+ * 用的是本仓的**判定结果**（`failed` / `pending` / `active` / `disabled` / `unknown`），
+ * 不是宿主那张 `FIBER_PHASE` 表 —— 后者的 `fiber === undefined` 会得到 `null`，
+ * 恰恰把「import 期就崩」这一类抹平成「看不出来」。这里宁可把它单独记成 `failed`，
+ * 再配合 `entryCount` 让人判断快照是不是稳定态。
+ *
+ * @param entries entry 快照。
+ */
+function histogram(entries: readonly LoaderEntrySnapshot[]): Record<string, number> {
+  const result: Record<string, number> = {}
+  for (const entry of entries) {
+    const key = projectFiberPhase(entry).phase
+    result[key] = (result[key] ?? 0) + 1
+  }
+  return result
 }
 
 /**

@@ -49,7 +49,11 @@ git diff --check
 
 - [ ] v1.1：`dsh_hot_reload`（前置门：profile 里真的挂了 `hmr`）与 `dsh_restart`
       （先 dry-run；`danger-full-access` 档下 `ask` 会被确定性拒绝，语义要先定）
-- [ ] 技能注册的运行时判据：在隔离实例上证明「本插件的 250 压过用户级 500、让位于项目级 100/200」
+- [ ] **技能压过用户级同名技能**：S2 实测已推翻「250 天然赢」的旧说法（用户级技能在 **preset 层**、
+      更近，跨层直接遮蔽全局层的 runtime 注册）。当前方向：按官方机制把本插件行挂进 preset 层
+      （override `preset-standard`），**先做实验证实再改 `cordis.patch.yml`**。
+- [ ] `SKILL.md` §3.8 的「Fiber 级状态没有查询入口」已被证伪（见活跃坑 19）；正文是逐字复制的
+      v2.1.4 本体，**修正与否待用户拍板**。
 
 ## 活跃坑
 
@@ -113,3 +117,20 @@ git diff --check
 18. **判据的「假绿」要自己探**：本仓红线曾有三处确认的假绿（引号形态、fs 写入枚举、
     提取失败静默 `skip`）。**最危险的是 skip** —— GitHub 把 skipped 当 Success，
     所以「文件在但提不出任何名字」必须**判红**，不能当成「尚未实现」而跳过。
+19. **「Fiber 级状态没有查询入口」是错的**（`SKILL.md` §3.8 的前半句，已实测证伪）。
+    插件侧可以直接观测：`ctx.get('loader')` **无需声明 inject** 就可见、`loader.entries()` 可枚举，
+    `entry.fiber.state` 实测 **`2`=active / `3`=apply 失败（还能读到 `fiber._error`）/ `0`=pending**。
+    ⚠️ **最凶的一种要单独处理：import 期就失败的 entry，`entry.fiber` 是 `undefined`**
+    （宿主自己把它归为 `failed to import`，而 `fiberPhase` 报 `null`）—— 只看 `state===3` 会漏掉它。
+    **不要去 `import '@deepseek-ai/dsh-host-plugin-inventory'`**：实测 `ERR_MODULE_NOT_FOUND`
+    （插件在 profile 的 `node_modules`，解析不到宿主内层，十条搜索路径都没有）；自己用
+    `loader.entries()` 投影几行即可（官方那个函数本体也是这么写的）。
+20. **别用「拒绝数组」的 helper 去取 `Symbol.iterator`**：`loader.entries()` 返回的**就是数组**，
+    这类 helper 会把数组判成非法 → **每棵树都读出空**，表现得像「宿主没有任何 entry」。
+    这是最坏形态的静默错（结论完全错、却不报错）。本仓 `src/lib/fiber.ts` 第一版踩过。
+21. **读 `fiber._error` 时不要 `await fiber.await()`**：宿主的启动审计会 await，但**工具调用不能挂在一个
+    可能永不 settle 的 fiber 上** —— 那会让「传输层先超时、再转结构化错误」这条纪律失效（工具永不返回）。
+    只读已同步可见的字段。本仓用一条 `awaited` 标志的测试钉住这一点。
+22. **同一棵树两次读不许给出不同结论**：投影里凡涉及「多行同包」的取值，定序必须写死
+    （本仓 `worstOf`：严重级 failed>pending>unknown>disabled>active，同级按 `entryId` tie-break），
+    否则「哪一行浮上来」会随遍历顺序漂，看起来像随机故障。

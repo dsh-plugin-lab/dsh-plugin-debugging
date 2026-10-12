@@ -24,6 +24,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 
 import type { PluginState } from '../contracts.js'
+import { readLoaderEntries, loaderFrom } from '../lib/loader.js'
 import { createCheckAuthTool } from './dsh_check_auth.js'
 import { createDiagnosePluginLoadTool } from './dsh_diagnose_plugin_load.js'
 import { createDumpConfigTool } from './dsh_dump_config.js'
@@ -39,7 +40,13 @@ import { createToolDeps } from './shared.js'
 export function registerTools(ctx: Context, state: PluginState): void {
   if (ctx.tools === undefined) return
 
-  const deps = createToolDeps(state.config)
+  // Loader 观测的**唯一一处**绑定：把活着的 `ctx` 收成一个只读闭包。
+  // 闭包在每次调用时重新读树（宿主自己也是「每次调用直接读，不另建缓存」——
+  // `dsh-host-plugin-inventory\lib\index.js:100-114` 的注释就是这个理由），
+  // 所以热重载后的相位变化不会因为我们缓存而失真。
+  const deps = createToolDeps(state.config, {
+    loader: () => readLoaderEntries(loaderFrom(ctx)),
+  })
   const factories = [
     createEffectModeTool,
     createDiagnosePluginLoadTool,
