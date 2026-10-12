@@ -40,6 +40,8 @@ The underlying model is one sentence: *an artifact is read at a particular momen
 
 It also ships a skill (`dsh-plugin-debugging`) carrying the full troubleshooting knowledge — the "why" behind each check, the three live-effect tiers, the installation forms, credential acquisition, process identification, and isolated instances. The tools are accelerators for it; where they are ambiguous, the skill text wins.
 
+The skill is registered **into the active agent's own scope**, so a same-name copy you keep in a user-level skills directory does not shadow it. (Project-level skills still win, deliberately: a project's own rules should outrank any plugin.)
+
 **v1 is read-only on purpose.** Nothing here restarts a process, rewrites a profile, or writes to `DSH_HOME`. Restart and hot-reload helpers are deliberately deferred: they are the only actions that can kill the host you are debugging, and their approval, cooldown, and failure-recovery semantics need to be settled first.
 
 ## Platform support
