@@ -52,7 +52,7 @@ describe('dsh_check_auth', () => {
 
       const data = expectOk(await run(tool, { port: 3080 }))
       expect(data['authority']).toBe('127.0.0.1:3080')
-      expect(data['verdict']).toBe('服务在、认证通过')
+      expect(data['verdict']).toBe('service is up; authentication passed')
       expect((data['probe'] as Record<string, unknown>)['status']).toBe(200)
       // 端口是参数给的 —— 来源必须可见（参数 / 配置 / env 会给不同 authority）。
       const resolved = data['resolved'] as Record<string, unknown>
@@ -77,7 +77,7 @@ describe('dsh_check_auth', () => {
       const tool = createCheckAuthTool(depsFor(configFor(dshHome), { fetch: fetchWithStatus(500) }))
 
       const data = expectOk(await run(tool, { port: 3080 }))
-      expect(data['verdict']).toContain('服务在')
+      expect(data['verdict']).toContain('service is up')
       expect((data['probe'] as Record<string, unknown>)['kind']).toBe('http-error')
     })
 
@@ -124,7 +124,7 @@ describe('dsh_check_auth', () => {
       expect(error.kind).toBe('auth')
       expect(TOOL_ERROR_KINDS).toContain(error.kind)
       expect(error.message).toContain('401')
-      expect(error.message).toContain('不是没启动')
+      expect(error.message).toContain('not "not running"')
     })
 
     it('not-running：ECONNREFUSED —— 宿主没启动（本工具的核心区分之二）', async () => {
@@ -133,7 +133,7 @@ describe('dsh_check_auth', () => {
 
       const error = expectFail(await run(tool, { port: 3080 }))
       expect(error.kind).toBe('not-running')
-      expect(error.hint).toContain('没在监听')
+      expect(error.hint).toContain('not listening')
     })
 
     it('not-configured：定不出端口', async () => {
@@ -168,7 +168,7 @@ describe('dsh_check_auth', () => {
 
       const error = expectFail(await run(tool, { port: 3080 }))
       expect(error.kind).toBe('timeout')
-      expect(error.message).toContain('超时')
+      expect(error.message).toContain('timed out')
     })
   })
 

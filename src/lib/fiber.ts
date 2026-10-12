@@ -134,17 +134,17 @@ export function projectFiberPhase(entry: LoaderEntrySnapshot): FiberObservation 
     return {
       phase: 'failed',
       error: entry.disabledExpressionError,
-      basis: 'disabled 表达式求值抛错（宿主标 phase: "disabled expression failed"）',
+      basis: 'the disabled expression threw (the host labels this phase: "disabled expression failed")',
     }
   }
   if (entry.disabled) {
-    return { phase: 'disabled', basis: 'entry.disabled 为真 —— 宿主直接跳过，不算失败' }
+    return { phase: 'disabled', basis: 'entry.disabled is true — the host skips it and does not count it as a failure' }
   }
   if (!entry.hasFiber) {
     return {
       phase: 'failed',
       error: 'failed to import',
-      basis: 'entry.fiber === undefined —— 模块加载期就失败（注意：挂载进行中也会如此，见文件头边界）',
+      basis: 'entry.fiber === undefined — the module failed at import time (note: mounting in progress looks the same; see the boundary note at the top of this file)',
     }
   }
 
@@ -159,8 +159,8 @@ export function projectFiberPhase(entry: LoaderEntrySnapshot): FiberObservation 
       fiberState: state,
       basis:
         entry.fiberError === undefined
-          ? 'fiber.state === 3 (FAILED)，但没能取到失败原因'
-          : 'fiber.state === 3 (FAILED)，原因取自 fiber 自身的记录',
+          ? 'fiber.state === 3 (FAILED), but the failure reason could not be read'
+          : 'fiber.state === 3 (FAILED); reason read from the fiber record',
     }
   }
   if (state === FIBER_STATE.PENDING) {
@@ -171,15 +171,15 @@ export function projectFiberPhase(entry: LoaderEntrySnapshot): FiberObservation 
       fiberState: state,
       basis:
         missingInject.length === 0
-          ? 'fiber.state === 0 (PENDING)，且声明的 service 都在 —— 挂载尚未轮到它'
-          : `fiber.state === 0 (PENDING)，等 service：${missingInject.join(', ')}`,
+          ? 'fiber.state === 0 (PENDING) and all declared services are present — it has not been mounted yet'
+          : `fiber.state === 0 (PENDING), waiting for services: ${missingInject.join(', ')}`,
     }
   }
   return {
     phase: 'failed',
     ...(state === undefined ? {} : { fiberState: state }),
     error: `fiber state ${String(state)}`,
-    basis: '既非 ACTIVE / FAILED / PENDING —— 与宿主一样按失败处理（loading / disposed / unloading 会走到这里）',
+    basis: 'Not ACTIVE / FAILED / PENDING — treated as a failure, same as the host (loading / disposed / unloading land here)',
   }
 }
 

@@ -115,8 +115,8 @@ export function ensureToolResult(value: unknown): ToolResult<unknown> {
 function malformedResult(value: unknown): ToolFail {
   return fail({
     kind: 'internal',
-    message: `工具返回值形状不合法：${describe(value)}`,
-    hint: '这是本插件的 bug；请把这条 message 原样带回',
+    message: `Tool result has an invalid shape: ${describe(value)}`,
+    hint: 'This is a bug in this plugin; report this message verbatim',
   })
 }
 
@@ -186,23 +186,23 @@ export function toToolError(error: unknown, context: string): ToolError {
   if (error instanceof Error && error.name === 'TimeoutError') {
     return {
       kind: 'timeout',
-      message: `${context} 超时`,
-      hint: '传输层已先超时，可原样重试；持续超时就把 timeoutMs 调大',
+      message: `${context} timed out`,
+      hint: 'The transport layer timed out first; retry as-is, or raise timeoutMs if it keeps timing out',
     }
   }
   const code = systemErrorCode(error)
   if (code === 'ECONNREFUSED' || code === 'ECONNRESET' || code === 'ENOTFOUND') {
     return {
       kind: 'not-running',
-      message: `${context} 时连不上目标：${code}`,
-      hint: '按端口确认宿主是否在监听；端口变了要用新端口',
+      message: `${context}: cannot reach the target (${code})`,
+      hint: 'Check whether the host is listening on that port; if the port changed, use the new one',
     }
   }
   const message = error instanceof Error ? error.message : String(error)
   return {
     kind: 'internal',
-    message: `${context} 失败：${message}`,
-    hint: '这是本插件的意外路径；把 message 原文带回，必要时查 startup 日志',
+    message: `${context} failed: ${message}`,
+    hint: 'This is an unexpected path in this plugin; report the message verbatim and check the startup logs if needed',
   }
 }
 

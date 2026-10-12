@@ -103,7 +103,9 @@ describe('dsh_dump_config', () => {
 
       const data = expectOk(await run(tool, {}))
       expect((data['diagnostics'] as unknown[]).length).toBe(0)
-      expect((data['exitCodeSemantics'] as Record<string, string>)['configDump']).toContain('恒 0')
+      expect((data['exitCodeSemantics'] as Record<string, string>)['configDump']).toContain(
+        'always exits 0',
+      )
       expect((data['configDump'] as Record<string, unknown>)['entryCount']).toBe(183)
       // 「我 dump 的是哪个 profile」是这份输出的前提 —— 必须摊开。
       const resolved = data['resolved'] as Record<string, unknown>
@@ -146,7 +148,7 @@ describe('dsh_dump_config', () => {
       // 有组合期错 → 不该报成功（退出码是 0，所以只能靠 stderr）。
       const error = expectFail(result)
       expect(error.kind).toBe('command-failed')
-      expect(error.message).toContain('组合期错')
+      expect(error.message).toContain('composition error')
       expect(error.message).toContain('skipping')
     })
 
@@ -226,7 +228,8 @@ describe('dsh_dump_config', () => {
 
       const error = expectFail(await run(tool, {}))
       expect(error.kind).toBe('command-failed')
-      expect(error.message).toContain('恒 0')
+      // 断言的是**这条**消息里的措辞（不是 exitCodeSemantics 那句 "always exits 0"）。
+      expect(error.message).toContain('the contract is always 0')
     })
 
     it('command-failed：--dump-config-schema 退出码不在 {0,1} 内', async () => {

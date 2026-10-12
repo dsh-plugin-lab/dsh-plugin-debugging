@@ -190,13 +190,13 @@ async function probeHmrFor(
       failure: fail(
         {
           kind: 'timeout',
-          message: '探测 hmr 时预算已耗尽，未能复核',
-          hint: '调大 timeoutMs 后重试；或先调 dsh_dump_config 看 id: hmr 在不在',
+          message: 'the budget ran out while probing hmr, so it could not be verified',
+          hint: 'raise timeoutMs and retry, or call dsh_dump_config first to check whether the id: hmr row exists',
         },
         {
           tool: 'dsh_dump_config',
           args: { profile: deps.config.profile },
-          why: '用它一次拿到组合树，确认 hmr 行',
+          why: 'use it to get the composed tree in one call and confirm the hmr row',
         },
       ),
     }
@@ -214,10 +214,10 @@ async function probeHmrFor(
       failure: fail(
         {
           kind: 'cancelled',
-          message: '调用方取消了这次执行',
-          hint: '不要自动重试；这是调用方主动放弃',
+          message: 'the caller cancelled this execution',
+          hint: 'do not retry automatically; the caller gave up on purpose',
         },
-        { why: '取消是调用方的决定，重试同一个调用没有意义' },
+        { why: 'cancellation is up to the caller; retrying the same call is pointless' },
       ),
     }
   }
@@ -227,13 +227,14 @@ async function probeHmrFor(
       failure: fail(
         {
           kind: 'timeout',
-          message: '复核 hmr 时 dump-config 超时（传输层先于工具预算超时）',
-          hint: '先跑 dsh_dump_config 把组合树拿到手，再手工确认有没有 id: hmr',
+          message:
+            'dump-config timed out while verifying hmr (the transport layer timed out first, before the tool budget)',
+          hint: 'run dsh_dump_config to get the composed tree, then confirm manually whether an id: hmr row exists',
         },
         {
           tool: 'dsh_dump_config',
           args: { profile: deps.config.profile },
-          why: '拿到组合树后自己看 hmr 行',
+          why: 'read the hmr row from the composed tree',
         },
       ),
     }
@@ -246,12 +247,16 @@ async function probeHmrFor(
       failure: fail(
         {
           kind: notFound ? 'not-configured' : 'internal',
-          message: `起不了 dsh：${dump.spawnError}`,
+          message: `cannot start dsh: ${dump.spawnError}`,
           hint: notFound
-            ? '确认 PATH 上有 dsh，或本插件与宿主跑在同一个 node 上'
-            : '把 message 原文带回；这是本插件的意外路径',
+            ? 'make sure dsh is on PATH, or that this plugin runs on the same node as the host'
+            : 'report the message verbatim; this is an unexpected path in this plugin',
         },
-        { tool: 'dsh_dump_config', args: { profile: deps.config.profile }, why: '用它复核组合树' },
+        {
+          tool: 'dsh_dump_config',
+          args: { profile: deps.config.profile },
+          why: 'use it to verify the composed tree',
+        },
       ),
     }
   }

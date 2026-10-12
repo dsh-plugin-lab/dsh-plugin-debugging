@@ -62,21 +62,21 @@ export function loaderFrom(ctx: unknown): unknown {
  */
 export function readLoaderEntries(loader: unknown): LoaderReadResult {
   if (loader === undefined || loader === null) {
-    return { ok: false, reason: '宿主没有 loader 服务（ctx.get(\'loader\') 是空的）', entries: [] }
+    return { ok: false, reason: 'the host has no loader service (ctx.get(\'loader\') returned nothing)', entries: [] }
   }
   const entriesFn = asFunction(asRecord(loader)?.['entries'])
   if (entriesFn === undefined) {
-    return { ok: false, reason: 'loader 服务上没有 entries() —— 宿主内部结构变了', entries: [] }
+    return { ok: false, reason: 'the loader service has no entries() — the host structure changed', entries: [] }
   }
 
   let raw: unknown
   try {
     raw = entriesFn.call(loader)
   } catch (error) {
-    return { ok: false, reason: `调用 loader.entries() 抛错：${messageOf(error)}`, entries: [] }
+    return { ok: false, reason: `loader.entries() threw: ${messageOf(error)}`, entries: [] }
   }
   if (raw === undefined || raw === null) {
-    return { ok: false, reason: 'loader.entries() 返回空值', entries: [] }
+    return { ok: false, reason: 'loader.entries() returned nothing', entries: [] }
   }
 
   const snapshots: LoaderEntrySnapshot[] = []

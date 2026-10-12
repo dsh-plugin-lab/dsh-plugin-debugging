@@ -247,15 +247,15 @@ export async function detectHmrFromProfileFiles(dir: string): Promise<HmrFilePro
   const manifest = await readProfileManifest(dir)
   if (manifest !== undefined) {
     const fromBundles = manifest.bundles.filter((name) => name.includes('hmr'))
-    for (const name of fromBundles) evidence.push(`dsh.profile.bundles 含 ${name}`)
+    for (const name of fromBundles) evidence.push(`dsh.profile.bundles contains ${name}`)
     if (fromBundles.length > 0) return { present: true, evidence }
     const fromDeps = Object.keys(manifest.dependencies).filter((name) => name.includes('hmr'))
-    for (const name of fromDeps) evidence.push(`dependencies 含 ${name}`)
+    for (const name of fromDeps) evidence.push(`dependencies contains ${name}`)
     if (fromDeps.length > 0) return { present: true, evidence }
   }
   const installed = await exists(join(dir, 'node_modules', ...HMR_PACKAGE.split('/')))
   if (installed) {
-    evidence.push(`node_modules 里装着 ${HMR_PACKAGE}`)
+    evidence.push(`${HMR_PACKAGE} is present in node_modules`)
     return { present: true, evidence }
   }
   return { present: false, evidence }

@@ -43,7 +43,7 @@ export interface ToolDeps {
 export function unavailableLoader(): LoaderReadResult {
   return {
     ok: false,
-    reason: '本次调用没有接到宿主上下文，读不到 loader 服务',
+    reason: 'this call has no host context, so the loader service cannot be read',
     entries: [],
   }
 }
@@ -248,9 +248,12 @@ export function assertResolvedDshHome(config: ResolvedConfig): ToolFail | undefi
   return fail(
     {
       kind: 'internal',
-      message: 'ResolvedConfig.dshHome 是空串 —— 契约要求 resolveConfig 做完三级兜底',
-      hint: '这是本插件的 bug，不是配置问题；请把这条 message 原样带回',
+      message:
+        'ResolvedConfig.dshHome is an empty string — the contract requires resolveConfig to finish its three-level fallback',
+      hint: 'this is a bug in this plugin, not a configuration problem; report this message verbatim',
     },
-    { why: '拿空路径继续读文件会得到「看着正常其实读错目录」的结论' },
+    {
+      why: 'continuing with an empty path would read files and produce conclusions that look fine but came from the wrong directory',
+    },
   )
 }

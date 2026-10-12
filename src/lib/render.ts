@@ -127,5 +127,5 @@ function stableJson(value: unknown): string {
  */
 function truncate(text: string): string {
   if (text.length <= RENDER_MAX_CHARS) return text
-  return `${text.slice(0, RENDER_MAX_CHARS)}\n…（输出被截断，完整内容见 data 字段的结构化部分）`
+  return `${text.slice(0, RENDER_MAX_CHARS)}\n… (output truncated; see the structured data field for the full value)`
 }

@@ -204,7 +204,7 @@ describe('dsh_check_effect_mode', () => {
 
       const error = expectFail(await run(tool, { change: 'config' }))
       expect(error.kind).toBe('timeout')
-      expect(error.message).toContain('超时')
+      expect(error.message).toContain('timed out')
     })
 
     it('cancelled：调用方取消', async () => {
@@ -215,7 +215,7 @@ describe('dsh_check_effect_mode', () => {
 
       const error = expectFail(await run(tool, { change: 'config' }))
       expect(error.kind).toBe('cancelled')
-      expect(error.hint).toContain('不要自动重试')
+      expect(error.hint).toContain('do not retry automatically')
     })
 
     it('not-configured：起不了 dsh（ENOENT）', async () => {

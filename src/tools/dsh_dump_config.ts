@@ -118,8 +118,9 @@ export function createDumpConfigTool(deps: ToolDeps): ToolDefinition {
          */
         resolved: effectiveConfig(deps.config, 'not-used', profile),
         exitCodeSemantics: {
-          configDump: '--dump-config 退出码恒 0，不做 schema 校验 —— 不能当门禁',
-          schemaDump: '--dump-config-schema 退出码 1 = 有 error',
+          configDump:
+            '--dump-config always exits 0 and does not run schema validation — it cannot be used as a gate',
+          schemaDump: '--dump-config-schema exits 1 = there are errors',
         },
         configDump: {
           exitCode: configDump.exitCode,
@@ -150,16 +151,16 @@ export function createDumpConfigTool(deps: ToolDeps): ToolDefinition {
               kind: 'command-failed',
               message:
                 composition.length > 0
-                  ? `组合期错 ${String(composition.length)} 条：有 patch 行被 skipping 整条丢弃（退出码仍是 0）`
-                  : `--dump-config-schema 报了 ${String(actionable.length)} 条该管的 error`,
+                  ? `${String(composition.length)} composition error(s): patch rows were dropped by skipping (the exit code is still 0)`
+                  : `--dump-config-schema reported ${String(actionable.length)} error(s) that need attention`,
               hint:
-                '先看 actionable 里每条 error 的 entryId / path：指向你改过的行就是真问题；' +
-                '组合期错那几条会让该行**整条消失**，插件表现为「装了没启用」',
+                'For each error in actionable, check entryId / path: if it points at a row you changed it is a real problem; ' +
+                'composition errors make that row **disappear entirely**, which looks like "installed but not enabled"',
             },
             {
               tool: DUMP_CONFIG_TOOL,
               args: { profile },
-              why: '改完配置后再跑一次，确认 actionable 归零',
+              why: 'after fixing the config, run it again and confirm actionable is empty',
             },
           ),
         )
@@ -169,10 +170,10 @@ export function createDumpConfigTool(deps: ToolDeps): ToolDefinition {
         ok(data, {
           why:
             actionable.length === 0 && hasSchemaErrors
-              ? '退出码 1 但 error 全部落在 preset 行上（已知误报）—— 你改的行没问题'
+              ? 'exit code 1, but every error lands on a preset row (a known false positive) — the rows you changed are fine'
               : actionable.length === 0
-                ? '两种 dump 都没有指向你改动的 error；配置组合层可以排除'
-                : '有该管的 error，看 actionable 的 entryId 定位到具体那一行',
+                ? 'neither dump has an error pointing at your changes; the config composition layer can be ruled out'
+                : 'there are errors needing attention; use the entryId in actionable to locate the exact row',
         }),
       )
     },
@@ -193,20 +194,20 @@ function invocationFailure(
     return fail(
       {
         kind: 'cancelled',
-        message: '调用方取消了这次执行',
-        hint: '不要自动重试；这是调用方主动放弃',
+        message: 'the caller cancelled this execution',
+        hint: 'do not retry automatically; the caller gave up on purpose',
       },
-      { why: '取消是调用方的决定，重试同一个调用没有意义' },
+      { why: 'cancellation is up to the caller; retrying the same call is pointless' },
     )
   }
   if (invocation.timedOut) {
     return fail(
       {
         kind: 'timeout',
-        message: `${invocation.flag} 超时（传输层先于工具预算超时）`,
-        hint: '调大 timeoutMs 后重试；dump-config-schema 在本机有 3 万余行输出，慢是正常的',
+        message: `${invocation.flag} timed out (the transport layer timed out first, before the tool budget)`,
+        hint: 'raise timeoutMs and retry; dump-config-schema emits 30k+ lines on this machine, so it is slow by nature',
       },
-      { tool: DUMP_CONFIG_TOOL, args: { profile }, why: '原样重试一次' },
+      { tool: DUMP_CONFIG_TOOL, args: { profile }, why: 'retry once as-is' },
     )
   }
   if (invocation.spawnError !== undefined) {
@@ -214,12 +215,12 @@ function invocationFailure(
     return fail(
       {
         kind: notFound ? 'not-configured' : 'internal',
-        message: `起不了 dsh：${invocation.spawnError}`,
+        message: `cannot start dsh: ${invocation.spawnError}`,
         hint: notFound
-          ? '确认宿主进程可用（PATH 上有 dsh，或本插件与宿主同一个 node）'
-          : '把 message 原文带回；这是本插件的意外路径',
+          ? 'make sure dsh is runnable (on PATH, or this plugin running on the same node as the host)'
+          : 'report the message verbatim; this is an unexpected path in this plugin',
       },
-      { why: '拿不到 dump 输出，后面的判断都没有依据' },
+      { why: 'without dump output there is no basis for any further judgement' },
     )
   }
   if (invocation.flag === '--dump-config' && invocation.exitCode !== 0) {
@@ -227,10 +228,12 @@ function invocationFailure(
     return fail(
       {
         kind: 'command-failed',
-        message: `--dump-config 意外地以退出码 ${String(invocation.exitCode)} 结束（契约是恒 0）`,
-        hint: '看 stderr 原文；这不是本工具能解释的形态',
+        message: `--dump-config unexpectedly exited with code ${String(invocation.exitCode)} (the contract is always 0)`,
+        hint: 'read the raw stderr; this tool cannot explain this shape',
       },
-      { why: '退出码语义与契约不符，先弄清这个再谈配置' },
+      {
+        why: 'the exit-code semantics do not match the contract; settle that before looking at the config',
+      },
     )
   }
   if (
@@ -241,10 +244,12 @@ function invocationFailure(
     return fail(
       {
         kind: 'command-failed',
-        message: `--dump-config-schema 以退出码 ${String(invocation.exitCode)} 结束（契约只有 0 与 1）`,
-        hint: '看 stderr 原文；这不是本工具能解释的形态',
+        message: `--dump-config-schema exited with code ${String(invocation.exitCode)} (the contract only allows 0 and 1)`,
+        hint: 'read the raw stderr; this tool cannot explain this shape',
       },
-      { why: '退出码语义与契约不符，先弄清这个再谈配置' },
+      {
+        why: 'the exit-code semantics do not match the contract; settle that before looking at the config',
+      },
     )
   }
   return undefined

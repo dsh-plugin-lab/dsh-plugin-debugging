@@ -89,11 +89,11 @@ describe('dsh_diagnose_plugin_load', () => {
       const observation = data['observation'] as Record<string, unknown>
       expect(observation['mode']).toBe('inferred')
       // 这是要求②的核心：读不到时必须**在输出里标注**，不能默默给推断结论。
-      expect(String(observation['note'])).toContain('未能直接观测')
-      expect(String(observation['note'])).toContain('推断')
+      expect(String(observation['note'])).toContain('Could not observe directly')
+      expect(String(observation['note'])).toContain('inferred')
       // 降级时不给 per-package 的观测字段 —— 推断的东西不许混进观测字段。
       expect((data['packages'] as Record<string, unknown>[])[0]?.['observed']).toBeUndefined()
-      expect(String(data['verdict'])).toContain('推断')
+      expect(String(data['verdict'])).toContain('inferred')
     })
 
     it('link 形态被认出来（D:/repo 是 junction 的目标）', async () => {
@@ -123,7 +123,7 @@ describe('dsh_diagnose_plugin_load', () => {
 
       const data = expectOk(await run(tool, {}))
       expect(data['startupLogs']).toEqual([])
-      expect(String(data['startupLogsNote'])).toContain('只在**启动失败**时生成')
+      expect(String(data['startupLogsNote'])).toContain('only written when **startup fails**')
     })
 
     it('有 startup 日志时列出来（按时间倒序）', async () => {
@@ -299,7 +299,7 @@ describe('dsh_diagnose_plugin_load', () => {
       >
       expect(observed['phase']).toBe('failed')
       expect(observed['error']).toBe('failed to import')
-      expect(String(data['verdict'])).toContain('观测到加载失败')
+      expect(String(data['verdict'])).toContain('Observed load failure')
     })
 
     it('apply 失败（state=3）→ observed failed，带上失败原因', async () => {
@@ -334,7 +334,7 @@ describe('dsh_diagnose_plugin_load', () => {
       >
       expect(observed['phase']).toBe('pending')
       expect(observed['missingInject']).toEqual(['fs'])
-      expect(String(data['verdict'])).toContain('仍在 pending')
+      expect(String(data['verdict'])).toContain('Still pending')
     })
 
     it('active（state=2）→ 结论是「确实加载成功了」', async () => {
@@ -348,7 +348,7 @@ describe('dsh_diagnose_plugin_load', () => {
         unknown
       >
       expect(observed['phase']).toBe('active')
-      expect(String(data['verdict'])).toContain('确实加载成功')
+      expect(String(data['verdict'])).toContain('really did load')
     })
 
     it('装了但树里一行都没有 → 硬证据：组合层没有它', async () => {
@@ -370,8 +370,8 @@ describe('dsh_diagnose_plugin_load', () => {
         unknown
       >
       expect(observed['matchedEntryIds']).toEqual([])
-      expect(String(observed['error'])).toContain('任何一行')
-      expect(String(data['verdict'])).toContain('Loader 树里没有这一行')
+      expect(String(observed['error'])).toContain('no row in the Loader tree')
+      expect(String(data['verdict'])).toContain('absent from the Loader tree')
     })
 
     it('一个包有多行时取最坏的一档（报 active 而另一行崩了最误导）', async () => {

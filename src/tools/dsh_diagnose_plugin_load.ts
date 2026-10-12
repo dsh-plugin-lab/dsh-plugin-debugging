@@ -142,13 +142,13 @@ export function createDiagnosePluginLoadTool(deps: ToolDeps): ToolDefinition {
           fail(
             {
               kind: 'timeout',
-              message: '工具预算在开工前已耗尽',
-              hint: '调大 timeoutMs 后重试；端口查询是这里最慢的一步',
+              message: 'the tool budget ran out before any work started',
+              hint: 'raise timeoutMs and retry; the port lookup is the slowest step here',
             },
             {
               tool: DIAGNOSE_PLUGIN_LOAD_TOOL,
               args: { package: args.package ?? '' },
-              why: '原样重试一次',
+              why: 'retry once as-is',
             },
           ),
         )
@@ -163,13 +163,13 @@ export function createDiagnosePluginLoadTool(deps: ToolDeps): ToolDefinition {
           fail(
             {
               kind: 'not-found',
-              message: `读不到 profile 的 package.json：${dir}`,
-              hint: '确认 dshHome 与 profile 名对不对；这个 profile 可能还没被创建过',
+              message: `cannot read the profile package.json: ${dir}`,
+              hint: 'check that dshHome and the profile name are correct; this profile may not exist yet',
             },
             {
               tool: DIAGNOSE_PLUGIN_LOAD_TOOL,
               args: { port: args.port ?? 0 },
-              why: '换个 profile 名再试',
+              why: 'try another profile name',
             },
           ),
         )
@@ -193,10 +193,10 @@ export function createDiagnosePluginLoadTool(deps: ToolDeps): ToolDefinition {
           fail(
             {
               kind: 'cancelled',
-              message: '调用方取消了这次执行',
-              hint: '不要自动重试；这是调用方主动放弃',
+              message: 'the caller cancelled this execution',
+              hint: 'do not retry automatically; the caller gave up on purpose',
             },
-            { why: '取消是调用方的决定，重试同一个调用没有意义' },
+            { why: 'cancellation is up to the caller; retrying the same call is pointless' },
           ),
         )
       }
@@ -243,8 +243,9 @@ export function createDiagnosePluginLoadTool(deps: ToolDeps): ToolDefinition {
           diagnosed.observed = {
             matchedEntryIds: [],
             phase: 'failed',
-            error: '包在 Loader 树里没有任何一行',
-            basis: 'Loader 树读到了，但这个包名/模块名一行都没匹配上 —— 组合层没有它',
+            error: 'the package has no row in the Loader tree',
+            basis:
+              'the Loader tree was read, but no row matched this package or module name — the composition layer does not include it',
           }
         }
         packages.push(diagnosed)
@@ -253,7 +254,7 @@ export function createDiagnosePluginLoadTool(deps: ToolDeps): ToolDefinition {
       const observation: ObservationBlock = loader.ok
         ? {
             mode: 'observed',
-            note: '以下相位是从宿主 Loader 树**直接观测**到的（同一个 primitive 宿主启动审计在用）',
+            note: 'the phases below were **directly observed** from the host Loader tree (the same primitive the host startup audit uses)',
             entryCount: loader.entries.length,
             phaseHistogram: histogram(loader.entries),
           }
@@ -261,8 +262,8 @@ export function createDiagnosePluginLoadTool(deps: ToolDeps): ToolDefinition {
             mode: 'inferred',
             ...(loader.reason === undefined ? {} : { reason: loader.reason }),
             note:
-              '**未能直接观测，以下为推断**：读不到宿主 Loader 树，所以「插件崩没崩」只能靠' +
-              ' bundles 列表 / 安装形态 / entry 存在 这些**前置条件**反推 —— 它们都不能证明加载成功。',
+              '**Could not observe directly; the following is inferred**: the host Loader tree could not be read, so whether a plugin crashed can only be inferred from' +
+              ' preconditions — bundles list / install shape / entry presence — and none of those prove that loading succeeded.',
           }
 
       const startupLogs: StartupLog[] = await listStartupLogs(dshHome)
@@ -290,15 +291,15 @@ export function createDiagnosePluginLoadTool(deps: ToolDeps): ToolDefinition {
         startupLogs,
         startupLogsNote:
           startupLogs.length === 0
-            ? '没有 startup-*.log —— 这是好消息：它们只在**启动失败**时生成，不是常驻日志'
-            : `有 ${String(startupLogs.length)} 份启动失败日志（按时间倒序），最新一份值得整篇读`,
+            ? 'no startup-*.log — that is good news: these are only written when **startup fails**, they are not a rolling log'
+            : `${String(startupLogs.length)} startup-failure log(s), newest first; the newest one is worth reading in full`,
         loadProofCaveat: loader.ok
-          ? '相位是从宿主 Loader 树直接观测的（`entry.fiber.state`，宿主启动审计用的同一个 primitive）。' +
-            '但它**不是公开 API**、且只在树稳定后成立：热重载/刚 patch 进来的行可能仍在挂载中，' +
-            '那时 `fiber` 尚不存在、会被读成 import 失败。看 phaseHistogram 判断快照是否已稳定。'
-          : 'bundles 列表 / 安装形态 / entry 存在 都只证**前置条件**，不证加载成功：' +
-            'Config 的 inactive 混合了「禁用/未导入/已销毁」且从不报 FAILED。' +
-            '要硬证据就看 startup-*.log，或查该插件应有的注册面（工具 / slot / 服务）在不在。',
+          ? 'Phases are observed directly from the host Loader tree (`entry.fiber.state`, the same primitive the host startup audit uses). ' +
+            'It is **not a public API** and only holds once the tree has settled: rows from hot reload or a fresh patch may still be mounting, and ' +
+            'then `fiber` does not exist yet and is read as an import failure. Use phaseHistogram to judge whether the snapshot has settled.'
+          : 'The bundles list / install shape / entry presence only prove **preconditions**, not that loading succeeded: ' +
+            'The inactive state in Config mixes up "disabled / not imported / disposed" and never reports FAILED. ' +
+            'For hard evidence read startup-*.log, or check whether the registration surface this plugin should have (tools / slots / services) is present.',
       }
 
       const missingEntries = packages.filter((item) => !item.entry.entryExists)
@@ -307,15 +308,15 @@ export function createDiagnosePluginLoadTool(deps: ToolDeps): ToolDefinition {
           fail(
             {
               kind: 'not-found',
-              message: `${String(missingEntries.length)} 个包的 entry 文件不存在：${missingEntries
+              message: `entry file missing for ${String(missingEntries.length)} package(s): ${missingEntries
                 .map((item) => item.packageName)
                 .join(', ')}`,
-              hint: 'entry 指不到文件 = 组合层会整条丢弃这个插件；先重新构建产物，或确认安装形态是 link 还是 copy 快照',
+              hint: 'an entry that points to no file means the composition layer drops this plugin entirely; rebuild the artifacts first, or check whether the install shape is link or a copy snapshot',
             },
             {
               tool: DIAGNOSE_PLUGIN_LOAD_TOOL,
               args: { package: missingEntries[0]?.packageName },
-              why: '单独看这一个包',
+              why: 'look at this package alone',
             },
           ),
         )
@@ -369,39 +370,39 @@ function buildVerdict(input: {
 }): string {
   if (!input.loader.ok) {
     return (
-      '未能直接观测 Loader 树，以下为**推断**：' +
-      '三处前置条件（bundles / 安装形态 / entry 文件）只证「有可能加载」，不证加载成功'
+      'Could not observe the Loader tree directly; the following is **inferred**: ' +
+      'the three preconditions (bundles / install shape / entry file) only prove that loading is possible, not that it succeeded'
     )
   }
   const parts: string[] = []
   if (input.failed.length > 0) {
     const detail = input.failed
-      .map((item) => `${item.packageName}（${item.observed?.error ?? '原因未取到'}）`)
+      .map((item) => `${item.packageName} (${item.observed?.error ?? 'reason unavailable'})`)
       .join('；')
-    parts.push(`**观测到加载失败**：${detail}`)
+    parts.push(`**Observed load failure**: ${detail}`)
   }
   if (input.absent.length > 0) {
     parts.push(
-      `**装了但 Loader 树里没有这一行**：${input.absent.map((item) => item.packageName).join('、')}` +
-        '（组合层没它 —— 查 bundles 有没有进、patch 有没有被后层整行替换）',
+      `**Installed but absent from the Loader tree**: ${input.absent.map((item) => item.packageName).join(', ')}` +
+        ' (the composition layer does not include it — check whether it made it into bundles, and whether a later layer replaced the whole patch row)',
     )
   }
   if (input.pending.length > 0) {
     const detail = input.pending
       .map((item) => {
         const missing = item.observed?.missingInject ?? []
-        return `${item.packageName}（等 ${missing.length === 0 ? '挂载' : missing.join(', ')}）`
+        return `${item.packageName} (waiting for ${missing.length === 0 ? 'mounting' : missing.join(', ')})`
       })
       .join('；')
-    parts.push(`**仍在 pending**：${detail}`)
+    parts.push(`**Still pending**: ${detail}`)
   }
   if (input.stale.length > 0 && parts.length === 0) {
     parts.push(
-      `产物比进程新：${input.stale.map((item) => item.packageName).join('、')} —— 宿主端跑的是旧产物，改完代码没重启`,
+      `artifacts are newer than the process: ${input.stale.map((item) => item.packageName).join(', ')} — the host is running stale artifacts, so code changed without a restart`,
     )
   }
   if (parts.length === 0) {
-    return '观测到这些行都是 active：插件确实加载成功了，问题不在「有没有加载」这一层'
+    return 'all observed rows are active: the plugin really did load, so the problem is not at the "did it load" layer'
   }
   return parts.join('。')
 }

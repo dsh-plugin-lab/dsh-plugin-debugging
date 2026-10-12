@@ -96,7 +96,7 @@ export async function lookupPort(
       listening: false,
       listeners: [],
       probed: false,
-      detail: `v1 只在 Windows 上查监听端口（当前平台 ${process.platform}）`,
+      detail: `v1 only looks up listeners on Windows (current platform: ${process.platform})`,
     }
   }
 
@@ -111,10 +111,10 @@ export async function lookupPort(
     return { port, listening: false, listeners: [], probed: false, detail: result.spawnError }
   }
   if (result.aborted) {
-    return { port, listening: false, listeners: [], probed: false, detail: '调用方取消了端口查询' }
+    return { port, listening: false, listeners: [], probed: false, detail: 'the caller cancelled the port lookup' }
   }
   if (result.timedOut) {
-    return { port, listening: false, listeners: [], probed: false, detail: '端口查询超时' }
+    return { port, listening: false, listeners: [], probed: false, detail: 'the port lookup timed out' }
   }
 
   const listeners = parsePortLookup(result.stdout)
@@ -125,7 +125,7 @@ export async function lookupPort(
     probed: true,
     detail:
       listeners.length > 0
-        ? `端口 ${String(port)} 上有 ${String(listeners.length)} 个监听者`
-        : `端口 ${String(port)} 上没有监听者`,
+        ? `${String(listeners.length)} listener(s) on port ${String(port)}`
+        : `no listener on port ${String(port)}`,
   }
 }

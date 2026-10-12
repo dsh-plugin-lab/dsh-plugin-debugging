@@ -98,13 +98,13 @@ export function createCheckAuthTool(deps: ToolDeps): ToolDefinition {
           fail(
             {
               kind: 'not-configured',
-              message: '定不出端口，没法探测认证',
-              hint: '传 port 参数，或在插件配置里填 port；环境里的 DSH_WEB_URL 也能提供端口',
+              message: 'cannot determine a port, so authentication cannot be probed',
+              hint: 'Pass the port argument, set port in the plugin config, or rely on DSH_WEB_URL from the environment',
             },
             {
               tool: CHECK_AUTH_TOOL,
               args: { port: 3080 },
-              why: '本机 web profile 的默认监听端口是 3080',
+              why: 'the web profile on this machine listens on 3080 by default',
             },
           ),
         )
@@ -138,7 +138,7 @@ export function createCheckAuthTool(deps: ToolDeps): ToolDefinition {
           clientConnectionPresent: credentials.clientConnectionPresent,
           browserSessionPresent: credentials.browserSessionPresent,
           ...(credentials.line === undefined ? {} : { line: credentials.line }),
-          note: 'v1 只判条目在不在，不读值、不自签 cookie',
+          note: 'v1 only checks whether the entry exists; it does not read values or sign cookies',
         },
         verdict: verdictOf(probe),
       }
@@ -147,8 +147,16 @@ export function createCheckAuthTool(deps: ToolDeps): ToolDefinition {
       if (probe.kind === 'timeout') {
         return toOutput(
           fail(
-            { kind: 'timeout', message: probe.detail, hint: '原样重试；持续超时调大 timeoutMs' },
-            { tool: CHECK_AUTH_TOOL, args: { port: resolvedPort.port, host }, why: '原样重试一次' },
+            {
+              kind: 'timeout',
+              message: probe.detail,
+              hint: 'retry as-is; raise timeoutMs if it keeps timing out',
+            },
+            {
+              tool: CHECK_AUTH_TOOL,
+              args: { port: resolvedPort.port, host },
+              why: 'retry once as-is',
+            },
           ),
         )
       }
@@ -157,13 +165,13 @@ export function createCheckAuthTool(deps: ToolDeps): ToolDefinition {
           fail(
             {
               kind: 'not-running',
-              message: `${authority} 连不上：${probe.detail}`,
-              hint: '宿主没在监听。按端口确认进程，或确认端口号（端口变了也是 401 的常见成因）',
+              message: `cannot connect to ${authority}: ${probe.detail}`,
+              hint: 'the host is not listening. Check the process by port, and check the port number (a changed port is a common cause of 401)',
             },
             {
               tool: 'dsh_diagnose_plugin_load',
               args: { port: resolvedPort.port },
-              why: '按端口查监听者与 startup 日志，确认宿主到底起没起',
+              why: 'look up the listener by port and read the startup logs to confirm whether the host is up',
             },
           ),
         )
@@ -171,8 +179,12 @@ export function createCheckAuthTool(deps: ToolDeps): ToolDefinition {
       if (probe.kind === 'cancelled') {
         return toOutput(
           fail(
-            { kind: 'cancelled', message: probe.detail, hint: '不要自动重试；这是调用方主动放弃' },
-            { why: '取消是调用方的决定，重试同一个调用没有意义' },
+            {
+              kind: 'cancelled',
+              message: probe.detail,
+              hint: 'do not retry automatically; the caller gave up on purpose',
+            },
+            { why: 'cancellation is up to the caller; retrying the same call is pointless' },
           ),
         )
       }
@@ -181,15 +193,15 @@ export function createCheckAuthTool(deps: ToolDeps): ToolDefinition {
           fail(
             {
               kind: 'auth',
-              message: `${authority} 返回 401 —— 服务在，是认证没过（不是没启动）`,
+              message: `${authority} returned 401 — the service is up but authentication failed (not "not running")`,
               hint:
-                'cookie 绑定 host:port：换端口必然 401，同端口重启旧 cookie 仍可用（30 天不滑动）。' +
-                `凭证文件里 browser-session 条目${credentials.browserSessionPresent ? '在' : '不在'}`,
+                'cookies are bound to host:port: changing the port always yields 401, while a restart on the same port keeps old cookies valid (30 days, non-sliding). ' +
+                `the browser-session entry in the credentials file is ${credentials.browserSessionPresent ? 'present' : 'absent'}`,
             },
             {
               tool: CHECK_AUTH_TOOL,
               args: { port: resolvedPort.port, host },
-              why: '确认 authority 与浏览器地址栏逐字一致后重试；仍 401 就走 v1.1 的自签 cookie',
+              why: 'make authority match the browser address bar exactly, then retry; if it still returns 401, fall back to v1.1 cookie signing',
             },
           ),
         )
@@ -199,8 +211,8 @@ export function createCheckAuthTool(deps: ToolDeps): ToolDefinition {
         ok(data, {
           why:
             probe.kind === 'http-error'
-              ? '服务在（能应答），只是这个状态码不是 200/3xx —— 重点是「没启动」已被排除'
-              : '服务在且这次请求被接受；认证不是当前问题的成因',
+              ? 'the service is up (it answered) but the status is not 200/3xx — the important part is that "not running" is ruled out'
+              : 'the service is up and this request was accepted; authentication is not the cause here',
         }),
       )
     },
@@ -215,16 +227,16 @@ export function createCheckAuthTool(deps: ToolDeps): ToolDefinition {
 function verdictOf(probe: HttpProbeResult): string {
   switch (probe.kind) {
     case 'ok':
-      return '服务在、认证通过'
+      return 'service is up; authentication passed'
     case 'unauthorized':
-      return '服务在、认证没过（401）—— 不是没启动'
+      return 'service is up; authentication failed (401) — not "not running"'
     case 'not-running':
-      return '连不上：宿主没在监听这个端口'
+      return 'cannot connect: the host is not listening on this port'
     case 'timeout':
-      return '探测超时：没有结论'
+      return 'probe timed out: no verdict'
     case 'cancelled':
-      return '调用方取消了探测：没有结论'
+      return 'the caller cancelled the probe: no verdict'
     case 'http-error':
-      return '服务在，但返回了非预期状态码'
+      return 'service is up but returned an unexpected status code'
   }
 }

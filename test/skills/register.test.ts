@@ -60,7 +60,7 @@ function makeCtx(options: { throwOnEffect?: boolean; throwOnOn?: boolean } = {})
   const fake = {
     effect(execute: () => unknown) {
       state.stats.effectCalls += 1
-      if (options.throwOnEffect === true) throw new Error('fiber 已卸载')
+      if (options.throwOnEffect === true) throw new Error('fiber already disposed')
       const result = execute()
       if (result !== null && typeof result === 'object' && Symbol.iterator in result) {
         for (const yielded of result as Iterable<unknown>) {
@@ -99,7 +99,7 @@ function makeSkills(options: { throwOnRegister?: boolean } = {}): FakeSkills {
   const fake = {
     register(skill: SkillRegistration) {
       calls.push(skill)
-      if (options.throwOnRegister === true) throw new Error('宿主的注册表拒绝了这个技能')
+      if (options.throwOnRegister === true) throw new Error('the host registry rejected this skill')
       return () => {}
     },
   }
@@ -281,7 +281,7 @@ describe('registerSkills —— 异常不外泄', () => {
 
     expect(report?.ok).toBe(false)
     expect(report?.error?.kind).toBe('internal')
-    expect(report?.error?.message).toContain('宿主的注册表拒绝了这个技能')
+    expect(report?.error?.message).toContain('the host registry rejected this skill')
     // 注册确实被尝试过（抛错发生在 register 内部），但报告必须是失败。
     expect(calls).toHaveLength(1)
   })

@@ -199,8 +199,8 @@ export function registerSkills(
   if (skills === undefined) {
     return fail(
       'no-registry',
-      '这个宿主没有 skills 服务，技能未注册（工具半边不受影响）',
-      '确认 profile 里挂了 @deepseek-ai/dsh-skill；或直接读 skills/dsh-plugin-debugging/SKILL.md',
+      'This host has no skills service, so the skill was not registered (the tool half is unaffected)',
+      'Check that @deepseek-ai/dsh-skill is mounted in the profile; or read skills/dsh-plugin-debugging/SKILL.md directly',
     )
   }
 
@@ -216,8 +216,8 @@ export function registerSkills(
   } catch {
     return fail(
       'missing-file',
-      `技能文件读不到：${skillFile}`,
-      '确认 skills/dsh-plugin-debugging/SKILL.md 随包发布了（package.json 的 files 白名单里有 "skills"），且产物在 lib/ 下（技能根要上溯两级到包根）。',
+      `Skill file could not be read: ${skillFile}`,
+      'Check that skills/dsh-plugin-debugging/SKILL.md is published with the package (the files whitelist in package.json includes "skills") and that the build output is under lib/ (the skill root goes up two levels to the package root).',
     )
   }
 
@@ -233,8 +233,8 @@ export function registerSkills(
   ) {
     return fail(
       'bad-frontmatter',
-      `frontmatter 不合法：name=${JSON.stringify(name)}，description=${JSON.stringify(description.trim())}`,
-      'SKILL.md 顶部要有一段 --- 包住的 YAML，含 kebab-case 的 name 与非空 description（version/author 等未知键会被忽略）；description 要写成单行标量，不要用 >- / | 这类块标量。',
+      `Invalid frontmatter: name=${JSON.stringify(name)}, description=${JSON.stringify(description.trim())}`,
+      'SKILL.md must open with a --- delimited YAML block holding a kebab-case name and a non-empty description (unknown keys such as version/author are ignored); write description as a single-line scalar, not a block scalar such as >- or |.',
     )
   }
 
@@ -247,8 +247,8 @@ export function registerSkills(
   if (content === '') {
     return fail(
       'empty-content',
-      `${SKILL_FILE} 的 frontmatter 之后没有正文`,
-      '技能正文（frontmatter 之后的 Markdown）不能为空，否则模型加载后拿到空的 <skill_content>。',
+      `${SKILL_FILE} has no body after its frontmatter`,
+      'The skill body (the Markdown after the frontmatter) must not be empty, otherwise the model loads an empty <skill_content>.',
     )
   }
 
@@ -265,8 +265,8 @@ export function registerSkills(
   } catch (error) {
     return fail(
       'internal',
-      `注册进宿主注册表时抛错：${error instanceof Error ? error.message : String(error)}`,
-      '这是基础设施问题（不是 SKILL.md 的问题）：确认 ctx 是活跃 fiber，且 skills.register 的字段契约没变。',
+      `Registering with the host registry threw: ${error instanceof Error ? error.message : String(error)}`,
+      'This is an infrastructure problem (not a SKILL.md problem): check that ctx is an active fiber and that the skills.register field contract has not changed.',
     )
   }
 

@@ -58,7 +58,7 @@ describe('lib/loader · 读 entries（全部失败都收敛成降级）', () => 
     const result = readLoaderEntries(undefined)
 
     expect(result.ok).toBe(false)
-    expect(result.reason).toContain('没有 loader 服务')
+    expect(result.reason).toContain('no loader service')
     expect(result.entries).toEqual([])
   })
 

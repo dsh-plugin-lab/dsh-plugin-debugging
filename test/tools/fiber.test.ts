@@ -47,7 +47,7 @@ describe('lib/fiber · 三档判定', () => {
 
     expect(observation.phase).toBe('failed')
     expect(observation.error).toBeUndefined()
-    expect(observation.basis).toContain('没能取到失败原因')
+    expect(observation.basis).toContain('could not be read')
   })
 
   it('state=0 → pending，并算出缺哪些 service', () => {
@@ -75,7 +75,7 @@ describe('lib/fiber · 三档判定', () => {
 
     expect(observation.phase).toBe('pending')
     expect(observation.missingInject).toEqual([])
-    expect(observation.basis).toContain('挂载尚未轮到它')
+    expect(observation.basis).toContain('has not been mounted yet')
   })
 
   it('state=2 → active', () => {
@@ -99,7 +99,7 @@ describe('lib/fiber · 三档判定', () => {
 
     expect(observation.phase).toBe('failed')
     expect(observation.error).toBe('config is not defined')
-    expect(observation.basis).toContain('disabled 表达式')
+    expect(observation.basis).toContain('disabled expression threw')
   })
 
   it('判定顺序：disabled 优先于 fiber 缺失（避免把禁用的行报成崩了）', () => {

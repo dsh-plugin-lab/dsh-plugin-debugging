@@ -86,7 +86,7 @@ export async function probeHttp(
     // 这一段**必须**在注册监听器之前判断：`addEventListener` 不会为「已经 abort 的信号」
     // 补发事件，只挂监听器的话，调用方若在进来之前就取消了（宿主取消与工具调用可能同拍
     // 发生），就会带着一个未取消的 controller 去发请求 —— 取消被静默吞掉、工具返回「成功」。
-    return { kind: 'cancelled', detail: '调用方取消了这次探测，未发出请求' }
+    return { kind: 'cancelled', detail: 'the caller cancelled this probe before any request was sent' }
   }
 
   const controller = new AbortController()
@@ -138,7 +138,7 @@ function classify(status: number, location: string | undefined): HttpProbeResult
     return {
       kind: 'unauthorized',
       status,
-      detail: '服务在，但认证没过（401）—— 不是「没启动」',
+      detail: 'service is up but authentication failed (401) — this is not "not running"',
     }
   }
   if ((status >= 200 && status < 400) || status === 0) {
@@ -146,14 +146,14 @@ function classify(status: number, location: string | undefined): HttpProbeResult
       kind: 'ok',
       status,
       ...(location === undefined ? {} : { location }),
-      detail: '服务在且这次请求被接受',
+      detail: 'service is up and this request was accepted',
     }
   }
   return {
     kind: 'http-error',
     status,
     ...(location === undefined ? {} : { location }),
-    detail: `服务在，但返回了 ${String(status)}`,
+    detail: `service is up but returned ${String(status)}`,
   }
 }
 
@@ -167,22 +167,22 @@ function classifyThrown(error: unknown, callerAborted: boolean): HttpProbeResult
   if (callerAborted) {
     // 单独一个 kind：取消是**我们主动放弃**，而 `not-running` 是**目标没起来** ——
     // 两者的下一步相反（一个别重试，一个去启动），混在一起模型必然选错。
-    return { kind: 'cancelled', detail: '调用方取消了这次探测，未取得结论' }
+    return { kind: 'cancelled', detail: 'the caller cancelled this probe; no verdict' }
   }
   const code = systemErrorCode(error)
   if (code === 'ECONNREFUSED' || code === 'ENOTFOUND' || code === 'ECONNRESET' || code === 'EHOSTUNREACH') {
     return {
       kind: 'not-running',
-      detail: `连不上（${code}）—— 端口上没有监听者`,
+      detail: `cannot connect (${code}) — no listener on that port`,
     }
   }
   // 我们自己的超时定时器 abort 的：reason 是我们塞的那个 Error。
   if (error instanceof Error && error.name === 'AbortError' && error.message.includes('transport-timeout')) {
-    return { kind: 'timeout', detail: '传输层超时（工具预算未到，是传输先超时）' }
+    return { kind: 'timeout', detail: 'transport timed out first (the tool budget had not expired)' }
   }
   const message = error instanceof Error ? error.message : String(error)
   if (message.includes('transport-timeout')) {
-    return { kind: 'timeout', detail: '传输层超时（工具预算未到，是传输先超时）' }
+    return { kind: 'timeout', detail: 'transport timed out first (the tool budget had not expired)' }
   }
-  return { kind: 'not-running', detail: `探测失败：${message}` }
+  return { kind: 'not-running', detail: `probe failed: ${message}` }
 }

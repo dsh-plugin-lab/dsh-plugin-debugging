@@ -145,9 +145,9 @@ describe('lookupPort · Windows 分支', () => {
       const abortResult = await lookupPort(3080, { spawn: aborted.spawn, timeoutMs: 1_000 })
 
       expect(timeoutResult.probed).toBe(false)
-      expect(timeoutResult.detail).toContain('超时')
+      expect(timeoutResult.detail).toContain('timed out')
       expect(abortResult.probed).toBe(false)
-      expect(abortResult.detail).toContain('取消')
+      expect(abortResult.detail).toContain('cancelled')
     })
   })
 })
