@@ -158,3 +158,11 @@ git diff --check
     正确判据是「**在 peers 可解析的上下文里** import 成功且无副作用」。
     同一族的问题还有「本机跑绿推不出 CI 跑绿」：**判据的上下文与实际使用的上下文不一致时，
     得到的是假红或假绿**，两种都费人。**写判据时先把「它在什么环境里跑」写出来。**
+25. **平台相关的行为要显式钉住平台，不要在用例里按真实平台分支**：本机 Windows、CI ubuntu，
+    写死一边就必然在另一边红（首次推送连红两次，都在这上面）。做法是每条用例用
+    `withPlatform('win32' | 'linux' | 'darwin')` **显式声明它测哪条分支** —— 这样两条分支
+    在**任意机器上都被真跑到**，而不是「非 Windows 那条永不执行」。
+    配套的坑：`process.platform` 的伪装**必须在 worker 内改**。
+    **用 `NODE_OPTIONS=--import` 在进程启动时改会把打包器一起骗了**（rolldown 按平台选原生绑定，
+    报 `@rolldown/binding-wasm32-wasi` 找不到，整套起不来）。可行做法是临时 vitest config 的
+    `setupFiles` 指向一个改 `process.platform` 的模块（config 放仓外、别落进仓）。

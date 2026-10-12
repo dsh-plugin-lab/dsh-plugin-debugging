@@ -167,6 +167,51 @@ export function entrySnapshot(overrides: Partial<LoaderEntrySnapshot> = {}): Loa
   }
 }
 
+/**
+ * 临时把 `process.platform` 换成指定值，跑完**无条件还原**。
+ *
+ * ## 为什么需要它
+ *
+ * 本机的平台与 CI 的平台不同（本机 Windows、CI ubuntu）。凡是断言依赖平台分支的用例，
+ * 只要按**真实** `process.platform` 去写，就总有一半**永远没被跑过** ——
+ * 而且失败点落在 CI 上（对外可见）。这个助手让**两条分支在任意机器上都被真跑到**，
+ * 把「判据只能靠 CI 验证」变成「本机就能验证」。
+ *
+ * ## 为什么直接改全局是安全的（以及边界）
+ *
+ * `src/lib/ports.ts` 在**调用时**读 `process.platform`，所以改写能生效。
+ * 风险是污染同一进程里并发的用例；这里用两条纪律压住：
+ * 1. **`finally` 里用原属性描述符还原**（不是简单赋值回去 —— 描述符还原更严格）；
+ * 2. 本仓测试**不在文件内并发**（没有 `it.concurrent`），vitest 的文件级并行是
+ *    独立 worker/进程，不会共享这个全局。
+ *
+ * 另外 `platform-guard.test.ts` 有一条自检用例证明「还原」真的成立 ——
+ * 光靠「我记得还原了」不算判据。
+ *
+ * @param platform 要伪装的平台值。
+ * @param fn 在该平台下跑的逻辑（同步或异步）。
+ */
+export async function withPlatform<T>(
+  platform: NodeJS.Platform,
+  fn: () => Promise<T> | T,
+): Promise<T> {
+  const original = Object.getOwnPropertyDescriptor(process, 'platform')
+  if (original === undefined) {
+    throw new Error('process.platform 没有属性描述符，无法临时改写')
+  }
+  Object.defineProperty(process, 'platform', {
+    value: platform,
+    configurable: true,
+    enumerable: true,
+    writable: true,
+  })
+  try {
+    return await fn()
+  } finally {
+    Object.defineProperty(process, 'platform', original)
+  }
+}
+
 /** 一次只会失败的 spawn：测试里没显式给 spawn 时用它，避免真起进程。 */
 export function neverSpawn(): SpawnImpl {
   return async () => {

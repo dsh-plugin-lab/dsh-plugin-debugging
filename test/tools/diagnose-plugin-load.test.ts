@@ -22,6 +22,7 @@ import {
   DIAGNOSE_PLUGIN_LOAD_TOOL,
 } from '../../src/tools/dsh_diagnose_plugin_load.ts'
 import { FIBER_STATE } from '../../src/lib/fiber.ts'
+import { PORT_LOOKUP_SHELL } from '../../src/lib/ports.ts'
 import { TOOL_ERROR_KINDS } from '../../src/lib/errors.ts'
 import {
   cmdResult,
@@ -40,6 +41,7 @@ import {
   writeInstalledPackage,
   writeProfile,
   writeText,
+  withPlatform,
 } from './helpers.ts'
 
 /** 一段正常回答端口查询的输出（pid|进程名|启动时间）。 */
@@ -136,50 +138,121 @@ describe('dsh_diagnose_plugin_load', () => {
       expect((data['startupLogs'] as unknown[]).length).toBe(1)
     })
 
-    it('端口上没监听者不算失败（是结论的一部分）', async () => {
-      const dshHome = await tempDshHome()
-      const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
-      await writeInstalledPackage(profileDir, 'pkg-a')
-      const { spawn } = recordingSpawn(() => cmdResult({ stdout: '' }))
-      const tool = createDiagnosePluginLoadTool(
-        depsFor(configFor(dshHome, { port: 3080 }), { spawn }),
-      )
+    it('win32：端口上有监听者 → probed=true / listening=true / 拿到 pid 与启动时间', async () => {
+      await withPlatform('win32', async () => {
+        const dshHome = await tempDshHome()
+        const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
+        await writeInstalledPackage(profileDir, 'pkg-a')
+        const { spawn, calls } = recordingSpawn(() => cmdResult({ stdout: LISTENING_OUTPUT }))
+        const tool = createDiagnosePluginLoadTool(
+          depsFor(configFor(dshHome, { port: 3080 }), { spawn }),
+        )
 
-      const data = expectOk(await run(tool, {}))
-      const port = data['port'] as Record<string, unknown>
-      const lookup = port['lookup'] as Record<string, unknown>
-      // 端口查询是**平台相关**的：v1 只在 Windows 上查监听端口，非 Windows 恒为
-      // `probed: false`（见 src/lib/ports.ts 的早返回）。所以这里必须按平台断言 ——
-      // 写死 `probed === true` 会在 CI(ubuntu) 上红，而那是**设计如此**，不是缺陷。
-      if (process.platform === 'win32') {
+        const data = expectOk(await run(tool, {}))
+        const lookup = (data['port'] as Record<string, unknown>)['lookup'] as Record<
+          string,
+          unknown
+        >
         expect(lookup['probed']).toBe(true)
-        expect(lookup['listening']).toBe(false)
-      } else {
-        expect(lookup['probed']).toBe(false)
-        expect(lookup['listening']).toBe(false)
-        expect(String(lookup['detail'])).toContain(process.platform)
-      }
-      // 端口值与其来源在 resolved 里（一处一事实，不在这里重复）。
-      const resolved = data['resolved'] as Record<string, unknown>
-      expect(resolved['port']).toBe(3080)
-      expect(resolved['portSource']).toBe('plugin-config')
+        expect(lookup['listening']).toBe(true)
+        const listeners = lookup['listeners'] as Record<string, unknown>[]
+        expect(listeners[0]?.['pid']).toBe(4242)
+        expect(listeners[0]?.['processName']).toBe('node')
+        // Windows 分支**必须**真的起了那次查询。
+        expect(calls).toHaveLength(1)
+      })
     })
 
-    it('产物比进程新 → artifactNewerThanProcess=true（宿主端跑的是旧产物）', async () => {
-      const dshHome = await tempDshHome()
-      const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
-      await writeInstalledPackage(profileDir, 'pkg-a')
-      // 进程启动时间设成 2020 年，产物是「现在」写的 → 产物更新。
-      const { spawn } = recordingSpawn(() =>
-        cmdResult({ stdout: '4242|node|2020-01-01T00:00:00.0000000+08:00\n' }),
-      )
-      const tool = createDiagnosePluginLoadTool(
-        depsFor(configFor(dshHome, { port: 3080 }), { spawn }),
-      )
+    it('win32：端口上没有监听者 → probed=true 但 listening=false（不算失败）', async () => {
+      await withPlatform('win32', async () => {
+        const dshHome = await tempDshHome()
+        const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
+        await writeInstalledPackage(profileDir, 'pkg-a')
+        const { spawn } = recordingSpawn(() => cmdResult({ stdout: '' }))
+        const tool = createDiagnosePluginLoadTool(
+          depsFor(configFor(dshHome, { port: 3080 }), { spawn }),
+        )
 
-      const data = expectOk(await run(tool, {}))
-      const pkg = (data['packages'] as Record<string, unknown>[])[0]
-      expect(pkg?.['artifactNewerThanProcess']).toBe(true)
+        const data = expectOk(await run(tool, {}))
+        const lookup = (data['port'] as Record<string, unknown>)['lookup'] as Record<
+          string,
+          unknown
+        >
+        expect(lookup['probed']).toBe(true)
+        expect(lookup['listening']).toBe(false)
+      })
+    })
+
+    it('非 win32（CI 就是这一条）：不 spawn、降级成 probed=false，并说明当前平台', async () => {
+      await withPlatform('linux', async () => {
+        const dshHome = await tempDshHome()
+        const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
+        await writeInstalledPackage(profileDir, 'pkg-a')
+        // 关键断言：即便给了 spawn 实现，非 Windows 上**一次都不许调用** ——
+        // 否则等于在 Linux 上试图跑 `powershell.exe`。
+        const { spawn, calls } = recordingSpawn(() => cmdResult({ stdout: LISTENING_OUTPUT }))
+        const tool = createDiagnosePluginLoadTool(
+          depsFor(configFor(dshHome, { port: 3080 }), { spawn }),
+        )
+
+        const data = expectOk(await run(tool, {}))
+        const lookup = (data['port'] as Record<string, unknown>)['lookup'] as Record<
+          string,
+          unknown
+        >
+        expect(lookup['probed']).toBe(false)
+        expect(lookup['listening']).toBe(false)
+        expect(lookup['listeners']).toEqual([])
+        expect(String(lookup['detail'])).toContain('linux')
+        expect(calls).toHaveLength(0)
+
+        // 端口值与来源仍然照报（文件层诊断不受平台影响）。
+        const resolved = data['resolved'] as Record<string, unknown>
+        expect(resolved['port']).toBe(3080)
+        expect(resolved['portSource']).toBe('plugin-config')
+      })
+    })
+
+    it('win32：产物比进程新 → artifactNewerThanProcess=true（宿主端跑的是旧产物）', async () => {
+      await withPlatform('win32', async () => {
+        const dshHome = await tempDshHome()
+        const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
+        await writeInstalledPackage(profileDir, 'pkg-a')
+        // 进程启动时间设成 2020 年，产物是「现在」写的 → 产物更新。
+        const { spawn, calls } = recordingSpawn(() =>
+          cmdResult({ stdout: '4242|node|2020-01-01T00:00:00.0000000+08:00\n' }),
+        )
+        const tool = createDiagnosePluginLoadTool(
+          depsFor(configFor(dshHome, { port: 3080 }), { spawn }),
+        )
+
+        const data = expectOk(await run(tool, {}))
+        const pkg = (data['packages'] as Record<string, unknown>[])[0]
+        expect(pkg?.['artifactNewerThanProcess']).toBe(true)
+        // 这条判据成立的前提就是「那次 spawn 的输出被消费了」。
+        expect(calls).toHaveLength(1)
+      })
+    })
+
+    it('非 win32：同一次 spawn 输出**不被消费** → artifactNewerThanProcess=null（未知，不是 false）', async () => {
+      await withPlatform('linux', async () => {
+        const dshHome = await tempDshHome()
+        const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
+        await writeInstalledPackage(profileDir, 'pkg-a')
+        const { spawn, calls } = recordingSpawn(() =>
+          cmdResult({ stdout: '4242|node|2020-01-01T00:00:00.0000000+08:00\n' }),
+        )
+        const tool = createDiagnosePluginLoadTool(
+          depsFor(configFor(dshHome, { port: 3080 }), { spawn }),
+        )
+
+        const data = expectOk(await run(tool, {}))
+        const pkg = (data['packages'] as Record<string, unknown>[])[0]
+        // 关键区分：`null` = **判不了**（拿不到进程启动时间），不是 `false` = 「产物不比进程新」。
+        // 把未知报成 false 会在非 Windows 上给出**反向结论**。
+        expect(pkg?.['artifactNewerThanProcess']).toBeNull()
+        expect(calls).toHaveLength(0)
+      })
     })
 
     it('只查指定包时不会展开整份 bundles', async () => {
@@ -369,21 +442,44 @@ describe('dsh_diagnose_plugin_load', () => {
       expect(error.kind).toBe('timeout')
     })
 
-    it('cancelled：调用方取消（不拿半份结果当结论）', async () => {
+    it('cancelled：调用方在进入前就取消（与平台无关的取消路径）', async () => {
       const dshHome = await tempDshHome()
       const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
       await writeInstalledPackage(profileDir, 'pkg-a')
       const controller = new AbortController()
-      const { spawn } = recordingSpawn(() => {
-        controller.abort()
-        return cmdResult({ stdout: '' })
-      })
+      controller.abort()
+      const { spawn } = recordingSpawn(() => cmdResult({ stdout: '' }))
       const tool = createDiagnosePluginLoadTool(
         depsFor(configFor(dshHome, { port: 3080 }), { spawn }),
       )
 
+      // 这条**不依赖端口查询**：进入前已取消，工具在读完文件后必须报 cancelled。
+      // 第一版把它建在「端口查询中途 abort」上，于是非 Windows（CI）上 spawn 压根不被调用
+      // —— 取消没发生、工具返回成功，测试红在平台差异而不是被测行为上。
       const error = expectFail(await run(tool, {}, execWith(controller.signal)))
       expect(error.kind).toBe('cancelled')
+    })
+
+    it('win32：调用方在端口查询中途取消也能到达 IO 层', async () => {
+      await withPlatform('win32', async () => {
+        const dshHome = await tempDshHome()
+        const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
+        await writeInstalledPackage(profileDir, 'pkg-a')
+        const controller = new AbortController()
+        const { spawn, calls } = recordingSpawn(() => {
+          controller.abort()
+          return cmdResult({ stdout: '' })
+        })
+        const tool = createDiagnosePluginLoadTool(
+          depsFor(configFor(dshHome, { port: 3080 }), { spawn }),
+        )
+
+        const error = expectFail(await run(tool, {}, execWith(controller.signal)))
+        expect(error.kind).toBe('cancelled')
+        // 而且确实把调用方的信号交给了那次端口查询。
+        expect(calls).toHaveLength(1)
+        expect(calls[0]?.signal).toBe(controller.signal)
+      })
     })
 
     it('not-found：profile 的 package.json 读不到', async () => {
@@ -407,47 +503,59 @@ describe('dsh_diagnose_plugin_load', () => {
   })
 
   describe('signal 与超时纪律', () => {
-    it('exec.signal 原样透传给端口查询的 spawn', async () => {
-      const dshHome = await tempDshHome()
-      const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
-      await writeInstalledPackage(profileDir, 'pkg-a')
-      const controller = new AbortController()
-      const { spawn, calls } = recordingSpawn(() => cmdResult({ stdout: '' }))
-      const tool = createDiagnosePluginLoadTool(
-        depsFor(configFor(dshHome, { port: 3080 }), { spawn }),
-      )
+    it('win32：exec.signal 原样透传给端口查询的 spawn', async () => {
+      await withPlatform('win32', async () => {
+        const dshHome = await tempDshHome()
+        const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
+        await writeInstalledPackage(profileDir, 'pkg-a')
+        const controller = new AbortController()
+        const { spawn, calls } = recordingSpawn(() => cmdResult({ stdout: '' }))
+        const tool = createDiagnosePluginLoadTool(
+          depsFor(configFor(dshHome, { port: 3080 }), { spawn }),
+        )
 
-      await run(tool, {}, execWith(controller.signal))
-      expect(calls[0]?.signal).toBe(controller.signal)
+        await run(tool, {}, execWith(controller.signal))
+        expect(calls).toHaveLength(1)
+        expect(calls[0]?.signal).toBe(controller.signal)
+      })
     })
 
-    it('端口查询的传输预算小于工具预算', async () => {
-      const dshHome = await tempDshHome()
-      const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
-      await writeInstalledPackage(profileDir, 'pkg-a')
-      const config = configFor(dshHome, { port: 3080, timeoutMs: 15_000 })
-      const { spawn, calls } = recordingSpawn(() => cmdResult({ stdout: '' }))
-      const tool = createDiagnosePluginLoadTool(depsFor(config, { spawn }))
+    it('win32：端口查询的传输预算小于工具预算', async () => {
+      await withPlatform('win32', async () => {
+        const dshHome = await tempDshHome()
+        const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
+        await writeInstalledPackage(profileDir, 'pkg-a')
+        const config = configFor(dshHome, { port: 3080, timeoutMs: 15_000 })
+        const { spawn, calls } = recordingSpawn(() => cmdResult({ stdout: '' }))
+        const tool = createDiagnosePluginLoadTool(depsFor(config, { spawn }))
 
-      await run(tool, {})
-      expect(calls[0]?.timeoutMs ?? 0).toBeLessThan(config.timeoutMs)
-      expect(tool.timeoutMs).toBe(config.timeoutMs)
+        await run(tool, {})
+        expect(calls).toHaveLength(1)
+        expect(calls[0]?.timeoutMs ?? 0).toBeLessThan(config.timeoutMs)
+        expect(calls[0]?.timeoutMs ?? 0).toBeGreaterThan(0)
+        expect(tool.timeoutMs).toBe(config.timeoutMs)
+      })
     })
 
-    it('端口按 LocalPort 查，不用命令行子串（子串会误匹配派生 shell）', async () => {
-      const dshHome = await tempDshHome()
-      const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
-      await writeInstalledPackage(profileDir, 'pkg-a')
-      const { spawn, calls } = recordingSpawn(() => cmdResult({ stdout: '' }))
-      const tool = createDiagnosePluginLoadTool(
-        depsFor(configFor(dshHome, { port: 3080 }), { spawn }),
-      )
+    it('win32：端口按 LocalPort 查，不用命令行子串（子串会误匹配派生 shell）', async () => {
+      await withPlatform('win32', async () => {
+        const dshHome = await tempDshHome()
+        const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
+        await writeInstalledPackage(profileDir, 'pkg-a')
+        const { spawn, calls } = recordingSpawn(() => cmdResult({ stdout: '' }))
+        const tool = createDiagnosePluginLoadTool(
+          depsFor(configFor(dshHome, { port: 3080 }), { spawn }),
+        )
 
-      await run(tool, {})
-      const script = calls[0]?.args.join(' ') ?? ''
-      expect(script).toContain('-LocalPort 3080')
-      expect(script).toContain('-State Listen')
-      expect(script).not.toContain('bin.js')
+        await run(tool, {})
+        expect(calls).toHaveLength(1)
+        const script = calls[0]?.args.join(' ') ?? ''
+        expect(script).toContain('-LocalPort 3080')
+        expect(script).toContain('-State Listen')
+        expect(script).not.toContain('bin.js')
+        // 也钉住用的是哪个 shell —— Windows 专有路径，非 Windows 上根本不该走到这儿。
+        expect(calls[0]?.command).toBe(PORT_LOOKUP_SHELL)
+      })
     })
   })
 })
