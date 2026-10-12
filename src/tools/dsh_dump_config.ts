@@ -52,15 +52,15 @@ export function createDumpConfigTool(deps: ToolDeps): ToolDefinition {
   return defineTool({
     name: DUMP_CONFIG_TOOL,
     description:
-      '跑 dsh --profile <p> --dump-config 与 --dump-config-schema，读 x-cordis.diagnostics。' +
-      '注意两者的退出码语义不同：--dump-config 的退出码恒 0（不做校验，不能当门禁，' +
-      '但组合期错会写到 stderr）；--dump-config-schema 退出码 1 = 有 error。' +
-      '已知误报：preset-* 行的 unrecognized Loader tree carrier —— 本工具会把 error 的 path ' +
-      '解析成 entry id 并区分「该管的 error」与「已知误报」。只读。',
+      'Shows the config a profile actually resolves to, plus the composition diagnostics. ' +
+      'Use it when you need what the composition really produced, rather than what a patch file says. ' +
+      'Read-only — and the plain dump always exits 0, so a zero exit proves nothing: the exit code ' +
+      'that signals errors comes from the schema dump, and known false positives are listed ' +
+      'separately from errors that point at a row you changed.',
     parameters: {
       profile: {
         type: 'string',
-        description: 'profile 名；省略则用插件配置里的 profile。',
+        description: "Profile name; omit to use the plugin's configured profile.",
       },
     },
     output: toolOutput(DUMP_CONFIG_TOOL),

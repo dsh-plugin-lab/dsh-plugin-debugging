@@ -62,19 +62,22 @@ export function createCheckAuthTool(deps: ToolDeps): ToolDefinition {
   return defineTool({
     name: CHECK_AUTH_TOOL,
     description:
-      '区分「连接被拒（宿主没启动）」与「401（服务在、认证没过）」，并给出 authority 与端口。' +
-      '401 的典型成因是端口变了 —— cookie 绑定 host:port，同端口重启旧标签页照常可用。' +
-      '同时报告 .credentials.yaml 里 client-connection/browser-session 条目是否**存在**' +
-      '（v1 不提取密钥、不自签 cookie）。只读。',
+      'Separates "not running" from "not authenticated": connection refused versus 401, with the ' +
+      'authority and port in use. ' +
+      'Use it when the page returns 401, or when you cannot tell whether the host is up at all. ' +
+      'Read-only, it extracts no keys and signs no cookies — and a 401 often means the port changed ' +
+      'rather than that credentials are wrong, because the authority is matched literally as `host:port`.',
     parameters: {
       port: {
         type: 'integer',
-        description: '宿主端口；省略则用插件配置的 port，再退回环境里的 DSH_WEB_URL。',
+        description:
+          "Host port to probe; omit to use the plugin's configured port, falling back to `DSH_WEB_URL`.",
       },
       host: {
         type: 'string',
         description:
-          '主机名，默认 127.0.0.1。注意 authority 是 host:port 逐字匹配，localhost 与 127.0.0.1 不通用。',
+          'Hostname, default `127.0.0.1`; the authority is matched literally as `host:port`, so ' +
+          '`localhost` and `127.0.0.1` are not interchangeable.',
       },
     },
     output: toolOutput(CHECK_AUTH_TOOL),

@@ -71,22 +71,25 @@ export function createEffectModeTool(deps: ToolDeps): ToolDefinition {
   return defineTool({
     name: EFFECT_MODE_TOOL,
     description:
-      '判断一次改动需要什么才能生效：热生效 / 重启 / HMR。' +
-      '用于「改完没反应」的第一次分诊 —— 先分类改的是配置、宿主端代码还是客户端代码，再回答。' +
-      '会先探测当前 profile 是否挂了 hmr：没有 hmr 时 reload() 是空操作，' +
-      '任何「热生效」都会降级成必须重启。只读，不重启任何东西。',
+      'Classifies what a change needs before it takes effect: live, a restart, or HMR. ' +
+      'Use it when a change had no effect and you are about to tell the user whether a reload or a restart is required. ' +
+      'Read-only — and it stays useful without hot reload: a client-code change then falls back to ' +
+      'rebuild-and-refresh instead of a restart, while a config change is reported as restart-required.',
     parameters: {
       change: {
         type: 'string',
         required: true,
         enum: ['config', 'bundle-added', 'host-code', 'client-code'],
         description:
-          '改了什么。config=配置/patch/启用状态/卸载；bundle-added=新装 bundle；' +
-          'host-code=已装插件的宿主端代码或插件依赖；client-code=客户端代码/界面。',
+          'What you changed: `config` (config, patch, enablement, or uninstall), `bundle-added` ' +
+          '(a newly installed bundle), `host-code` (host-side code or dependencies of an installed ' +
+          'plugin), or `client-code` (client code or UI).',
       },
       alreadyInDependencies: {
         type: 'boolean',
-        description: '仅 change=bundle-added 时有意义：该包是否已经在 profile 的 dependencies 里。',
+        description:
+          'Only meaningful with `change: bundle-added` — whether that package is already in the ' +
+          "profile's dependencies.",
       },
     },
     output: toolOutput(EFFECT_MODE_TOOL),

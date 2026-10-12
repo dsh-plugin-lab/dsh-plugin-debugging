@@ -106,21 +106,21 @@ export function createDiagnosePluginLoadTool(deps: ToolDeps): ToolDefinition {
   return defineTool({
     name: DIAGNOSE_PLUGIN_LOAD_TOOL,
     description:
-      '查一个插件是不是真的加载了。**首选直接观测**：读宿主 Loader 树里那一行的 fiber 相位，' +
-      '逐字复刻宿主自己的三档判定 —— fiber 不存在 = import 期就崩（failed to import）、' +
-      'state=3 = apply 崩（带失败原因）、state=0 = pending（带缺哪些 service）。' +
-      '读不到 Loader 时**自动降级**成推断：只看 bundles 列表、安装形态（link/copy）、' +
-      'entry 与 patch 在不在、启动失败日志 —— 这些只证前置条件、不证加载成功，' +
-      '降级时输出会显式标注 mode=inferred。进程按端口查，不用命令行子串。只读。',
+      'Checks whether a plugin actually loaded. ' +
+      'Use it when a plugin is installed but seems absent — its tools, page, or skill do not show up. ' +
+      'Read-only — and it keeps observed evidence (the host loader tree) separate from inferred ' +
+      'evidence (bundles membership, install form, entry files), which only prove the plugin could ' +
+      'load; treat output marked `mode=inferred` accordingly.',
     parameters: {
       package: {
         type: 'string',
         description:
-          '要查的包名（如 dsh-zhihu-search 或 @scope/name）；省略则逐个列 bundles 里的包。',
+          'Package to check, e.g. `dsh-zhihu-search` or `@scope/name`; omit to check every bundle.',
       },
       port: {
         type: 'integer',
-        description: '宿主监听端口；省略则用插件配置的 port，再退回环境里的 DSH_WEB_URL。',
+        description:
+          "Host port to probe; omit to use the plugin's configured port, falling back to `DSH_WEB_URL`.",
       },
     },
     output: toolOutput(DIAGNOSE_PLUGIN_LOAD_TOOL),
