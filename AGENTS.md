@@ -134,3 +134,8 @@ git diff --check
 22. **同一棵树两次读不许给出不同结论**：投影里凡涉及「多行同包」的取值，定序必须写死
     （本仓 `worstOf`：严重级 failed>pending>unknown>disabled>active，同级按 `entryId` tie-break），
     否则「哪一行浮上来」会随遍历顺序漂，看起来像随机故障。
+23. **`.gitignore` 里的 `lib/` 必须锚定成 `/lib/`** —— 裸 `lib/` 匹配**任意深度**，于是把
+    `src/lib/`（本布局里的**源码**目录，12 个文件）一起忽略了。表现是本机全绿、`git ls-files`
+    里却没有它们，**CI 克隆下来直接缺文件**。这个坑来自组织脚手架模板的 `_common/.gitignore`
+    （模板里就是裸 `lib/`），任何把源码放在 `src/lib/` 的新仓都会中招。**加了新目录后，
+    用 `git status --ignored --porcelain` 看一眼「被忽略的到底有哪些」**，别只看 `git status`。
