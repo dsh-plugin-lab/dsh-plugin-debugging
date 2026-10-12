@@ -59,7 +59,8 @@ git diff --check
       的 preset 作用域，与 `skill-filesystem` 同层 → rank 250 才真正赢）。静态写进 preset 组合的方案
       **已实测否决**（坏包会让默认 standard 会话建不起来）。决策见
       [.agents/notes/2026-10-13-skill-registers-twice-dynamic-scope.md](.agents/notes/2026-10-13-skill-registers-twice-dynamic-scope.md)。
-      剩余：撤掉本机个人副本（顺序在后，先证明赢）。
+      个人副本**已撤**（2026-10-13，`~/.agents/skills/dsh-plugin-debugging/` 从磁盘删除；维护者指定不碰那个仓库，
+      故未提交未推送）。代价已写进 `docs/ARCHITECTURE.md` §3 —— 技能此后**只在装了本插件的 profile 里**可见。
 - [ ] **`SkillReport.scoped` 真机不可观测**（`state.skill` 没有对外暴露面，pluginInventory 也不含插件内部状态）
       → v1.1 可考虑让本仓自己的某个工具报出「技能半边注册成了没有、几个 agent」，
       这样「注册了但没生效」这类问题不必靠 winner 反推。
