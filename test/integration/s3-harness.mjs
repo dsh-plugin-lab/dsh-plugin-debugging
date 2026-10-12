@@ -41,6 +41,15 @@ const outJson = process.argv[4]
 const benchHome = process.env.DSH_HOME
 const dshBin = process.env.S3_DSH_BIN
 const fixturePort = Number(process.env.S3_FIXTURE_PORT ?? 18396)
+/**
+ * 「确定没人监听」的端口 —— 给 `auth/fail-not-running` 用。
+ *
+ * **不能写死一个值**：夹具默认端口是 18396，若谁把 `S3_FIXTURE_PORT` 挪到这条用例写死的那个端口，
+ * 夹具就会替它回答 200，`not-running` 于是变成 `ok` —— **假红**（本轮实测踩过一次）。
+ * 所以从候选里挑一个既不是夹具端口、也不是真实例端口的。
+ */
+const deadPort =
+  [18399, 18398, 18397, 18395].find((p) => p !== fixturePort && p !== livePort) ?? 18399
 
 if (!repoRoot || !Number.isSafeInteger(livePort) || livePort <= 0 || !benchHome || !dshBin) {
   console.error(
@@ -228,7 +237,7 @@ const cases = [
     id: 'auth/fail-not-running',
     tool: 'dsh_check_auth',
     config: { ...baseConfig },
-    args: { port: 18399 },
+    args: { port: deadPort },
     expect: 'fail',
     expectKind: 'not-running',
     checkWhy: '没人监听 → not-running',

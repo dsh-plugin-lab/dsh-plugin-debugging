@@ -228,6 +228,11 @@ git diff --check
     `watchConfig(filename, …)` 遍历的就是 patch 文件，且 `watchConfig` 的**唯一出处**是 `dsh-hmr`。
     → 所以 `baseline = hot`（描述 loader 的**能力**：一旦重读就按行重建）与 `downgrade`（补上**触发者**）自洽，
     错的是「重读会自动发生」这个隐含前提。**工具输出必须点明触发者**（`why` 里已写 "nothing watches the patch files"）。
+    **正证也补上了**（2026-10-13，挂了 hmr 的实例）：**同一个操作**（改 patch 里的 `config.profile`）**不重启**，
+    **3.6 秒后读到新值**（47 个采样点，`mode` 全程 `hot` 不翻）。→ 同一动作、两种结果，**唯一变量是 hmr**。
+    补充纠正：**别拿 `ctx.get('hmr')` 当探针** —— 实测在**挂着 hmr** 的实例里它同样是 `undefined`
+    （hmr 并不把服务注册成那个名字）。判断 hmr 可用性只有两条真源：**profile 文件**与 **`--dump-config`**
+    （本仓工具走的正是这两条）。「读不到 hmr 服务」≠「没挂 hmr」。
 35. **观察面纠正：`resolved` 里没有 `timeoutMs`**。`EffectiveConfigBlock` 的字段只有
     `{ dshHome, dshHomeSource, profile, port, portSource }`（`src/tools/shared.ts:182-193`）。
     想验「改了配置有没有被重读」，可观察的是 **`resolved.profile`**（`dsh_check_effect_mode`），
