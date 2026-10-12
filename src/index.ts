@@ -15,7 +15,7 @@ import type {} from '@deepseek-ai/dsh-tools'
 
 import { resolveConfig, type Config } from './config.js'
 import type { PluginState } from './contracts.js'
-import { registerSkills } from './skills/register.js'
+import { registerSkills, type AgentsLike } from './skills/register.js'
 import { registerTools } from './tools/index.js'
 
 /** Cordis 插件名，用于 loader 诊断。 */
@@ -56,7 +56,12 @@ export function apply(ctx: Context, config: Config = {}): void {
   const state: PluginState = { config: resolveConfig(config), skill: null }
 
   // 技能半边：可选，失败只记状态，不打断挂载。
-  state.skill = registerSkills(ctx, optionalService(ctx, 'skills'))
+  // 动态 scope 注入要 `ctx.agents`（活跃 agent 注册表）—— 同样走**可选服务**取，
+  // 缺席时只做全局层注册（见 src/skills/register.ts 顶部：两次注册的理由）。
+  const agents = optionalService<AgentsLike>(ctx, 'agents')
+  state.skill = registerSkills(ctx, optionalService(ctx, 'skills'), {
+    agents: () => agents,
+  })
 
   // 工具半边：本插件的全部对外能力。
   registerTools(ctx, state)

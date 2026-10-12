@@ -7,7 +7,7 @@
 
 /** 技能注册的结果。注册失败**不是**插件的失败 —— 工具半边照常工作。 */
 export interface SkillReport {
-  /** 是否成功把自己的技能注册进宿主注册表。 */
+  /** 是否成功把自己的技能注册进宿主注册表（**全局层**那次）。 */
   ok: boolean
   /** 注册成的技能名（`ok` 为真时有值）。 */
   name?: string
@@ -15,6 +15,22 @@ export interface SkillReport {
   contentBytes?: number
   /** 失败的结构化原因（`ok` 为假时有值）。 */
   error?: SkillError
+  /**
+   * **动态 scope 注入**的结果（见 `.agents/notes/` 里那条决策）。
+   *
+   * 为什么需要它：发布形态下用户级技能在 **preset 层**（更近），会把全局层这次注册**跨层遮蔽**；
+   * 所以本插件还额外把技能注册进**每个活跃 agent 的 preset 作用域**，与 `skill-filesystem` 同层，
+   * 让 rank 250 在同层仲裁里胜出。
+   *
+   * 这里的计数是**插件 apply 那一刻**的：之后新开的 agent 由 `agent/created` 事件接管
+   * （该事件是 **serial** 派发，处理器里**不许 await**）。
+   */
+  scoped?: {
+    /** apply 时就已存在、且成功注册进其作用域的 agent 数。 */
+    initial: number
+    /** 这些注册里有几例失败（失败只记数，不影响 `ok` 与全局那次注册）。 */
+    failed: number
+  }
 }
 
 /** 结构化错误：机器码决定要不要重试，message 给人看，hint 是下一步。 */

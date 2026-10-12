@@ -68,11 +68,43 @@ src/
   全部返回 winner；唯一的 skill RPC `skills/list` 同样只给 winner）。**跨层遮蔽连 warn 都不打**
   （warn 只在同层去重时出现）。
 
-**产品后果与处置**：本机 `~/.agents/skills/dsh-plugin-debugging/` 曾有一份与本包**字节相同**的个人副本
-（rank 500）—— 在标准 preset 会话里它遮蔽本插件的技能。两份内容相同的时候看不出来，
-**一旦插件更新了 SKILL.md 而那份副本没更新，模型看到的会是旧副本**。处置见
-[.agents/notes/](../.agents/notes/) 里 coverage/personal-skill 那份决策记录：
-**先证明插件自己那份能赢，再撤掉个人副本**（撤除走 `~/.agents` 自己的仓库流程）。
+**产品后果与处置（已实现「动态 scope 注入」）**：本机 `~/.agents/skills/dsh-plugin-debugging/` 曾有一份
+与本包**字节相同**的个人副本（rank 500）—— 在标准 preset 会话里它遮蔽本插件的技能。两份内容相同时
+看不出来，**一旦插件更新了 SKILL.md 而那份副本没更新，模型看到的会是旧副本**。
+
+处置分两步，**顺序不能换**：
+
+1. **让插件那份在同层赢**（已实现，见 §3.1）—— 技能额外注册进每个活跃 agent 的 preset 作用域，
+   与 `skill-filesystem` 同层，于是 rank 250 真的压过 400/500；
+2. **再撤掉个人副本**（走 `~/.agents` 自己的仓库流程）—— 此时它已经不再必要，
+   而留着只会制造两份同源知识的漂移。
+
+**为什么不是「把插件行写进 preset 组合」**：也试过，能赢，但一旦插件包不可解析，
+**默认 `standard` 会话直接建不起来**（`agent-presets[standard].broken` → `session/create` 失败），
+等于插件坏了就没人能用；而且四个工具会被一起限进 preset 层。动态注入下插件行**不动**，
+坏包只影响插件自己。实测对照见 `.coord/verify-preset-layer.md` 与 `.coord/verify-dynamic-scope.md`。
+
+### 3.1 动态 scope 注入（两次注册）
+
+```
+全局层   ctx.skills.register(def)                     ← 插件挂在 profile 根，落全局层
+每个 agent  agent.ctx.get('skills').register(def)      ← 与 skill-filesystem 同层 → rank 250 才真正赢
+```
+
+三条**实测出来的**纪律（错一条都会**静默**）：
+
+- **`agent/created` 是 serial 派发，处理器里不许 `await`** —— 实测在处理器里 await 会让
+  `agents.create()` 直接卡住。所以注册是**全同步**的（处理器显式 `return undefined`，
+  没有 await 点）。类型签名本身就要求 `Promise<undefined> | undefined`。
+- **作用域注册表取自 `agent.ctx.get('skills')`**：`presets.serviceFor(agent, 'skills')` 即使在
+  preset 已挂时也返回 `undefined`（它找的是 preset 组**内部**的服务，skills 不在里面）。
+- **新会话覆盖得到**：处理器对「apply 之后才出现的 agent」同样生效，所以不依赖启动时遍历；
+  服务此刻缺席也照样**武装处理器**（处理器用 payload 里的 agent，不依赖那次 `list()`）。
+
+**边界（如实写出来）**：这条依赖宿主**内部 primitive**（`ctx.agents` / `agent.ctx` / `agent/created`），
+**不是公开契约** —— 宿主换版本必须重测；本仓因此用**结构型**声明而不是 import 具体类型，
+失效会表现为「读不到」而不是编译不过或运行期炸。另外它**只在真的开了 agent 的会话里赢**
+（纯冷会话用临时层，覆盖不到）。
 
 ## 4. 技能半边的三个 fail-closed 点
 

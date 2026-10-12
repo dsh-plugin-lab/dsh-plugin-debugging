@@ -19,6 +19,18 @@
  * **rank 只在同一层内比较**：宿主行与 repository 插件落**全局层**，preset 挂载的插件落该
  * preset 的层；最近层的同名条目**直接胜出**、不比 rank（官方 `docs/subsystems/skills.md:13,270,286-295`）。
  *
+ * **所以本文件做两次注册**（决策见 `.agents/notes/` 里那条「动态 scope 注入」）：
+ * 1. **全局层**（`ctx.skills`）：插件挂在 profile 根，注册落全局层；
+ * 2. **每个活跃 agent 的 preset 作用域**（`agent.ctx` 里的 skills 注册表）：与 `skill-filesystem`
+ *    **同层**，于是 rank 250 在同层仲裁里**真的赢**用户级 400/500。
+ *
+ * 为什么第 2 步是必需的：**发布形态下用户级技能由 preset 层发现**，而 preset 层比全局层**更近** →
+ * 全局那次注册会被**跨层遮蔽**（实测见 `.coord/verify-s2.md`）。只在同一个层里，rank 才参与比较。
+ *
+ * 为什么用「动态注入」而不是「把插件行写进 preset 组合」：后者一旦插件包不可解析，
+ * **默认 `standard` 会话直接建不起来**（`agent-presets[standard].broken`），等于插件坏了就没人能用；
+ * 现在插件行**不动**，坏包只影响插件自己（实测见 `.coord/verify-preset-layer.md` vs `verify-dynamic-scope.md`）。
+ *
  * **三个必须 fail-closed 的点**
  * 1. `content` 宿主**不校验**（`…\dsh-skill\lib\index.js:465-469` 只查 name/description/invocation），
  *    漏了要到渲染 `<skill_content>` 时才是空 —— 所以正文为空必须自己判成失败；
@@ -67,13 +79,44 @@ const DEFAULT_SKILL_ROOT = join(MODULE_DIR, '..', '..', 'skills')
 /**
  * 可选的注入口。
  *
- * **只为测试存在**：三个 fail-closed 分支（缺文件 / frontmatter 坏 / 正文空）没法拿
+ * **只为测试与解耦存在**：三个 fail-closed 分支（缺文件 / frontmatter 坏 / 正文空）没法拿
  * 真实 SKILL.md 触发，只能指向 `test/skills/fixtures/` 下的夹具。
- * 生产调用（`src/index.ts`）只传两个参数，走的永远是 `DEFAULT_SKILL_ROOT`。
+ * 生产调用（`src/index.ts`）不传它，走的永远是 `DEFAULT_SKILL_ROOT`。
  */
 export interface RegisterSkillOptions {
   /** 技能根目录；缺省 = 按产物位置推断的包内 `skills/`。 */
   skillRoot?: string
+  /**
+   * 取 `ctx.agents`（活跃 agent 注册表）。
+   *
+   * **用函数而不是值**：宿主上下文里这个服务可能缺席（那时我们只做全局层注册），
+   * 而且这样调用方不必知道 `agents` 服务的形状。缺省 = 不做动态注入。
+   */
+  agents?: () => AgentsLike | undefined
+}
+
+/**
+ * 「活跃 agent 注册表」的**结构型**视图。
+ *
+ * 刻意**不**从 `@deepseek-ai/dsh-agent` import 具体类型：这套机制（`ctx.agents` / `agent.ctx` /
+ * `agent/created`）是**宿主内部 primitive、不是公开契约**（实测见 `.coord/verify-dynamic-scope.md`），
+ * 而结构型声明让我们**只依赖真正用到的那一点点形状** —— 宿主换版本时，
+ * 失效会表现为「读不到」，而不是类型编译不过或运行期炸。
+ */
+export interface AgentsLike {
+  /** 全部活跃 agent，注册序。 */
+  list(): readonly AgentLike[]
+}
+
+/** 一个活跃 agent 的**结构型**视图：我们只要它的作用域 ctx。 */
+export interface AgentLike {
+  /** Agent 作用域上下文；其贡献是 agent-local、随销毁解开。 */
+  readonly ctx: { get(serviceName: string): unknown }
+}
+
+/** 技能注册表里我们用到的那一个方法（scoped 与全局注册表形状相同）。 */
+interface SkillRegistryLike {
+  register(skill: SkillRegistration): () => void
 }
 
 /** 收敛出一条失败报告。 */
@@ -227,5 +270,69 @@ export function registerSkills(
     )
   }
 
-  return { ok: true, name, contentBytes }
+  // 第二次注册：进每个**活跃 agent 的 preset 作用域**（与 skill-filesystem 同层 → rank 250 才真正赢）。
+  // 失败**不影响**上面的全局注册，所以只记数、不改 `ok`。
+  const scoped = registerScoped(ctx, options.agents, registration)
+
+  return { ok: true, name, contentBytes, scoped }
+}
+
+/**
+ * 把同一个技能注册进每个活跃 agent 的 preset 作用域。
+ *
+ * 三条实测出来的纪律（`.coord/verify-dynamic-scope.md`）：
+ * 1. **`agent/created` 是 serial 派发，处理器里不许 `await`** —— 实测在处理器里 await 会让
+ *    `agents.create()` 直接卡住。所以下面是**全同步**的：不 await、不推迟。
+ * 2. **作用域注册表要从 `agent.ctx.get('skills')` 取**：`presets.serviceFor(agent,'skills')`
+ *    即使在 preset 已挂时也返回 `undefined`（它找的是 preset 组内部的服务）。
+ * 3. **新会话覆盖得到**：处理器对「apply 之后才出现的 agent」同样生效，所以不依赖启动时遍历。
+ *
+ * @param ctx 宿主上下文（提供 `on` / `effect`；单测里是替身）。
+ * @param agentsOf 取活跃 agent 注册表；缺省或返回 `undefined` 时只做全局层注册。
+ * @param registration 已验证过的技能定义。
+ * @returns 计数；`undefined` 表示这次压根没做动态注入（宿主没有 agents 服务）。
+ */
+function registerScoped(
+  ctx: Context,
+  agentsOf: (() => AgentsLike | undefined) | undefined,
+  registration: SkillRegistration,
+): SkillReport['scoped'] {
+  if (agentsOf === undefined) return undefined
+
+  let initial = 0
+  let failed = 0
+
+  /** 同步注册进一个 agent 的作用域；绝不抛。 */
+  const intoAgent = (agent: AgentLike): boolean => {
+    try {
+      const scopedRegistry = agent.ctx.get('skills') as SkillRegistryLike | undefined
+      if (scopedRegistry === undefined) return false
+      scopedRegistry.register(registration)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  try {
+    // ① 已经在跑的 agent（插件热重载时这一批就是全部）。
+    for (const agent of agentsOf()?.list() ?? []) {
+      if (intoAgent(agent)) initial += 1
+      else failed += 1
+    }
+
+    // ② 之后新开的 agent。**同步处理器**：见上面纪律 1。
+    //    签名要求返回 `Promise<undefined> | undefined`（serial 派发），所以显式 `return undefined`，
+    //    而不是依赖 `void` —— 这也是「不许 await」在类型上的体现。
+    ctx.on('agent/created', (payload) => {
+      if (!intoAgent(payload.agent)) failed += 1
+      return undefined
+    })
+  } catch {
+    // 动态注入整条路失败（宿主没有 agents 服务、或事件名变了）：退回「只有全局注册」。
+    // **不**把 `ok` 改成 false —— 全局那次已经成了，技能仍然是可见的（只是可能被用户级遮蔽）。
+    return { initial, failed: failed + 1 }
+  }
+
+  return { initial, failed }
 }

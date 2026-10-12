@@ -166,3 +166,11 @@ git diff --check
     **用 `NODE_OPTIONS=--import` 在进程启动时改会把打包器一起骗了**（rolldown 按平台选原生绑定，
     报 `@rolldown/binding-wasm32-wasi` 找不到，整套起不来）。可行做法是临时 vitest config 的
     `setupFiles` 指向一个改 `process.platform` 的模块（config 放仓外、别落进仓）。
+26. **`agent/created` 是 serial 派发，处理器里不许 `await`**：本仓探针实测 —— 在处理器里
+    `await scoped.list(...)` 会让 **`agents.create()` 直接卡住**，而且宿主只留下极少的痕迹
+    （日志里只有 `listeners-registered`）。技能注册必须**同步**完成。
+27. **写探针/报告时 `JSON.stringify` 活对象（Cordis ctx、registry、agent）会因循环引用抛错** ——
+    若 flush 外面套了一层 `try/catch`，**报告会静默停在上一次成功状态**，看起来就像「那个事件
+    根本没触发」。本轮探针真踩过：差点据此得出「`agent/created` 收不到」的**反结论**。
+    做法：活对象放模块级 map、只序列化抽出来的纯数据；flush 失败**另写一个错误文件**而不是吞掉。
+    与第 18 条同族：**最危险的静默失败，是让判据自己看起来通过了。**
