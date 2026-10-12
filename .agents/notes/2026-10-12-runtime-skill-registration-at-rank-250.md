@@ -1,8 +1,14 @@
 # 技能走 runtime 注册（rank 250）：为什么不用 filesystem provider
 
-状态：生效
+状态：**部分被修正**（见下方指针）
 
 **类型**：决策。
+
+> **⚠️ 被修正的一步**：本文第「250 压过用户级」那一步推论**只在同一层内成立**，按发布形态**不成立** ——
+> 用户级技能落 preset 层（更近），会跨层遮蔽本文这条注册。修正与后续实现见
+> [2026-10-13-skill-registers-twice-dynamic-scope.md](2026-10-13-skill-registers-twice-dynamic-scope.md)。
+> **本文的其余部分（为什么走 runtime、rank 的语义与方向、fail-closed）仍然生效**，
+> 而且 250 依然是「同层内赢 400/500」的那个数。
 
 ## 背景
 
