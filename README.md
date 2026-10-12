@@ -5,88 +5,130 @@
 <h1 align="center">dsh-plugin-debugging</h1>
 
 <div align="center">
-  <p><em>Troubleshoot a running DSH instance: whether a change needs a reload or a restart, whether a plugin actually loaded, 401 versus connection-refused, and what the composed config really contains.</em></p>
+  <p><strong>Read-only debugging toolkit for a running DSH instance</strong></p>
+  <p><em>给正在跑的 DSH 实例排障：只读</em></p>
 
   <p>
-    <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/powered_by-dsh-4D6BFE?style=flat&logo=deepseek&logoColor=white" alt="powered by dsh"></a>
+    <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/powered_by_dsh-4D6BFE?style=flat&logo=deepseek&logoColor=white" alt="powered by dsh"></a>
   </p>
 
   <p>
     <a href="https://github.com/dsh-plugin-lab/dsh-plugin-debugging/actions/workflows/ci.yml"><img src="https://github.com/dsh-plugin-lab/dsh-plugin-debugging/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-    <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=flat" alt="MIT license"></a>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=flat" alt="MIT License"></a>
+    <!-- 首次发布到 npm 后补这两枚（现在挂上去只会显示 not found）：
+         <a href="https://www.npmjs.com/package/dsh-plugin-debugging"><img src="https://img.shields.io/npm/v/dsh-plugin-debugging.svg?style=flat" alt="npm"></a>
+         <a href="https://www.npmjs.com/package/dsh-plugin-debugging"><img src="https://img.shields.io/badge/SLSA-Build%20L2-green?logo=slsa&style=flat" alt="SLSA Build L2"></a> -->
   </p>
 
   <p>
-    Changelog → <a href="https://github.com/dsh-plugin-lab/dsh-plugin-debugging/releases">Releases</a> (one Release per npm version)
+    Per-version changes → <a href="https://github.com/dsh-plugin-lab/dsh-plugin-debugging/releases">Releases</a>
+  </p>
+
+  <p>
+    <a href="README_zh.md">简体中文</a> · <strong><a href="README.md">English</a></strong>
   </p>
 </div>
 
-English | [中文](README_zh.md)
-
 ---
 
-## What it provides
+One sentence holds this plugin together: **an artifact is read at a particular moment, and that moment decides what you must do after changing it.** Config is re-read on every change; a process loads code once at startup; the browser swaps assets by fingerprint. When a change "doesn't work", the first question is which of those three you are looking at.
 
-A skill plus four read-only tools, for the question **"I changed something and it didn't take effect"**.
+## Tools
 
-The underlying model is one sentence: *an artifact is read at a particular moment, and that moment decides what you must do after changing it.* Config is re-read by the loader on every change; a process loads code once at startup; the browser swaps assets by fingerprint.
+Installing it gives the model four tools, plus one skill:
 
-| Tool | Answers |
-|---|---|
-| `dsh_check_effect_mode` | Given what you changed, does it take effect live, require a restart, or go through HMR? |
-| `dsh_diagnose_plugin_load` | Is the plugin in `bundles`, how is it mounted (link or copy), does its entry exist, and is there a startup log naming it? |
-| `dsh_check_auth` | Connection refused (not running) versus 401 (running, not authenticated), plus the authority and port actually in use. |
-| `dsh_dump_config` | The composed config tree and `x-cordis.diagnostics`, with the exit-code semantics that decide whether an error is real. |
+| Tool | In one line | Reach for it when |
+|---|---|---|
+| `dsh_check_effect_mode` | Which of the three readings your change falls under | A change had no effect and you don't know whether to reload or restart |
+| `dsh_diagnose_plugin_load` | Whether a plugin is in `bundles`, how it is mounted, and what the Loader tree says | A plugin is installed but seems absent |
+| `dsh_check_auth` | Connection refused (not running) versus 401 (running, not authenticated) | The page returns 401, or you can't tell whether the host is up |
+| `dsh_dump_config` | The composed config tree and its diagnostics | You need to know what the composition actually resolved to |
 
-It also ships a skill (`dsh-plugin-debugging`) carrying the full troubleshooting knowledge — the "why" behind each check, the three live-effect tiers, the installation forms, credential acquisition, process identification, and isolated instances. The tools are accelerators for it; where they are ambiguous, the skill text wins.
+`dsh-plugin-debugging` is the skill behind them: it carries the reasoning for every check, the three live-effect tiers, the installation forms, credential acquisition, process identification, and isolated instances. **The tools are accelerators; where one is ambiguous, the skill text wins.**
 
-The skill is registered **into the active agent's own scope**, so a same-name copy you keep in a user-level skills directory does not shadow it. (Project-level skills still win, deliberately: a project's own rules should outrank any plugin.)
+### `dsh_check_effect_mode` —— what a change needs
 
-**v1 is read-only on purpose.** Nothing here restarts a process, rewrites a profile, or writes to `DSH_HOME`. Restart and hot-reload helpers are deliberately deferred: they are the only actions that can kill the host you are debugging, and their approval, cooldown, and failure-recovery semantics need to be settled first.
+- `change` (**required**): `config` (config / patch / enablement / uninstall) · `bundle-added` (a newly installed bundle) · `host-code` (host-side code of an installed plugin) · `client-code` (client code / UI).
+- `alreadyInDependencies`: only meaningful for `change: bundle-added`.
 
-## Platform support
+**Boundary**: it first probes whether the profile actually mounts `hmr`. Without `hmr`, `reload()` is a no-op, so any "takes effect live" verdict is downgraded to `restart-required`. It restarts nothing.
 
-**v1 identifies processes by port on Windows only.** On other platforms the port lookup reports
-`probed: false` with the platform in the message — deliberately *not* "no listener", because
-"couldn't check" and "not running" are opposite conclusions. Everything else (config composition,
-bundle/installation form, startup logs, authentication probing, config dumps) is platform-neutral.
+### `dsh_diagnose_plugin_load` —— whether a plugin loaded
+
+- `package`: name to check, e.g. `dsh-zhihu-search` or `@scope/name`. Omit to list every bundle.
+- `port`: host port to probe.
+
+**Boundary**: it reports **observed** evidence (the `loader` tree is readable: `fiber.state`, and `fiber === undefined` for modules that failed at import) separately from **inferred** evidence (the three preconditions: `bundles` membership, install form, entry file). When the tree cannot be read, the output says `mode=inferred` explicitly. Processes are found **by port**, never by command-line substring.
+
+### `dsh_check_auth` —— not running, or not authenticated
+
+- `port`: host port to probe.
+- `host`: hostname, default `127.0.0.1`.
+
+**Boundary**: the authority is a literal `host:port` match, so `localhost` and `127.0.0.1` are not interchangeable. It reports whether the `client-connection` / `browser-session` entries **exist**; v1 extracts no keys and signs no cookies.
+
+### `dsh_dump_config` —— what the composition resolved to
+
+- `profile`: profile name; omit to use the plugin's configured profile.
+
+**Boundary**: `--dump-config` always exits 0, so its exit code is not a gate; `--dump-config-schema` exits 1 when there are errors, and the known `preset-*` false positive is separated from errors that point at a row you changed.
+
+## Read-only by design
+
+- Reads files an instance already has; stores no credentials and produces none.
+- Restarts nothing, rewrites no profile, writes nothing to `DSH_HOME`.
+- Restart and hot-reload helpers are deliberately absent: they are the only actions that can kill the host you are debugging.
 
 ## Install
 
+### Prerequisites
+
+- **The supported DSH range is in [package.json](package.json)** (`engines.dsh`, and the same range on every `@deepseek-ai/dsh-*` peer) — the only source of truth; not copied here, because a copied range goes stale silently.
+- Node `>= 20`.
+
+### From npm
+
 ```shell
-dsh plugin --profile <profile> add dsh-plugin-debugging
+dsh plugin --profile web add dsh-plugin-debugging
 ```
 
-## Host compatibility
+Not on npm yet — this path starts working at the first release.
 
-The supported host range is declared in `package.json` — `engines.dsh`, plus the same range on every `@deepseek-ai/dsh-*` peer. **The values are not repeated here on purpose**: they drift, and a document that copies them goes stale silently. Read them from the manifest.
+### From source
 
-Two properties of that gate are worth knowing, because both fail quietly:
+```shell
+git clone https://github.com/dsh-plugin-lab/dsh-plugin-debugging.git
+cd dsh-plugin-debugging
+npm install && npm run build
 
-- The compatibility check reads **`peerDependencies`**, with `includePrerelease` enabled. `engines.dsh` currently has no reader at all, so declaring only `engines` enforces nothing.
-- When a profile-level bundle fails the check, the error is caught and the bundle is skipped — the process starts normally and the plugin is simply absent. `dsh plugin add` fails loudly instead.
+dsh plugin --profile web add "$PWD"
+```
+
+⚠️ The `npm install` step is not optional: with a `link:` install the dependencies come from the repository itself, and skipping it makes the plugin show up as not running (`ERR_MODULE_NOT_FOUND`).
+
+Restart `dsh --profile web` for the install to take effect.
+
+## Platform support
+
+Port-based process identification is **Windows-only** in v1. Elsewhere the lookup reports `probed: false` with the platform in the message — deliberately not "no listener", because "couldn't check" and "not running" are opposite conclusions. Everything else is platform-neutral.
 
 ## Configuration
 
 | Field | Default | Meaning |
 |---|---|---|
 | `dshHome` | `$DSH_HOME`, else `<home>/.dsh` | Where the instance keeps profiles, logs and credentials. |
-| `profile` | `$DSH_PROFILE`, else `web` | Which profile the tools inspect. Note the CLI consumes `--profile` itself, so it is never visible to a plugin; the environment is the only source. |
-| `port` | `0` (infer) | Host port to probe. `0` means "find the listening port". |
-| `timeoutMs` | `15000` | Ceiling for a spawned command or an HTTP probe. |
+| `profile` | `$DSH_PROFILE`, else the default profile | Which profile the tools inspect. |
+| `port` | `0` | Host port to probe; `0` finds the listening port. |
+| `timeoutMs` | `15000` | Ceiling for one spawned command or HTTP probe. |
 
-No credentials are stored: the plugin reads the files an instance already has and produces none of its own.
-
-## Development
-
-```shell
-npm ci
-npm run check          # typecheck + build + test
-npm run check:release  # release-state invariants
-```
-
-Design notes live in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md); decisions and their reasons in [.agents/notes/](.agents/notes/); maintenance rules in [AGENTS.md](AGENTS.md). Release procedure: [docs/PUBLISHING.md](docs/PUBLISHING.md).
+There is no settings card: how a plugin is configured is described in [AGENTS.md](AGENTS.md).
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE).
+
+## Contributing
+
+Bugs and requests go to the repository Issues.
+
+Maintainer's document map → [AGENTS.md](AGENTS.md).

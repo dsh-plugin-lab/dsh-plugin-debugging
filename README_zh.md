@@ -5,88 +5,131 @@
 <h1 align="center">dsh-plugin-debugging</h1>
 
 <div align="center">
-  <p><em>给一个正在跑的 DSH 实例排障：改动要不要重启、插件到底加载了没有、401 还是连接被拒、组合后的配置究竟长什么样。</em></p>
+  <p><strong>Read-only debugging toolkit for a running DSH instance</strong></p>
+  <p><em>给正在跑的 DSH 实例排障：只读</em></p>
 
   <p>
-    <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/powered_by-dsh-4D6BFE?style=flat&logo=deepseek&logoColor=white" alt="由 dsh 驱动"></a>
+    <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/powered_by_dsh-4D6BFE?style=flat&logo=deepseek&logoColor=white" alt="由 dsh 驱动"></a>
   </p>
 
   <p>
     <a href="https://github.com/dsh-plugin-lab/dsh-plugin-debugging/actions/workflows/ci.yml"><img src="https://github.com/dsh-plugin-lab/dsh-plugin-debugging/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=flat" alt="MIT 许可证"></a>
+    <!-- 首次发布到 npm 后补这两枚（现在挂上去只会显示 not found）：
+         <a href="https://www.npmjs.com/package/dsh-plugin-debugging"><img src="https://img.shields.io/npm/v/dsh-plugin-debugging.svg?style=flat" alt="npm"></a>
+         <a href="https://www.npmjs.com/package/dsh-plugin-debugging"><img src="https://img.shields.io/badge/SLSA-Build%20L2-green?logo=slsa&style=flat" alt="SLSA Build L2"></a> -->
   </p>
 
   <p>
-    各版本改动 → <a href="https://github.com/dsh-plugin-lab/dsh-plugin-debugging/releases">Releases</a>（与 npm 版本一一对应）
+    各版本改动 → <a href="https://github.com/dsh-plugin-lab/dsh-plugin-debugging/releases">Releases</a>
+  </p>
+
+  <p>
+    <strong><a href="README_zh.md">简体中文</a></strong> · <a href="README.md">English</a>
   </p>
 </div>
 
-[English](README.md) | 中文
-
 ---
 
-## 提供什么
+这套插件只用一句话就能说清：**产物在不同时机被读取，读取时机决定你改完该做什么。** 配置每次变更都被重读；进程只在启动时装载一次代码；浏览器按资源指纹自行换入。当「改了没用」时，第一个问题是：你看的是这三者里的哪一个。
 
-一个技能 + 四个**只读**工具，服务的是同一个问题：**「我改了点东西，怎么没生效？」**
+## 工具一览
 
-贯穿的原理只有一句：*产物在不同时机被读取，读取时机决定改动后该做什么。* 配置由 loader 每次变更重读；进程只在启动时装载一次代码；浏览器按资源指纹自行换入。
+装上后模型多出四个工具，外加一个技能：
 
-| 工具 | 回答什么 |
-|---|---|
-| `dsh_check_effect_mode` | 给定「你改了什么」→ 热生效、要重启、还是走 HMR |
-| `dsh_diagnose_plugin_load` | 插件在不在 `bundles`、什么挂载形态（link / 拷贝）、entry 在不在、启动日志里有没有被点名 |
-| `dsh_check_auth` | 区分「连接被拒（没启动）」与「401（服务活着、认证没过）」，并给出实际在用的 authority 与端口 |
-| `dsh_dump_config` | 组合后的配置树与 `x-cordis.diagnostics`，连同「哪个退出码才算真有错」的语义 |
+| 工具 | 一句话说明 | 适用场景 |
+|---|---|---|
+| `dsh_check_effect_mode` | 判定你的改动属于三种读取时机里的哪一种 | 改了没生效，且不知道该重载还是该重启 |
+| `dsh_diagnose_plugin_load` | 插件在不在 `bundles`、什么挂载形态、Loader 树怎么说 | 插件装了却像不存在 |
+| `dsh_check_auth` | 区分连接被拒（没在跑）与 401（在跑、没过认证） | 页面返回 401，或分不清宿主是否活着 |
+| `dsh_dump_config` | 组合后的配置树与其诊断 | 要知道这份组合究竟解析成了什么 |
 
-同时随包分发一个技能（`dsh-plugin-debugging`），装载完整的排障知识：每个检查背后的理由、生效三档、安装形态、凭证获取、进程识别、隔离实例。工具是它的加速器；两者冲突时**以技能正文为准**。
+`dsh-plugin-debugging` 是它们背后的技能：每个检查的理由、生效三档、安装形态、凭证获取、进程识别、隔离实例都在里面。**工具只是加速器；两者冲突时以技能正文为准。**
 
-技能注册进**当前 agent 自己的作用域**，所以你在用户级技能目录里留的同名副本**不会遮蔽它**。
-（项目级技能仍然会赢 —— 这是有意的：项目自己的规矩应当压过任何插件。）
+### `dsh_check_effect_mode` —— 改动要什么
 
-**v1 刻意只读。** 这里没有任何东西会重启进程、改写 profile 或写 `DSH_HOME`。重启与热重载助手被有意推迟：它们是仅有的、会杀掉「你正在排障的那个宿主」的动作，而它们的审批、冷却与失败恢复语义必须先定下来。
+- `change`（**必填**）：`config`（配置 / patch / 启用状态 / 卸载）· `bundle-added`（新装 bundle）· `host-code`（已装插件的宿主端代码）· `client-code`（客户端代码 / 界面）。
+- `alreadyInDependencies`：仅 `change: bundle-added` 时有意义。
 
-## 平台支持
+**边界**：它先探测 profile 里到底挂没挂 `hmr`。没有 `hmr` 时 `reload()` 是空操作，任何「热生效」判定都会降级成 `restart-required`。它不重启任何东西。
 
-**v1 只在 Windows 上按端口识别进程。** 其他平台上端口查询会报 `probed: false` 并把平台名写进说明 ——
-**刻意不写成「没有监听者」**：因为「查不了」与「没在跑」是相反的两个结论。
-其余能力（组合结果、bundle 与安装形态、启动日志、认证探测、配置转储）与平台无关。
+### `dsh_diagnose_plugin_load` —— 插件加载了没有
+
+- `package`：要查的包名，如 `dsh-zhihu-search` 或 `@scope/name`；省略则逐个列出 `bundles` 里的包。
+- `port`：要探测的宿主端口。
+
+**边界**：**观测**到的证据（`loader` 树可读时看 `fiber.state`；模块在 import 期就崩时 `fiber` 是 `undefined`）与**推断**出的证据（三处前置条件：在不在 `bundles`、安装形态、entry 文件）分开呈现；读不到树时输出会显式标注 `mode=inferred`。进程**按端口**查，不用命令行子串。
+
+### `dsh_check_auth` —— 没在跑，还是没过认证
+
+- `port`：要探测的宿主端口。
+- `host`：主机名，默认 `127.0.0.1`。
+
+**边界**：authority 是 `host:port` **逐字匹配**，所以 `localhost` 与 `127.0.0.1` 不通用。它报告 `client-connection` / `browser-session` 条目**是否存在**；v1 不提取密钥、不自签 cookie。
+
+### `dsh_dump_config` —— 组合解析成了什么
+
+- `profile`：profile 名；省略则用插件配置里的 profile。
+
+**边界**：`--dump-config` 退出码恒 0，不能当门禁；`--dump-config-schema` 退出码 1 表示有 error，而 `preset-*` 那类已知误报会与「指向你改过的那一行」的真错分开。
+
+## 刻意只读
+
+- 只读实例本来就有的文件；不存凭据，也不产生凭据。
+- 不重启进程、不改写 profile、不往 `DSH_HOME` 写任何东西。
+- 重启与热重载助手**有意不做**：它们是仅有的、能杀掉「你正在排障的那个宿主」的动作。
 
 ## 安装
 
+### 前置
+
+- **支持的 DSH 区间写在 [package.json](package.json)**（`engines.dsh`，以及每个 `@deepseek-ai/dsh-*` peer 上的同一区间）—— 那是唯一真源；本文件不抄它，因为抄下来的值会静默过期。
+- Node `>= 20`。
+
+### 从 npm 安装
+
 ```shell
-dsh plugin --profile <profile> add dsh-plugin-debugging
+dsh plugin --profile web add dsh-plugin-debugging
 ```
 
-## 版本兼容
+尚未发布到 npm —— 这条路径在首次发布后可用。
 
-支持的宿主范围声明在 `package.json` —— `engines.dsh`，以及每个 `@deepseek-ai/dsh-*` peer 上的同一区间。**这里刻意不重复那些值**：它们会漂，抄进文档就会静默过期。要具体值请现查清单。
+### 从源码安装
 
-这条门有两个性质值得知道，因为两者都**静默**失败：
+```shell
+git clone https://github.com/dsh-plugin-lab/dsh-plugin-debugging.git
+cd dsh-plugin-debugging
+npm install && npm run build
 
-- 兼容性判定读的是 **`peerDependencies`**（带 `includePrerelease`）。`engines.dsh` 目前**没有任何读取者**，只写它等于没有约束。
-- profile 级的 bundle 判定失败时，错误被 `catch` 成 `skippedBundles` —— 进程照常启动，插件像没装一样消失。`dsh plugin add` 那条路才是硬失败。
+dsh plugin --profile web add "$PWD"
+```
+
+⚠️ `npm install` 那一步不能省：`link:` 装法下依赖由仓库自己提供，漏装会让插件显示「未运行」（`ERR_MODULE_NOT_FOUND`）。
+
+重启 `dsh --profile web` 后生效。
+
+## 平台支持
+
+v1 的按端口进程识别**只在 Windows 上可用**。其他平台会报 `probed: false`，并把平台名写进说明 ——
+**刻意不写成「没有监听者」**：因为「查不了」与「没在跑」是相反的两个结论。其余能力与平台无关。
 
 ## 配置
 
 | 字段 | 默认 | 含义 |
 |---|---|---|
 | `dshHome` | `$DSH_HOME`，否则 `<home>/.dsh` | 实例存放 profile、日志与凭据的目录 |
-| `profile` | `$DSH_PROFILE`，否则 `web` | 工具检查哪个 profile。注意 `--profile` 被 CLI 自己吃掉了，插件永远看不到它 —— 环境变量是唯一来源 |
-| `port` | `0`（自动推断） | 要探测的宿主端口；`0` = 自己找监听端口 |
+| `profile` | `$DSH_PROFILE`，否则默认 profile | 工具检查哪个 profile |
+| `port` | `0` | 要探测的宿主端口；`0` = 自己找监听端口 |
 | `timeoutMs` | `15000` | 一次外部命令或 HTTP 探测的上限 |
 
-不存任何凭据：插件只读实例本来就有的文件，自己不产生密钥。
-
-## 开发
-
-```shell
-npm ci
-npm run check          # typecheck + build + test
-npm run check:release  # 发布态不变量
-```
-
-设计说明见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)；决策与理由见 [.agents/notes/](.agents/notes/)；维护规则见 [AGENTS.md](AGENTS.md)；发布流程见 [docs/PUBLISHING.md](docs/PUBLISHING.md)。
+没有设置卡片：插件怎么配写在 [AGENTS.md](AGENTS.md)。
 
 ## 许可证
 
-[MIT](LICENSE)
+[MIT](LICENSE)。
+
+## 贡献
+
+问题与需求请走仓库 Issues。
+
+维护者文档地图 → [AGENTS.md](AGENTS.md)。
