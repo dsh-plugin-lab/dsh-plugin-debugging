@@ -1,0 +1,37 @@
+/**
+ * 工具半边 —— 注册 v1 的四个**只读**诊断工具。
+ *
+ * **契约（G2 冻结，改它要同时改 `src/contracts.ts` 与技能半边）**
+ * - 只导出 `registerTools(ctx, state)`；
+ * - 只碰 `ctx.tools`（`ctx.skills` 归技能半边）；不 import `src/skills/**`；
+ * - **容忍缺失**：`ctx.tools` 不在时直接返回，不抛（宿主缺服务时插件不该炸）；
+ * - 每个工具**一个文件**（组织既有范式，见 `dsh-zhihu-search/src/tools/`）；
+ * - 每个工具的 `execute` **绝不 throw**：预期内失败一律返回结构化
+ *   `{ ok: false, error: { kind, message, hint } }`，`kind` 是闭枚举（决定模型该不该重试）；
+ * - `exec.signal` 必须透传给底层 fetch / spawn。
+ *
+ * **v1 工具清单**（决策 D4；命名取 03 那套，副作用工具留 v1.1 —— 决策 D5）
+ * | 工具 | 对应 SKILL.md |
+ * |---|---|
+ * | `dsh_check_effect_mode` | §一 生效三档 |
+ * | `dsh_diagnose_plugin_load` | §3.1 / §3.2 / §3.8 |
+ * | `dsh_check_auth` | §3.3 / §3.4 |
+ * | `dsh_dump_config` | §3.8 |
+ *
+ * TODO(G3-A)：在 `src/tools/` 下逐个实现这四个文件，在这里聚合注册。
+ */
+import type { Context } from '@deepseek-ai/cordis'
+
+import type { PluginState } from '../contracts.js'
+
+/**
+ * 聚合注册入口。
+ *
+ * @param ctx 宿主上下文；`ctx.tools` 是唯一允许触碰的服务。
+ * @param state 配置 + 技能半边的结果（工具可以据此在输出里提示技能没生效）。
+ */
+export function registerTools(ctx: Context, _state: PluginState): void {
+  if (ctx.tools === undefined) return
+
+  // G3-A：四个工具在这里 register（每个一文件）。
+}
