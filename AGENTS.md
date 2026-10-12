@@ -145,3 +145,9 @@ git diff --check
     里却没有它们，**CI 克隆下来直接缺文件**。这个坑来自组织脚手架模板的 `_common/.gitignore`
     （模板里就是裸 `lib/`），任何把源码放在 `src/lib/` 的新仓都会中招。**加了新目录后，
     用 `git status --ignored --porcelain` 看一眼「被忽略的到底有哪些」**，别只看 `git status`。
+    （模板已修：组织仓 `490e752`。）
+24. **判据必须写清「在哪个运行上下文里成立」**：`npm pack` 解包目录里 `import` 一个**peer 型**包
+    **恒假** —— 实测报 `ERR_MODULE_NOT_FOUND: @deepseek-ai/schemastery`（peers 不在解包目录里）。
+    正确判据是「**在 peers 可解析的上下文里** import 成功且无副作用」。
+    同一族的问题还有「本机跑绿推不出 CI 跑绿」：**判据的上下文与实际使用的上下文不一致时，
+    得到的是假红或假绿**，两种都费人。**写判据时先把「它在什么环境里跑」写出来。**
