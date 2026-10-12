@@ -43,7 +43,10 @@ export const DEFAULT_PROFILE = 'web'
  * @param config 宿主传来的（或单测里手写的）配置。
  * @param env 只用于测试注入；默认读 `process.env`。
  */
-export function resolveConfig(config: Config | undefined, env: NodeJS.ProcessEnv = process.env): ResolvedConfig {
+export function resolveConfig(
+  config: Config | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): ResolvedConfig {
   const dshHome = config?.dshHome || env.DSH_HOME || ''
   const profile = config?.profile || env.DSH_PROFILE || DEFAULT_PROFILE
   return {

@@ -38,6 +38,7 @@
     "skills",
     "cordis.patch.yml",
     "README.md",
+    "README_zh.md",
     "LICENSE"
   ],
   "engines": {
@@ -57,6 +58,7 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
+    "check:release": "node scripts/check-release.mjs",
     "check": "npm run typecheck && npm run build && npm run test"
   },
   "peerDependencies": {

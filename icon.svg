@@ -1,10 +1,13 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="placeholder icon">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="dsh-plugin-debugging">
   <!--
-    占位图标 —— 发布前必须换成**自制或有授权的**图形。
-    路径与尺寸限制见官方 host-plugin 参考：SVG / PNG / JPEG / WebP，≤ 256 KiB，
-    必须留在包内（绝对路径、URL、指向包外的符号链接都会被拒）。
-    这个文件**不含占位符**，所以脚手架按字节原样拷贝；换图是人的事，不是生成器的事。
+    自制图标（本仓所有，MIT，随包分发）。
+    语义：放大镜=去现场看；镜中三条横线=「产物在不同时机被读取」这一条贯穿原理。
+    约束（官方 host-plugin 参考）：SVG/PNG/JPEG/WebP、≤256 KiB、必须留在包内。
   -->
-  <rect width="64" height="64" rx="12" fill="#4D6BFE"/>
-  <circle cx="32" cy="32" r="11" fill="#fff"/>
+  <rect width="128" height="128" rx="26" fill="#4D6BFE"/>
+  <circle cx="56" cy="56" r="27" fill="none" stroke="#FFFFFF" stroke-width="8"/>
+  <line x1="76" y1="76" x2="100" y2="100" stroke="#FFFFFF" stroke-width="11" stroke-linecap="round"/>
+  <line x1="43" y1="47" x2="69" y2="47" stroke="#FFFFFF" stroke-width="6" stroke-linecap="round" opacity="0.95"/>
+  <line x1="43" y1="58" x2="61" y2="58" stroke="#FFFFFF" stroke-width="6" stroke-linecap="round" opacity="0.7"/>
+  <line x1="43" y1="69" x2="69" y2="69" stroke="#FFFFFF" stroke-width="6" stroke-linecap="round" opacity="0.45"/>
 </svg>

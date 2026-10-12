@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "dsh-plugin-debugging",
-    "description": "Troubleshoot a running DSH instance: which change needs what to take effect, whether a plugin actually loaded, 401 vs connection-refused, and config dumps."
+    "title": "DSH 插件排障",
+    "description": "给正在跑的 DSH 实例排障：改动要不要重启、插件加载了没有、401 还是连接被拒、组合配置长什么样。只读，不重启、不改配置。"
   }
 }
