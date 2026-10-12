@@ -1009,6 +1009,59 @@ describe('B12 技能文件本体', () => {
 })
 
 /**
+ * B13 判据：仓内 `.ps1` 必须带 UTF-8 BOM。
+ *
+ * **为什么值得一条红线**：Windows PowerShell 5.1（系统默认那个 `powershell.exe`）读**无 BOM** 的文件时
+ * 按 **GBK** 解码；本仓脚本的注释是中文 → **直接解析失败**，报错还是 `Unexpected token '}'`
+ * 这种**看起来像语法错**的形状。而 **prettier 跳过 `.ps1`、CI 也不解析它** ——
+ * 所以「本机全绿 + CI 全绿」**照不出这条**，实测两个脚本都 PARSE-FAIL 过。
+ *
+ * 判据只吃字节，故可以**在内存里造反例**（同一段内容、有无 BOM 各判一次），不碰真文件。
+ */
+const UTF8_BOM = [0xef, 0xbb, 0xbf] as const
+
+/** 判断一个字节序列是否以 UTF-8 BOM 开头。 */
+function hasUtf8Bom(bytes: readonly number[]): boolean {
+  return UTF8_BOM.every((byte, index) => bytes[index] === byte)
+}
+
+/** 找出所有缺 BOM 的 `.ps1`（返回违规清单，空 = 通过）。 */
+function judgePs1Bom(files: readonly { path: string; bytes: readonly number[] }[]): string[] {
+  return files.filter((file) => !hasUtf8Bom(file.bytes)).map((file) => file.path)
+}
+
+describe('B13 仓内 .ps1 带 UTF-8 BOM（否则 PowerShell 5.1 按 GBK 解码、中文注释导致解析失败）', () => {
+  /** 仓内所有 `.ps1`（递归；跳过 node_modules 与构建产物）。 */
+  function ps1Files(dir: string, found: string[] = []): string[] {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name === 'node_modules' || entry.name === 'lib' || entry.name === '.git') continue
+      const full = join(dir, entry.name)
+      if (entry.isDirectory()) ps1Files(full, found)
+      else if (entry.name.endsWith('.ps1')) found.push(full)
+    }
+    return found
+  }
+
+  it('每个 .ps1 都以 EF BB BF 开头', () => {
+    const files = ps1Files(REPO_ROOT).map((path) => ({
+      path,
+      bytes: [...readFileSync(path).subarray(0, 3)],
+    }))
+    // 自检：扫描器必须真的扫到东西，否则这条判据是空转（`scripts/**` 与 `test/integration/**` 都有）。
+    expect(files.length, '一个 .ps1 都没扫到 —— 扫描器空转').toBeGreaterThan(0)
+    expect(judgePs1Bom(files)).toEqual([])
+  })
+
+  it('判据可被否证：同一段内容去掉 BOM 会被照出来', () => {
+    const content = 'Write-Output "中文注释"'
+    const withBom = [...UTF8_BOM, ...[...Buffer.from(content, 'utf8')]]
+    const withoutBom = [...Buffer.from(content, 'utf8')]
+    expect(judgePs1Bom([{ path: 'ok.ps1', bytes: withBom }])).toEqual([])
+    expect(judgePs1Bom([{ path: 'bad.ps1', bytes: withoutBom }])).toEqual(['bad.ps1'])
+  })
+})
+
+/**
  * # 本文件的已知限度
  *
  * 这一节本身是判据的一部分：它让下一个改实现的人知道**哪些红线会跟着失效**。
