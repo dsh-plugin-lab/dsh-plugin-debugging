@@ -1,0 +1,20 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".",
+    // 显式关掉：noEmit 下本来不产出，但父配置开着 declaration 与 sourceMap，
+    // 读配置的人会以为测试会生成它们。
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false,
+    // 测试以 `.ts` 后缀导入被测源码（vitest 走 Vite 解析，已验证可用）。
+    // 没有这一条，`tsc -p tsconfig.test.json` 会直接报 TS5097。
+    "allowImportingTsExtensions": true,
+    "types": ["node", "vitest/globals"]
+  },
+  "include": ["src/**/*", "test/**/*"],
+  // `src/client/**` 只被排除在**根文件**之外，它的编译入口是 tsconfig.client.json；
+  // 测试 import 到它时照样进程序。
+  "exclude": ["src/client"]
+}

@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="placeholder icon">
+  <!--
+    占位图标 —— 发布前必须换成**自制或有授权的**图形。
+    路径与尺寸限制见官方 host-plugin 参考：SVG / PNG / JPEG / WebP，≤ 256 KiB，
+    必须留在包内（绝对路径、URL、指向包外的符号链接都会被拒）。
+    这个文件**不含占位符**，所以脚手架按字节原样拷贝；换图是人的事，不是生成器的事。
+  -->
+  <rect width="64" height="64" rx="12" fill="#4D6BFE"/>
+  <circle cx="32" cy="32" r="11" fill="#fff"/>
+</svg>

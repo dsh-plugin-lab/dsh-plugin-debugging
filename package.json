@@ -1,0 +1,76 @@
+{
+  "name": "dsh-plugin-debugging",
+  "version": "0.1.0",
+  "description": "Troubleshoot a running DSH instance: which change needs what to take effect, whether a plugin actually loaded, 401 vs connection-refused, and config dumps.",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "dsh-plugin"
+  ],
+  "license": "MIT",
+  "author": "Zayn",
+  "icon": "./icon.svg",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dsh-plugin-lab/dsh-plugin-debugging.git"
+  },
+  "bugs": {
+    "url": "https://github.com/dsh-plugin-lab/dsh-plugin-debugging/issues"
+  },
+  "homepage": "https://github.com/dsh-plugin-lab/dsh-plugin-debugging#readme",
+  "type": "module",
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "import": "./lib/index.js"
+    },
+    "./locale/*.json": "./locale/*.json",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "!lib/**/*.map",
+    "icon.svg",
+    "locale/*.json",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20",
+    "dsh": "^0.1.7-rc.1 || ^0.2.0-rc.1"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "check": "npm run typecheck && npm run build && npm run test"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.4"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.4",
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^22.20.0",
+    "eslint": "^10.11.0",
+    "eslint-config-prettier": "^10.1.8",
+    "globals": "^17.12.0",
+    "prettier": "^3.9.9",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.70.1",
+    "vitest": "^4.1.11",
+    "esbuild": "^0.28.2"
+  }
+}
