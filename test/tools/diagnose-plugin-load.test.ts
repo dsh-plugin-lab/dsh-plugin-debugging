@@ -7,9 +7,12 @@
  * 2. 输出里必须带 `loadProofCaveat` —— 不说这句，模型会把「三处都在」
  *    读成「插件活着」，而 Fiber 状态根本没有查询入口。
  *
- * 可达 kind 是穷举的：`not-configured` / `not-found` / `timeout` / `cancelled`。
+ * 可达 kind 是穷举的：`not-found` / `timeout` / `cancelled` / `internal`。
+ * `internal` 现在只由**防御性断言**产生（`dshHome` 空串 = 契约被违反）。
+ * `not-configured` **不再可达** —— 本工具不起 dsh 子进程，而 dshHome 兜底已补上；
+ * 端口查不出来只会降级成 `probed: false`，不让文件层诊断作废。
  * `not-running` 与 `auth` 不可能出现（不探网络）；`command-failed` 也不会
- * —— 端口查询失败只会降级成 `probed: false`，不让整份文件层诊断作废。
+ * —— 端口查询失败不会让整份说明失败。
  */
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -56,7 +59,11 @@ describe('dsh_diagnose_plugin_load', () => {
       const tool = createDiagnosePluginLoadTool(depsFor(configFor(dshHome), { spawn }))
 
       const data = expectOk(await run(tool, {}))
-      expect(data['profile']).toBe('web')
+      // 这份诊断的全部结论都建立在「读的是哪个目录」上 —— 来源必须可见。
+      const resolved = data['resolved'] as Record<string, unknown>
+      expect(resolved['profile']).toBe('web')
+      expect(resolved['dshHome']).toBe(dshHome)
+      expect(resolved['dshHomeSource']).toBe('config')
       expect(data['bundles']).toEqual(['dsh-zhihu-search'])
       const pkg = (data['packages'] as Record<string, unknown>[])[0]
       expect((pkg?.['entry'] as Record<string, unknown>)['entryExists']).toBe(true)
@@ -119,6 +126,10 @@ describe('dsh_diagnose_plugin_load', () => {
       const port = data['port'] as Record<string, unknown>
       expect((port['lookup'] as Record<string, unknown>)['probed']).toBe(true)
       expect((port['lookup'] as Record<string, unknown>)['listening']).toBe(false)
+      // 端口值与其来源在 resolved 里（一处一事实，不在这里重复）。
+      const resolved = data['resolved'] as Record<string, unknown>
+      expect(resolved['port']).toBe(3080)
+      expect(resolved['portSource']).toBe('plugin-config')
     })
 
     it('产物比进程新 → artifactNewerThanProcess=true（宿主端跑的是旧产物）', async () => {
@@ -154,10 +165,13 @@ describe('dsh_diagnose_plugin_load', () => {
   })
 
   describe('错误路径（每条可达 kind）', () => {
-    it('not-configured：拿不到 DSH_HOME', async () => {
+    it('internal：dshHome 空串是**契约被违反**的防御性断言（不再是 not-configured）', async () => {
+      // 本工具**不**起 dsh 子进程，所以它没有别的 not-configured 来源：
+      // 兜底补上之后（config → env → <homedir>/.dsh），空串只可能是本插件的 bug。
       const tool = createDiagnosePluginLoadTool(depsFor(configFor('')))
       const error = expectFail(await run(tool, {}))
-      expect(error.kind).toBe('not-configured')
+      expect(error.kind).toBe('internal')
+      expect(error.message).toContain('resolveConfig')
       expect(TOOL_ERROR_KINDS).toContain(error.kind)
     })
 

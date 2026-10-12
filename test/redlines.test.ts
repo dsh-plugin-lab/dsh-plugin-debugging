@@ -39,6 +39,9 @@ import { afterAll, describe, expect, it } from 'vitest'
  * 我们**选择不豁免**（技能随包分发是本仓 v1 的能力面，D12）。
  * 写在这里的理由：判据从严可以，但**必须让人知道这是自选的** ——
  * 否则下一个人会以为组织要求它，从而不敢动、也不敢查。
+ *
+ * **本文件的已知限度**（哪条断言只在当前实现下成立、改了实现会跟着失效）见**文末**那一节。
+ * 改这个文件或改它守护的实现之前，先读那一节。
  */
 
 const REPO_ROOT = fileURLToPath(new URL('../', import.meta.url))
@@ -495,19 +498,40 @@ const EXPECTED_TOOLS = [
 ] as const
 
 /**
- * 从源码文本里提取注册用的工具名常量（`export const X_TOOL = 'dsh_...'`）。
+ * 提取器认得的形态。**写在这里就要写进自检** —— 认得的形态和自检覆盖的形态必须是同一批，
+ * 否则自检自己也在假绿（只喂它认得的那种，当然永远通过）。
+ */
+const TOOL_NAME_SHAPES: ReadonlyArray<{ label: string; pattern: RegExp }> = [
+  {
+    label: 'export const <任意名> = <任意引号>dsh_…<任意引号>',
+    pattern: /export\s+const\s+[A-Za-z0-9_$]+\s*=\s*['"`](dsh_[a-z0-9_]+)['"`]/g,
+  },
+  {
+    label: 'defineTool 内联 name: <任意引号>dsh_…<任意引号>',
+    pattern: /\bname\s*:\s*['"`](dsh_[a-z0-9_]+)['"`]/g,
+  },
+]
+
+/**
+ * 从源码文本里提取注册用的工具名。
  *
- * 抽成函数是为了能拿**合成文本**验证它本身有效：一个坏掉的提取器会返回空集，
- * 而空集在「跳过未实现」的设计里看起来完全正常 —— 那就成了假绿。
+ * 覆盖三种引号（`'` / `"` / `` ` ``）与常见命名：**不再绑定 `*_TOOL` 这种命名约定**，
+ * 因为绑定命名约定的提取器一旦遇到别的写法就返回空集 —— 而空集在「跳过未实现」的设计里
+ * 看起来完全正常（这是本文件上一版确认过的假绿）。
+ *
+ * @param sources 源码文本。
+ * @returns 提取到的名字（可能重复，由调用方去重）。
  */
 function collectDeclaredToolNames(sources: readonly { path: string; text: string }[]): string[] {
   const names: string[] = []
   for (const { text } of sources) {
-    for (const match of stripComments(text).matchAll(
-      /export\s+const\s+[A-Z0-9_]+_TOOL\s*=\s*'([a-z0-9_]+)'/g,
-    )) {
-      const name = match[1]
-      if (name !== undefined) names.push(name)
+    const stripped = stripComments(text)
+    for (const { pattern } of TOOL_NAME_SHAPES) {
+      // 每次新建正则：`g` 正则带 lastIndex，跨文件复用会漏匹配。
+      for (const match of stripped.matchAll(new RegExp(pattern.source, pattern.flags))) {
+        const name = match[1]
+        if (name !== undefined) names.push(name)
+      }
     }
   }
   return names
@@ -518,28 +542,62 @@ function collectMentionedToolNames(markdown: string): string[] {
   return [...markdown.matchAll(/\bdsh_[a-z0-9_]+/g)].map((match) => match[0])
 }
 
-/** 工具实现文件（排除聚合入口与共享工具）。 */
-const TOOL_IMPL_SOURCES = readSourcesUnder('src/tools').filter(
-  (source) => !source.path.endsWith('/index.ts') && !source.path.endsWith('/shared.ts'),
+/** `src/tools/` 下的全部源码。 */
+const ALL_TOOL_SOURCES = readSourcesUnder('src/tools')
+
+/**
+ * 「工具半边实现了没有」的判据是**结构标记 `defineTool(`**，不是名字能不能提出来。
+ *
+ * 这两件事必须分开：把「提不出名字」当成「尚未实现」，正是上一版那个假绿的成因 ——
+ * 注册名一个字没变、只换了引号风格，就会静默降级成 skip。
+ */
+const TOOL_IMPL_SOURCES = ALL_TOOL_SOURCES.filter((source) =>
+  stripComments(source.text).includes('defineTool('),
 )
 
-const declaredToolNames = [...new Set(collectDeclaredToolNames(TOOL_IMPL_SOURCES))].sort()
-const toolHalfImplemented = declaredToolNames.length > 0
+const declaredToolNames = [...new Set(collectDeclaredToolNames(ALL_TOOL_SOURCES))].sort()
+
+/**
+ * 「工具半边实现了没有」的判据是**两条证据取并**：有人调用 `defineTool(`，**或**提得出工具名。
+ *
+ * 取并而不是取 `defineTool` 一条：只要有任何一条证据在，就说明工具半边存在，
+ * 于是下面的闭集断言必须真跑。**只有两条证据都没有**（`src/tools/` 里既没人调 defineTool、
+ * 也提不出任何名字）才允许跳过 —— 那才是「还没写」，而不是「写了但提取器认不出来」。
+ * 这正是上一版假绿的成因：把「提不出名字」当成「尚未实现」，于是静默降级成 skip。
+ */
+const toolHalfImplemented = TOOL_IMPL_SOURCES.length > 0 || declaredToolNames.length > 0
 
 if (!toolHalfImplemented) {
-  // 响了要看得见：跳过不是绿，这条日志是「本仓此刻还验不了这条」的唯一信号。
+  // 响了要看得见：跳过不是绿。走到这里意味着 src/tools/ 下**毫无工具半边的痕迹**。
   console.warn(
-    '[redlines] 工具半边尚未实现：src/tools/ 下没找到 *_TOOL 常量，B9 实现侧断言被跳过（不是通过）。',
+    '[redlines] 工具半边尚未实现：src/tools/ 下既没有 defineTool 调用、也提不出任何工具名，' +
+      'B9 实现侧断言被跳过（不是通过）。',
   )
 }
 
 describe('B9 工具名是闭集', () => {
-  it('提取器本身有效：喂合成源码能认出四个名字', () => {
-    const synthetic = EXPECTED_TOOLS.map(
-      (name, index) => `export const TOOL_${index}_TOOL = '${name}'`,
-    ).join('\n')
-    const found = collectDeclaredToolNames([{ path: 'synthetic.ts', text: synthetic }]).sort()
-    expect(found).toEqual([...EXPECTED_TOOLS].sort())
+  it('提取器本身有效：三种引号 + 内联 name 五种形态都认得', () => {
+    // 每种形态各喂一个：认得几种就自检几种（自检与 TOOL_NAME_SHAPES 必须同批）。
+    const synthetic = [
+      `export const A_TOOL = '${EXPECTED_TOOLS[0]}'`,
+      `export const B_TOOL = "${EXPECTED_TOOLS[1]}"`,
+      `export const C_TOOL = \`${EXPECTED_TOOLS[2]}\``,
+      `export const lowercaseName = "${EXPECTED_TOOLS[3]}"`,
+      `export function make() { return defineTool({ name: 'dsh_check_auth' }) }`,
+    ].join('\n')
+    const found = [
+      ...new Set(collectDeclaredToolNames([{ path: 'synthetic.ts', text: synthetic }])),
+    ]
+    // 四种常量形态 + 内联那一处（与第 4 个名字重复，去重后仍是四个）。
+    expect(found.sort()).toEqual([...EXPECTED_TOOLS].sort())
+  })
+
+  it('提取器不绑定命名约定：`*_TOOL` 之外的写法也要认', () => {
+    // 这条正是上一版假绿的成因：换名字约定后提取器返回空集，而空集被当成「尚未实现」跳过。
+    const synthetic = `export const CHECK_AUTH = "dsh_check_auth"`
+    expect(collectDeclaredToolNames([{ path: 'synthetic.ts', text: synthetic }])).toEqual([
+      'dsh_check_auth',
+    ])
   })
 
   it('提取器要能忽略注释里的假声明', () => {
@@ -584,8 +642,18 @@ describe('B9 工具名是闭集', () => {
     expect(offenders, describeOffenders('出现了闭集外的工具名', offenders)).toEqual([])
   })
 
-  it.skipIf(!toolHalfImplemented)('实现侧：src/tools/ 声明的名字正好是闭集那四个', () => {
-    expect(declaredToolNames).toEqual([...EXPECTED_TOOLS].sort())
+  it.skipIf(!toolHalfImplemented)('实现侧：文件在却提不出名字 = 红（不许降级成 skip）', () => {
+    // 走到这里说明 src/tools/ 下**确有**文件调用 defineTool —— 那么名字必须提得出来。
+    // 提不出来只有两种可能：提取器的形态清单落后于实现（该扩 TOOL_NAME_SHAPES），
+    // 或者真的没声明名字。**两种都要人来看**，所以判红并报出文件、以及提取器认得的形态。
+    expect(
+      declaredToolNames,
+      `src/tools/ 下有 ${TOOL_IMPL_SOURCES.length} 个文件调用了 defineTool，但提取到的名字是 ` +
+        `${JSON.stringify(declaredToolNames)}（期望 ${JSON.stringify([...EXPECTED_TOOLS].sort())}）。\n` +
+        '这不是「尚未实现」—— 文件在。提取器当前认得这些形态：\n' +
+        TOOL_NAME_SHAPES.map((shape) => `  - ${shape.label}`).join('\n') +
+        '\n若实现换了写法，请把新形态加进 TOOL_NAME_SHAPES 并同步扩自检。',
+    ).toEqual([...EXPECTED_TOOLS].sort())
   })
 })
 
@@ -599,39 +667,136 @@ describe('B9 工具名是闭集', () => {
  * - 允许 `child.kill()` —— 掐掉**自己刚起的那个只读探针**（超时/取消卫生），
  *   它不改变系统状态。
  * - 禁止 `process.kill` / `taskkill` / `Stop-Process` / 信号常量 —— 那是杀**别人的**进程。
- * - 禁止任何 fs 写入 API —— v1 不写 `$DSH_HOME`、不改 profile、不落状态文件。
- * - 禁止 `'plugin'` 字面量 —— 那是 `dsh plugin add/remove` 的入口；v1 不碰安装面。
+ * - 禁止装面命令（`dsh plugin add/remove/…`）——**按子串匹配、不要求引号形状**，
+ *   因为 `execSync('dsh plugin add ' + p)` 与模板字符串都会绕过「引号紧邻」那种写法。
+ * - 禁止 fs 写入 API —— **只在确实从 `node:fs` 导入的名字上判定**（见 {@link fsBindingsOf}），
+ *   否则 `src/lib/render.ts` 里那个同名的本地 `truncate` 字符串助手会被误报，
+ *   而「因为会误报所以整族不查」等于不设防（上一版就是这么漏掉 `fs.truncate` 家族的）。
+ *
+ * **已知未覆盖**（明确列出来，不静默排除）：`node:fs` 之外的写入通道，例如
+ * `process.binding`、原生 addon、`require()`（本仓是纯 ESM）、以及把 `fs` 方法先赋给
+ * 别的变量再调用（`const w = writeFileSync`）。这些在本仓不出现；真出现时靠人看出来。
  */
-const FORBIDDEN_READONLY_VIOLATIONS: ReadonlyArray<{ label: string; pattern: RegExp }> = [
+const FORBIDDEN_PROCESS_VIOLATIONS: ReadonlyArray<{ label: string; pattern: RegExp }> = [
   { label: 'process.kill', pattern: /\bprocess\.kill\b/ },
   { label: 'taskkill', pattern: /\btaskkill\b/i },
   { label: 'Stop-Process', pattern: /\bStop-Process\b/i },
   { label: 'SIGKILL', pattern: /\bSIGKILL\b/ },
   { label: 'SIGTERM', pattern: /\bSIGTERM\b/ },
-  { label: 'writeFile', pattern: /\bwriteFile(Sync)?\b/ },
-  { label: 'appendFile', pattern: /\bappendFile(Sync)?\b/ },
-  { label: 'mkdir', pattern: /\bmkdir(Sync)?\b/ },
-  { label: 'rm/rmSync', pattern: /\brm(Sync)?\s*\(/ },
-  { label: 'rmdir', pattern: /\brmdir(Sync)?\b/ },
-  { label: 'unlink', pattern: /\bunlink(Sync)?\b/ },
-  { label: 'rename', pattern: /\brename(Sync)?\b/ },
-  { label: 'copyFile', pattern: /\bcopyFile(Sync)?\b/ },
-  { label: 'createWriteStream', pattern: /\bcreateWriteStream\b/ },
-  { label: 'chmod', pattern: /\bchmod(Sync)?\b/ },
-  { label: 'utimes', pattern: /\butimes(Sync)?\b/ },
-  { label: 'symlink', pattern: /\bsymlink(Sync)?\b/ },
-  { label: 'fs write flag', pattern: /['"]w['"]\s*[,)]/ },
-  { label: "dsh plugin 安装面（'plugin' 字面量）", pattern: /['"]plugin['"]/ },
+  {
+    label: 'dsh plugin 安装面（命令形态）',
+    // 不要求引号形状：`plugin` 后面隔着引号/逗号/加号/空白，紧跟一个改动动词即命中。
+    pattern: /\bplugin\b[\s'"`,+]*\b(add|remove|install|uninstall|link|unlink|publish)\b/,
+  },
 ]
+
+/**
+ * 从一份源码里解析出「哪些本地名字其实是 `node:fs` 的函数」。
+ *
+ * 这是 fix 的关键：判据只在**确有 fs 来源**的名字上生效，于是本地的同名助手自然豁免，
+ * 而 `fs.truncate` / 具名导入的 `truncate` / `fsp.writeFile` 都跑不掉。
+ *
+ * @param source 源码全文（自行 stripComments）。
+ */
+function fsBindingsOf(source: string): { namespaces: string[]; named: Set<string> } {
+  const stripped = stripComments(source)
+  const namespaces: string[] = []
+  const named = new Set<string>()
+
+  // import * as fs from 'node:fs'  /  import fs from 'node:fs'
+  for (const match of stripped.matchAll(
+    /import\s+(?:\*\s+as\s+([A-Za-z0-9_$]+)|([A-Za-z0-9_$]+))\s+from\s+['"`]node:fs(?:\/promises)?['"`]/g,
+  )) {
+    const name = match[1] ?? match[2]
+    if (name !== undefined) namespaces.push(name)
+  }
+  // import { readFile, promises as fsp } from 'node:fs'
+  for (const match of stripped.matchAll(
+    /import\s*\{([^}]*)\}\s*from\s*['"`]node:fs(?:\/promises)?['"`]/g,
+  )) {
+    for (const part of (match[1] ?? '').split(',')) {
+      const piece = part.trim()
+      if (piece === '') continue
+      const alias = piece.split(/\s+as\s+/)
+      const local = (alias[1] ?? alias[0] ?? '').trim()
+      if (local !== '') named.add(local)
+    }
+  }
+  return { namespaces, named }
+}
+
+/** 写入族的 fs API（读 API 刻意不在内，`open` 另有标志判定）。 */
+const FS_WRITE_APIS = [
+  'writeFile',
+  'writeFileSync',
+  'appendFile',
+  'appendFileSync',
+  'truncate',
+  'truncateSync',
+  'ftruncate',
+  'ftruncateSync',
+  'createWriteStream',
+  'mkdir',
+  'mkdirSync',
+  'mkdtemp',
+  'mkdtempSync',
+  'rmdir',
+  'rmdirSync',
+  'rm',
+  'rmSync',
+  'unlink',
+  'unlinkSync',
+  'rename',
+  'renameSync',
+  'copyFile',
+  'copyFileSync',
+  'cp',
+  'cpSync',
+  'chmod',
+  'chmodSync',
+  'chown',
+  'chownSync',
+  'utimes',
+  'utimesSync',
+  'symlink',
+  'symlinkSync',
+  'link',
+  'linkSync',
+  'writev',
+  'writevSync',
+  'writeFileSync',
+] as const
+
+/** `open`/`openSync` 只在标志可写时算写入（`open(p,'r')` 是纯读，不该误报）。 */
+const FS_OPEN_WRITE_FLAG =
+  /\b(open|openSync)\s*\([^)]*['"`](w|a|r\+|w\+|a\+|wx|ax|as|rs\+|w\+x|a\+x)['"`]/
 
 /** B10 判据：扫源码，返回违规（`路径:行号 → 记号`）。 */
 function judgeReadOnly(sources: readonly { path: string; text: string }[]): string[] {
   const offenders: string[] = []
   for (const { path, text } of sources) {
+    const { namespaces, named } = fsBindingsOf(text)
     const lines = stripComments(text).split('\n')
     lines.forEach((line, index) => {
-      for (const { label, pattern } of FORBIDDEN_READONLY_VIOLATIONS) {
-        if (pattern.test(line)) offenders.push(`${path}:${index + 1} → ${label}`)
+      const at = `${path}:${index + 1}`
+      for (const { label, pattern } of FORBIDDEN_PROCESS_VIOLATIONS) {
+        if (pattern.test(line)) offenders.push(`${at} → ${label}`)
+      }
+      if (FS_OPEN_WRITE_FLAG.test(line)) offenders.push(`${at} → fs.open（可写标志）`)
+      // 具名导入有两种用法：**直接当函数**（`truncate(...)`）与**命名空间别名**
+      // （`import { promises as fsp }` → `fsp.rmdir(...)`）。两种都查，
+      // 否则 `promises as X` 这种写法整族漏掉（上一版实测漏过）。
+      const namespaceLike = [...namespaces, ...named]
+      for (const api of FS_WRITE_APIS) {
+        for (const ns of namespaceLike) {
+          if (new RegExp(`\\b${ns}\\s*\\.\\s*${api}\\b`).test(line)) {
+            offenders.push(`${at} → ${ns}.${api}`)
+          }
+        }
+        // 具名导入形态：import { truncate } from 'node:fs' 后的 truncate(...)
+        if (named.has(api) && new RegExp(`\\b${api}\\b`).test(line)) {
+          offenders.push(`${at} → ${api}（从 node:fs 具名导入）`)
+        }
       }
     })
   }
@@ -648,16 +813,79 @@ describe('B10 v1 只读：src/** 不含改变系统状态的动作', () => {
     expect(offenders, describeOffenders('v1 只读被破坏', offenders)).toEqual([])
   })
 
+  it('判据可被否证：安装面的三种命令形态都必须红（含字符串与模板字符串）', () => {
+    // 上一版只认「引号紧邻 plugin」的 argv 数组形态，另外两种**确认漏掉**过。三种都钉住。
+    const forms: Array<[string, string]> = [
+      ['argv 数组形态', "const args = ['plugin', 'add', pkg]"],
+      ['单引号字符串拼接', "execSync('dsh plugin add ' + pkg)"],
+      ['模板字符串', 'execSync(`dsh plugin remove ${pkg}`)'],
+      ['双引号字符串', 'execSync("dsh plugin install " + pkg)'],
+    ]
+    for (const [label, line] of forms) {
+      const labels = judgeReadOnly([{ path: 'synthetic.ts', text: line }]).map(
+        (entry) => entry.split(' → ')[1] ?? '',
+      )
+      expect(labels, `${label} 漏了（照到的是：${labels.join(' / ') || '空'}）`).toContain(
+        'dsh plugin 安装面（命令形态）',
+      )
+    }
+  })
+
+  it('判据可被否证：fs 写入族的各种来源形态都能照出来', () => {
+    const cases: Array<[string, string]> = [
+      // 具名导入 + 调用（上一版正好漏掉 append 与 truncate 家族）
+      ["import { openSync } from 'node:fs'\nopenSync(p, 'a')", 'fs.open（可写标志）'],
+      [
+        "import { ftruncateSync } from 'node:fs'\nftruncateSync(fd, 0)",
+        'ftruncateSync（从 node:fs 具名导入）',
+      ],
+      [
+        "import { appendFileSync } from 'node:fs'\nappendFileSync(p, 'x')",
+        'appendFileSync（从 node:fs 具名导入）',
+      ],
+      // 命名空间形态
+      ["import * as fs from 'node:fs'\nfs.truncate(p, 0)", 'fs.truncate'],
+      ["import fsp from 'node:fs/promises'\nfsp.writeFile(p, 'x')", 'fsp.writeFile'],
+      // `promises as X` 这种别名
+      ["import { promises as fsp } from 'node:fs'\nfsp.rmdir(p)", 'fsp.rmdir'],
+    ]
+    for (const [source, expected] of cases) {
+      const labels = judgeReadOnly([{ path: 'synthetic.ts', text: source }]).map(
+        (entry) => entry.split(' → ')[1] ?? '',
+      )
+      expect(labels, `${expected} 漏了（照到的是：${labels.join(' / ') || '空'}）`).toContain(
+        expected,
+      )
+    }
+  })
+
+  it('判据可被否证：不带 node:fs 来源的同名本地函数不算违规（防误报）', () => {
+    // 这正是上一版把 `truncate` 整族排除掉的原因。现在按来源判定，两边都成立：
+    // 本地的 truncate 不报，import 来的 truncate 报（见上一条）。
+    const localHelper = [
+      'export function truncate(text: string): string {',
+      '  return text.length > 10 ? text.slice(0, 10) : text',
+      '}',
+    ].join('\n')
+    expect(judgeReadOnly([{ path: 'synthetic.ts', text: localHelper }])).toEqual([])
+  })
+
+  it('真实源码里的本地 truncate（render.ts）不被误报，而它确实没有 fs 来源', () => {
+    const render = readSourcesUnder('src/lib').find((source) => source.path.endsWith('/render.ts'))
+    expect(render, 'src/lib/render.ts 不在了 —— 这条防误报的判据要跟着改').toBeDefined()
+    // 前提自证：render.ts 不含 truncate 的 fs 来源（否则下面那条断言没有意义）。
+    expect(render?.text).toContain('function truncate')
+    expect(fsBindingsOf(render?.text ?? '').namespaces).toEqual([])
+    expect([...fsBindingsOf(render?.text ?? '').named].filter((n) => n === 'truncate')).toEqual([])
+    expect(judgeReadOnly([render!])).toEqual([])
+  })
+
   it('判据可被否证：每种被禁动作都能被照出来', () => {
     const cases: Array<[string, string]> = [
       ['process.kill', 'process.kill(pid)'],
       ['taskkill', "spawn('taskkill', ['/T', '/F', '/PID', String(pid)])"],
       ['Stop-Process', "spawn('powershell', ['Stop-Process', '-Id', String(pid)])"],
       ['SIGKILL', "process.kill(pid, 'SIGKILL')"],
-      ['writeFile', "writeFileSync(path, 'x')"],
-      ['mkdir', 'mkdirSync(dir, { recursive: true })'],
-      ['unlink', 'unlinkSync(path)'],
-      ["dsh plugin 安装面（'plugin' 字面量）", "args: ['plugin', 'add', pkg]"],
     ]
     for (const [label, line] of cases) {
       const offenders = judgeReadOnly([{ path: 'synthetic.ts', text: line }])
@@ -674,6 +902,7 @@ describe('B10 v1 只读：src/** 不含改变系统状态的动作', () => {
     const commented = [
       '// v1 不杀进程：不用 process.kill，也不跑 taskkill',
       '/* 也不写 $DSH_HOME：不调用 writeFileSync / mkdirSync */',
+      '// 也不跑 dsh plugin add —— 安装面归用户',
     ].join('\n')
     expect(judgeReadOnly([{ path: 'synthetic.ts', text: commented }])).toEqual([])
   })
@@ -771,3 +1000,35 @@ describe('B12 技能文件本体', () => {
     expect(body.length).toBeGreaterThan(500)
   })
 })
+
+/**
+ * # 本文件的已知限度
+ *
+ * 这一节本身是判据的一部分：它让下一个改实现的人知道**哪些红线会跟着失效**。
+ * 「能确证」与「只能推断」必须分开写 —— 把它拔高成「已确认」就等于制造新的假绿。
+ *
+ * 措辞约定：**【已探明】** = 用探针/反例实测过；**【推断】** = 从输入推不出来，只是当前如此。
+ *
+ * | # | 断言 | 依赖了哪个实现细节 | 改了会怎样 |
+ * |---|---|---|---|
+ * | 1 | B10 的安装面规则（`plugin` + 动词，不要求引号） | 只按子串匹配；认得的动词是硬编码的一小张表 | 出现动词表外的子命令（如 `dsh plugin why`）会**漏**（潜在假绿）；提示文案里出现「plugin add」会**误报** |
+ * | 2 | B10 的 fs 写入族 | 判据只在「确有 `node:fs` 来源的名字」上生效；来源靠 import 语句文本识别 | 换一种拿 fs 的写法（`require`、把方法先赋给别的变量）会**漏**；见下方「已知未覆盖」 |
+ * | 3 | B10 的 `fs.open` 可写标志 | 标志字符串是我列的集合 | 表外标志（如 `'rs+'` 之外的组合）会**漏** |
+ * | 4 | B9 的提取器形态表 `TOOL_NAME_SHAPES` | 名字必须是**字面量**（三种引号之一），或是 `name:` 内联字面量 | 名字改成运行时拼接/从别处 import → 提不出来 → **判红**（响亮，不是假绿），需扩形态表并同步扩自检 |
+ * | 5 | B9「文件在却提不出名字 = 红」 | `defineTool(` 这个结构标记 | 若某天工具不再用 `defineTool` 造（换别的工厂），`toolHalfImplemented` 会变假 → **降级成 skip**（假绿）。届时 `TOOL_IMPL_SOURCES` 的标记要一起换 |
+ * | 6 | B7 的 `files` 覆盖判定 | 我自写的 minimatch **代理**（只实现裸目录名/显式路径/`**` 后缀） | 不是 npm 本身：语义有偏差时**假绿**。唯一真判据是 `npm pack` 后看 tarball —— 未接进红线，属【推断】 |
+ * | 7 | A2 的「族不只一族」（`split('||').length > 1`） | 借姊妹仓注释里的 npm 预发布匹配推理，**未在本机核** | 合理地收窄到单族会**红**（响亮误报）。【推断】 |
+ * | 8 | B9 的 `EXPECTED_TOOLS` | 我手抄的**第 4 个副本**（另三份：`docs/ARCHITECTURE.md` 表、README×2、`src/tools` 常量） | **没有单一真源**。加第五个工具漏改这里会红（响亮）。【推断】 |
+ * | 9 | B11 的 `en.title !== zh.title` | 我假设「中英各表其名」 | 产品名中英同形会**红**（误报）。【推断】 |
+ * | 10 | A4 的 `scanned > 50`、B12 的 `body > 500` 阈值 | 我按当前规模猜的数（现状 188 / 约 1.1 万字节） | 仓合理地变小会**红**（响亮）。【推断】 |
+ * | 11 | B12 的正文切片 `raw.indexOf('\n---', 4)` | 假定 frontmatter 之后没有更早的 `\n---` | 切错区域仍可能 > 500 → **假绿**（潜在）。【推断】 |
+ * | 12 | A6 的 tag 形状 | 对 `release.yml` 做正则形状匹配 | 换一种同样正确的拼法（先赋 `V="v"`）会**红**（误报）；tag 改到别处生成则**看不见**（假绿）。【推断】 |
+ * | 13 | A5 的反例控制 | 守卫的报错文案、以及注入锚点 `'          npm publish'` 的确切缩进 | 两者都已在文件里做成**响亮失败**（含「变异真的落地」自检），但都与实现细节耦合。【已探明】 |
+ *
+ * **B10 已知未覆盖的写入通道**（明确列出，不静默排除）：
+ * `process.binding`、原生 addon、`require()`（本仓纯 ESM）、把 fs 方法先赋给别的变量再调用
+ * （`const w = writeFileSync`）、以及经 `ctx.subprocess`/`ctx.shell` 发起的写命令。
+ * 这些在本仓目前不出现；真出现时要靠人看出来，或把判据扩成 AST 级。
+ *
+ * **不要**为了消掉上面这些限度去扩大断言范围 —— 先把限度写清楚，再按需收紧。
+ */

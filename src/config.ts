@@ -67,7 +67,8 @@ export function resolveConfig(
 ): ResolvedConfig {
   const configuredHome = config?.dshHome ?? ''
   const envHome = env.DSH_HOME ?? ''
-  const dshHome = configuredHome !== '' ? configuredHome : envHome !== '' ? envHome : defaultDshHome()
+  const dshHome =
+    configuredHome !== '' ? configuredHome : envHome !== '' ? envHome : defaultDshHome()
   const dshHomeSource: ResolvedConfig['dshHomeSource'] =
     configuredHome !== '' ? 'config' : envHome !== '' ? 'env' : 'default'
   const profile = config?.profile || env.DSH_PROFILE || DEFAULT_PROFILE

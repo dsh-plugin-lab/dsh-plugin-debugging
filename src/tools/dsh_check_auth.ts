@@ -16,7 +16,15 @@ import { budgetFor, createDeadline } from '../lib/timeouts.js'
 import { readCredentialsPresence, type CredentialsPresence } from '../lib/credentials.js'
 import { probeHttp, type HttpProbeResult } from '../lib/http.js'
 import { credentialsPath } from '../lib/profile.js'
-import { requireDshHome, resolvePort, toOutput, toolOutput, type ToolDeps } from './shared.js'
+import {
+  assertResolvedDshHome,
+  effectiveConfig,
+  resolvePort,
+  toOutput,
+  toolOutput,
+  type EffectiveConfigBlock,
+  type ToolDeps,
+} from './shared.js'
 
 /** 工具名。 */
 export const CHECK_AUTH_TOOL = 'dsh_check_auth'
@@ -25,6 +33,24 @@ export const CHECK_AUTH_TOOL = 'dsh_check_auth'
 interface CheckAuthArgs {
   port?: number
   host?: string
+}
+
+/** 返回的 `data`（只在成功时有）。 */
+interface CheckAuthData {
+  authority: string
+  url: string
+  probe: HttpProbeResult
+  /** 本次调用实际用的配置（含端口来源）。 */
+  resolved: EffectiveConfigBlock
+  credentials: {
+    file: string
+    exists: boolean
+    clientConnectionPresent: boolean
+    browserSessionPresent: boolean
+    line?: number
+    note: string
+  }
+  verdict: string
 }
 
 /**
@@ -60,11 +86,11 @@ export function createCheckAuthTool(deps: ToolDeps): ToolDefinition {
       const args = rawArgs as CheckAuthArgs
       const deadline = createDeadline(deps.config.timeoutMs, deps.now)
 
-      const missing = requireDshHome(deps.config)
+      const missing = assertResolvedDshHome(deps.config)
       if (missing !== undefined) return toOutput(missing)
 
-      const port = resolvePort(args.port, deps.config.port, deps.env)
-      if (port === undefined) {
+      const resolvedPort = resolvePort(args.port, deps.config.port, deps.env)
+      if (resolvedPort === undefined) {
         return toOutput(
           fail(
             {
@@ -82,7 +108,7 @@ export function createCheckAuthTool(deps: ToolDeps): ToolDefinition {
       }
 
       const host = args.host ?? '127.0.0.1'
-      const authority = `${host}:${String(port)}`
+      const authority = `${host}:${String(resolvedPort.port)}`
       const url = `http://${authority}/`
 
       const probe = await probeHttp(url, budgetFor(deps.config.timeoutMs, deadline), {
@@ -94,10 +120,15 @@ export function createCheckAuthTool(deps: ToolDeps): ToolDefinition {
         credentialsPath(deps.config.dshHome),
       )
 
-      const data = {
+      const data: CheckAuthData = {
         authority,
         url,
         probe,
+        /**
+         * 生效配置：认证判定强依赖「探测的是哪个 authority」，而 authority 又来自
+         * 端口来源（参数 / 配置 / env）—— 三者给出不同结论，所以来源必须可见。
+         */
+        resolved: effectiveConfig(deps.config, resolvedPort),
         credentials: {
           file: credentials.file,
           exists: credentials.exists,
@@ -114,7 +145,7 @@ export function createCheckAuthTool(deps: ToolDeps): ToolDefinition {
         return toOutput(
           fail(
             { kind: 'timeout', message: probe.detail, hint: '原样重试；持续超时调大 timeoutMs' },
-            { tool: CHECK_AUTH_TOOL, args: { port, host }, why: '原样重试一次' },
+            { tool: CHECK_AUTH_TOOL, args: { port: resolvedPort.port, host }, why: '原样重试一次' },
           ),
         )
       }
@@ -128,7 +159,7 @@ export function createCheckAuthTool(deps: ToolDeps): ToolDefinition {
             },
             {
               tool: 'dsh_diagnose_plugin_load',
-              args: { port },
+              args: { port: resolvedPort.port },
               why: '按端口查监听者与 startup 日志，确认宿主到底起没起',
             },
           ),
@@ -154,7 +185,7 @@ export function createCheckAuthTool(deps: ToolDeps): ToolDefinition {
             },
             {
               tool: CHECK_AUTH_TOOL,
-              args: { port, host },
+              args: { port: resolvedPort.port, host },
               why: '确认 authority 与浏览器地址栏逐字一致后重试；仍 401 就走 v1.1 的自签 cookie',
             },
           ),

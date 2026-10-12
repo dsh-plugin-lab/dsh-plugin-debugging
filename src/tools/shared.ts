@@ -47,6 +47,15 @@ export function createToolDeps(
   }
 }
 
+/** 端口是从哪来的 —— 「谁给的」比「是什么」更值得留在输出里。 */
+export type PortSource = 'tool-argument' | 'plugin-config' | 'env:DSH_WEB_URL'
+
+/** 定出来的端口 + 它的来源。 */
+export interface ResolvedPort {
+  port: number
+  source: PortSource
+}
+
 /**
  * 定端口。
  *
@@ -55,7 +64,8 @@ export function createToolDeps(
  * 为什么要看 `DSH_WEB_URL`：配置里 `port: 0` 的语义是「自己推断」，而本工具**不猜**。
  * 宿主启动时会把自己的地址放进 `DSH_WEB_URL`（本机实测形如
  * `http://127.0.0.1:3080`，且**不含任何 token**）—— 那是宿主自己给的答案，
- * 比猜一个 3080 诚实得多。三条都没有时返回 `undefined`，由调用方显式失败。
+ * 比猜一个 3080 诚实得多。三条都没有时返回 `undefined`，由调用方显式失败
+ * 或（`dsh_diagnose_plugin_load` 那种文件层仍能答的工具）照实报 `none`。
  *
  * @param explicit 工具参数里的端口。
  * @param configured 配置里的端口。
@@ -65,10 +75,15 @@ export function resolvePort(
   explicit: number | undefined,
   configured: number,
   env: NodeJS.ProcessEnv,
-): number | undefined {
-  if (explicit !== undefined && Number.isSafeInteger(explicit) && explicit > 0) return explicit
-  if (Number.isSafeInteger(configured) && configured > 0) return configured
-  return portFromUrl(env.DSH_WEB_URL)
+): ResolvedPort | undefined {
+  if (explicit !== undefined && Number.isSafeInteger(explicit) && explicit > 0) {
+    return { port: explicit, source: 'tool-argument' }
+  }
+  if (Number.isSafeInteger(configured) && configured > 0) {
+    return { port: configured, source: 'plugin-config' }
+  }
+  const fromEnv = portFromUrl(env.DSH_WEB_URL)
+  return fromEnv === undefined ? undefined : { port: fromEnv, source: 'env:DSH_WEB_URL' }
 }
 
 /**
@@ -136,23 +151,80 @@ export function toOutput<T>(result: ToolResult<T>): JsonValue {
 }
 
 /**
- * 校验 `dshHome` 能不能用。
+ * 生效配置块：把「这次调用实际用的是哪份配置」变成**可见证据**。
  *
- * 为什么这会是一个**失败**而不是「兜底到家目录」：`resolveConfig` 读完配置与
- * `DSH_HOME` 之后可能仍是空串（契约注释许诺了 `<homedir>/.dsh` 兜底，但实现没有）。
- * 这里**不自己发明兜底策略** —— 猜一个 DSH_HOME 去读，可能在别的机器上读到无关目录，
- * 于是工具给出**看着成功其实读错了目录**的结论。宁可显式失败。
+ * 为什么每个工具的成功 `data` 都要带它：诊断工具最坏的一种失败不是报错，而是
+ * **看着成功、其实读的是另一份目录/另一个 profile**。把来源写进返回值，
+ * 用户就能一眼看出「哦它读的是默认的 `~/.dsh`，不是我以为的那个」。
+ * 这是只读的：不改任何行为，只把隐藏假设摊开。
+ */
+export interface EffectiveConfigBlock {
+  /** 实际使用的 DSH_HOME（绝对路径）。 */
+  dshHome: string
+  /** 它是怎么来的：配置 / 环境变量 / 我们按宿主默认值推的。 */
+  dshHomeSource: ResolvedConfig['dshHomeSource']
+  /** 插件配置里的 profile（注意：某个工具若被显式传了 profile，实际用的可能不是这个）。 */
+  profile: string
+  /** 实际使用的端口；`null` = 这次调用没有用到端口。 */
+  port: number | null
+  /** 端口来源；`not-used` = 这次调用没用到端口，`none` = 要用但三条来源都没有。 */
+  portSource: PortSource | 'none' | 'not-used'
+}
+
+/**
+ * 造生效配置块。
+ *
+ * @param config 已补齐默认值的配置。
+ * @param port 端口解析结果；不涉及端口的工具传 `'not-used'`。
+ * @param profileOverride 这次调用实际用的 profile（工具参数优先于配置时传它）。
+ */
+export function effectiveConfig(
+  config: ResolvedConfig,
+  port: ResolvedPort | undefined | 'not-used' = 'not-used',
+  profileOverride?: string,
+): EffectiveConfigBlock {
+  const profile = profileOverride ?? config.profile
+  if (port === 'not-used') {
+    return {
+      dshHome: config.dshHome,
+      dshHomeSource: config.dshHomeSource,
+      profile,
+      port: null,
+      portSource: 'not-used',
+    }
+  }
+  return {
+    dshHome: config.dshHome,
+    dshHomeSource: config.dshHomeSource,
+    profile,
+    port: port?.port ?? null,
+    portSource: port?.source ?? 'none',
+  }
+}
+
+/**
+ * 防御性断言：`ResolvedConfig.dshHome` 必须非空。
+ *
+ * 这里**曾经**是一个「预期内的配置缺失」（`not-configured`）—— 因为那时
+ * `resolveConfig` 的注释许诺了 `<homedir>/.dsh` 兜底、实现却没有。**兜底现已补上**
+ * （`config` → `env` → `<homedir>/.dsh`，并记录 `dshHomeSource`），空串在契约上
+ * 不可能出现。所以它不再是配置问题，而是**契约被违反的断言**：真出现就是
+ * 本插件自己的 bug，故用 `internal`（模型不该去改配置重试）。
+ *
+ * 保留它而不是删掉的理由：将来若有人重构 `resolveConfig` 又漏掉兜底，这四个工具会
+ * **拿空路径去读文件**，而读空的结论看起来完全正常 —— 那是最坏的一类静默坏。
+ * 一行断言的代价，换「读错目录」变成一条响亮的失败。
  *
  * @param config 已补齐默认值的配置。
  */
-export function requireDshHome(config: ResolvedConfig): ToolFail | undefined {
+export function assertResolvedDshHome(config: ResolvedConfig): ToolFail | undefined {
   if (config.dshHome !== '') return undefined
   return fail(
     {
-      kind: 'not-configured',
-      message: '拿不到 DSH_HOME，无法定位 profile 与凭证文件',
-      hint: '在插件配置里填 dshHome，或让宿主带着环境变量 DSH_HOME 启动',
+      kind: 'internal',
+      message: 'ResolvedConfig.dshHome 是空串 —— 契约要求 resolveConfig 做完三级兜底',
+      hint: '这是本插件的 bug，不是配置问题；请把这条 message 原样带回',
     },
-    { why: '定位不到 $DSH_HOME 时，后面每一步读的都是猜测的路径' },
+    { why: '拿空路径继续读文件会得到「看着正常其实读错目录」的结论' },
   )
 }

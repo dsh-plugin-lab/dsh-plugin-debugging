@@ -105,6 +105,19 @@ describe('dsh_dump_config', () => {
       expect((data['diagnostics'] as unknown[]).length).toBe(0)
       expect((data['exitCodeSemantics'] as Record<string, string>)['configDump']).toContain('恒 0')
       expect((data['configDump'] as Record<string, unknown>)['entryCount']).toBe(183)
+      // 「我 dump 的是哪个 profile」是这份输出的前提 —— 必须摊开。
+      const resolved = data['resolved'] as Record<string, unknown>
+      expect(resolved['profile']).toBe('web')
+      expect(resolved['portSource']).toBe('not-used')
+    })
+
+    it('工具参数传的 profile 会如实进入 resolved（而不是谎报配置里那个）', async () => {
+      const dshHome = await tempDshHome()
+      const { spawn } = dumpSpawn({ exitCode: 0, stdout: schemaOut([]) })
+      const tool = createDumpConfigTool(depsFor(configFor(dshHome, { profile: 'web' }), { spawn }))
+
+      const data = expectOk(await run(tool, { profile: 'tui' }))
+      expect((data['resolved'] as Record<string, unknown>)['profile']).toBe('tui')
     })
 
     it('hmr 行会被认出来', async () => {
@@ -158,10 +171,12 @@ describe('dsh_dump_config', () => {
   })
 
   describe('错误路径（每条可达 kind）', () => {
-    it('not-configured：拿不到 DSH_HOME', async () => {
+    it('internal：dshHome 空串是**契约被违反**的防御性断言（不再是 not-configured）', async () => {
+      // 兜底补上之后（config → env → <homedir>/.dsh），空串只可能是本插件的 bug。
       const tool = createDumpConfigTool(depsFor(configFor('')))
       const error = expectFail(await run(tool, {}))
-      expect(error.kind).toBe('not-configured')
+      expect(error.kind).toBe('internal')
+      expect(error.message).toContain('resolveConfig')
     })
 
     it('not-configured：起不了 dsh（ENOENT）', async () => {

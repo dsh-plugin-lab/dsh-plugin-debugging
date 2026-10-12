@@ -27,7 +27,14 @@ import {
   type InstallShape,
   type StartupLog,
 } from '../lib/profile.js'
-import { requireDshHome, resolvePort, toOutput, toolOutput, type ToolDeps } from './shared.js'
+import {
+  assertResolvedDshHome,
+  effectiveConfig,
+  resolvePort,
+  toOutput,
+  toolOutput,
+  type ToolDeps,
+} from './shared.js'
 
 /** 工具名。 */
 export const DIAGNOSE_PLUGIN_LOAD_TOOL = 'dsh_diagnose_plugin_load'
@@ -88,7 +95,7 @@ export function createDiagnosePluginLoadTool(deps: ToolDeps): ToolDefinition {
       const args = rawArgs as DiagnoseArgs
       const deadline = createDeadline(deps.config.timeoutMs, deps.now)
 
-      const missing = requireDshHome(deps.config)
+      const missing = assertResolvedDshHome(deps.config)
       if (missing !== undefined) return toOutput(missing)
 
       // 预算在真正开工前就耗尽：文件层诊断虽然便宜，也不该在「已超时」的前提下继续跑 ——
@@ -132,11 +139,11 @@ export function createDiagnosePluginLoadTool(deps: ToolDeps): ToolDefinition {
       }
 
       const names = args.package === undefined ? manifest.bundles : [args.package]
-      const port = resolvePort(args.port, deps.config.port, deps.env)
+      const resolvedPort = resolvePort(args.port, deps.config.port, deps.env)
       const portLookup: PortLookupResult | undefined =
-        port === undefined
+        resolvedPort === undefined
           ? undefined
-          : await lookupPort(port, {
+          : await lookupPort(resolvedPort.port, {
               spawn: deps.spawn,
               timeoutMs: budgetFor(deps.config.timeoutMs, deadline),
               signal: exec.signal,
@@ -176,14 +183,17 @@ export function createDiagnosePluginLoadTool(deps: ToolDeps): ToolDefinition {
       const data = {
         profile,
         profileDir: dir,
+        /**
+         * 生效配置：这份诊断的**全部结论都建立在「读的是哪个目录」之上**，
+         * 所以 DSH_HOME 的来源（配置 / env / 宿主默认值）必须摊开 —— 读默认目录
+         * 而用户以为读的是另一个，正是这类工具最坏的一种失败。
+         */
+        resolved: effectiveConfig(deps.config, resolvedPort),
         bundles: manifest.bundles,
         bundleCount: manifest.bundles.length,
         packages,
-        port: {
-          resolved: port ?? null,
-          source: portSource(args.port, deps.config.port, deps.env.DSH_WEB_URL),
-          lookup: portLookup ?? null,
-        },
+        /** 端口查询的明细（端口值本身在 `resolved.port`，不在这里重复）。 */
+        port: { lookup: portLookup ?? null },
         startupLogs,
         startupLogsNote:
           startupLogs.length === 0
@@ -242,22 +252,4 @@ function compareArtifactWithProcess(
   const startedMs = Date.parse(startedAt)
   if (!Number.isFinite(startedMs)) return null
   return entry.entryMtimeMs > startedMs
-}
-
-/**
- * 说清端口是从哪来的 —— 「谁给的」比「是什么」更值得留在输出里。
- *
- * @param explicit 工具参数。
- * @param configured 配置值。
- * @param webUrl 环境里的 `DSH_WEB_URL`。
- */
-function portSource(
-  explicit: number | undefined,
-  configured: number,
-  webUrl: string | undefined,
-): string {
-  if (explicit !== undefined && explicit > 0) return 'tool-argument'
-  if (Number.isSafeInteger(configured) && configured > 0) return 'plugin-config'
-  if (webUrl !== undefined && webUrl !== '') return 'env:DSH_WEB_URL'
-  return 'none'
 }

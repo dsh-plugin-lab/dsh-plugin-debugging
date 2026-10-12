@@ -54,6 +54,11 @@ describe('dsh_check_auth', () => {
       expect(data['authority']).toBe('127.0.0.1:3080')
       expect(data['verdict']).toBe('服务在、认证通过')
       expect((data['probe'] as Record<string, unknown>)['status']).toBe(200)
+      // 端口是参数给的 —— 来源必须可见（参数 / 配置 / env 会给不同 authority）。
+      const resolved = data['resolved'] as Record<string, unknown>
+      expect(resolved['port']).toBe(3080)
+      expect(resolved['portSource']).toBe('tool-argument')
+      expect(resolved['dshHomeSource']).toBe('config')
     })
 
     it('303（token 交换成功）算 ok，并带回 Location', async () => {
@@ -103,6 +108,10 @@ describe('dsh_check_auth', () => {
 
       const data = expectOk(await run(tool, {}))
       expect(data['authority']).toBe('127.0.0.1:4444')
+      // 「这个端口是宿主自己在 env 里告诉我们的」，不是我们猜的 3080。
+      const resolved = data['resolved'] as Record<string, unknown>
+      expect(resolved['port']).toBe(4444)
+      expect(resolved['portSource']).toBe('env:DSH_WEB_URL')
     })
   })
 

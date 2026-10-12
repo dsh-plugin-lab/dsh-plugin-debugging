@@ -19,7 +19,14 @@ import { decideEffectMode, probeHmr, type EffectChangeKind, type HmrProbe } from
 import { budgetFor, createDeadline } from '../lib/timeouts.js'
 import { detectHmrFromProfileFiles, profileDir } from '../lib/profile.js'
 import { resolveDshLaunch, runDump } from '../lib/dump.js'
-import { requireDshHome, toolOutput, toOutput, type ToolDeps } from './shared.js'
+import {
+  assertResolvedDshHome,
+  effectiveConfig,
+  toolOutput,
+  toOutput,
+  type EffectiveConfigBlock,
+  type ToolDeps,
+} from './shared.js'
 
 /** 工具名。 */
 export const EFFECT_MODE_TOOL = 'dsh_check_effect_mode'
@@ -46,6 +53,13 @@ interface EffectModeData {
     probe: HmrProbe
   }
   profile: string
+  /**
+   * 这次调用实际用的是哪份配置（含 DSH_HOME 的来源）。
+   *
+   * 关于 hmr 的判定尤其要紧：结论建立在「我在看哪个 profile 目录」之上，
+   * 而这份目录可能是按宿主默认值推出来的 —— 不摊开就没法复核。
+   */
+  resolved: EffectiveConfigBlock
 }
 
 /**
@@ -84,7 +98,7 @@ export function createEffectModeTool(deps: ToolDeps): ToolDefinition {
       const args = rawArgs as EffectModeArgs
       const deadline = createDeadline(deps.config.timeoutMs, deps.now)
 
-      const missing = requireDshHome(deps.config)
+      const missing = assertResolvedDshHome(deps.config)
       if (missing !== undefined) return toOutput(missing)
 
       const dir = profileDir(deps.config.dshHome, deps.config.profile)
@@ -108,6 +122,8 @@ export function createEffectModeTool(deps: ToolDeps): ToolDefinition {
         why: decision.why,
         hmr: { usable, sources: probe.sources, probe: probe.hmrProbe },
         profile: deps.config.profile,
+        // 本工具不涉及端口 —— 报 `not-used` 而不是把配置里那个「由工具推断」的 0 当结论。
+        resolved: effectiveConfig(deps.config),
       }
       return toOutput(ok(data, { why: nextStepWhy(decision.mode) }))
     },

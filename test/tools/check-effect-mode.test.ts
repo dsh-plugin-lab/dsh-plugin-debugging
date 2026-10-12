@@ -2,9 +2,10 @@
  * `dsh_check_effect_mode` 的行为红线。
  *
  * 覆盖任务要求的三类：成功路径、每条可达 `kind`、signal 透传、超时先于工具超时。
- * 「可达 kind」是**穷举**的：`not-configured` / `cancelled` / `timeout` / `not-configured`(spawn ENOENT) / `internal`，
- * 唯一不可达的是 `not-running` / `auth` / `not-found` / `command-failed`
- * —— 这个工具不碰网络、不查文件存在性、不解释子进程退出码，所以不可能报它们。
+ * 「可达 kind」是**穷举**的：`cancelled` / `timeout` / `not-configured`(dsh 起不来) / `internal`。
+ * 其中 `internal` 现在只由**防御性断言**产生（`dshHome` 空串 = 契约被违反），
+ * 不再是「配置缺失」；`not-running` / `auth` / `not-found` / `command-failed`
+ * 不可能出现 —— 这个工具不碰网络、不查文件存在性、不解释子进程退出码。
  */
 import { describe, expect, it } from 'vitest'
 
@@ -123,6 +124,28 @@ describe('dsh_check_effect_mode', () => {
       expect(data['mode']).toBe('hmr')
     })
 
+    it('成功 data 带出生效配置（含 DSH_HOME 来源）', async () => {
+      const dshHome = await tempDshHome()
+      // profile 目录名必须与配置里的 profile **一致**：否则文件层探不到 hmr，
+      // 会退到 dump-config 那条路 —— 那这条断言就变成在测降级，而不是在测「读的是哪个目录」。
+      await writeProfile(dshHome, 'tui', { bundles: ['@deepseek-ai/dsh-hmr'] })
+      // 声明来源是 default：诊断工具最怕「看着成功其实读错了目录」，来源必须可见。
+      const tool = createEffectModeTool(
+        depsFor(configFor(dshHome, { dshHomeSource: 'default', profile: 'tui' })),
+      )
+
+      const data = expectOk(await run(tool, { change: 'config' }))
+      const resolved = data['resolved'] as Record<string, unknown>
+      expect(resolved['dshHome']).toBe(dshHome)
+      expect(resolved['dshHomeSource']).toBe('default')
+      expect(resolved['profile']).toBe('tui')
+      // 而且它确实真读了这个目录 —— hmr 是从 profiles/tui 里探到的（不是 dump 出来的）。
+      expect(data['mode']).toBe('hot')
+      // 本工具不涉及端口：报 not-used，而不是把配置里那个「由工具推断」的 0 当结论。
+      expect(resolved['port']).toBe(null)
+      expect(resolved['portSource']).toBe('not-used')
+    })
+
     it('每次成功都带 nextStep（决策 T19）', async () => {
       const dshHome = await tempDshHome()
       await writeProfile(dshHome, 'web', { bundles: ['@deepseek-ai/dsh-hmr'] })
@@ -135,10 +158,14 @@ describe('dsh_check_effect_mode', () => {
   })
 
   describe('错误路径（每条可达 kind）', () => {
-    it('not-configured：拿不到 DSH_HOME', async () => {
+    it('internal：dshHome 空串是**契约被违反**的防御性断言（不再是 not-configured）', async () => {
+      // 兜底补上之后（config → env → <homedir>/.dsh），空串在契约上不可能出现。
+      // 所以这条不再是「配置缺失」而是「本插件的 bug」—— kind 必须是 internal，
+      // 否则模型会去改配置、重试一个它根本改不动的东西。
       const tool = createEffectModeTool(depsFor(configFor('')))
       const error = expectFail(await run(tool, { change: 'config' }))
-      expect(error.kind).toBe('not-configured')
+      expect(error.kind).toBe('internal')
+      expect(error.message).toContain('resolveConfig')
       expect(TOOL_ERROR_KINDS).toContain(error.kind)
     })
 

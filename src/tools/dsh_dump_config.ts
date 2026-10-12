@@ -27,7 +27,13 @@ import {
   type DiagnosticClass,
 } from '../lib/dump.js'
 import { probeHmr } from '../lib/effect.js'
-import { requireDshHome, toOutput, toolOutput, type ToolDeps } from './shared.js'
+import {
+  assertResolvedDshHome,
+  effectiveConfig,
+  toOutput,
+  toolOutput,
+  type ToolDeps,
+} from './shared.js'
 
 /** 工具名。 */
 export const DUMP_CONFIG_TOOL = 'dsh_dump_config'
@@ -66,7 +72,7 @@ export function createDumpConfigTool(deps: ToolDeps): ToolDefinition {
       const args = rawArgs as DumpConfigArgs
       const deadline = createDeadline(deps.config.timeoutMs, deps.now)
 
-      const missing = requireDshHome(deps.config)
+      const missing = assertResolvedDshHome(deps.config)
       if (missing !== undefined) return toOutput(missing)
 
       const profile = args.profile ?? deps.config.profile
@@ -105,7 +111,12 @@ export function createDumpConfigTool(deps: ToolDeps): ToolDefinition {
       const hmr = probeHmr(configDump.stdout)
 
       const data = {
-        profile,
+        /**
+         * 生效配置：`profile` 可能来自工具参数（覆盖配置），而「我到底 dump 了哪个
+         * profile」是这份输出的**前提** —— 摊开它，用户才能判断结论适不适用于自己。
+         * 因此这里**不再另设顶层 `profile` 字段**：一处一事实，避免两处漂移。
+         */
+        resolved: effectiveConfig(deps.config, 'not-used', profile),
         exitCodeSemantics: {
           configDump: '--dump-config 退出码恒 0，不做 schema 校验 —— 不能当门禁',
           schemaDump: '--dump-config-schema 退出码 1 = 有 error',
