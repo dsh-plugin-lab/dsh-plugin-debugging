@@ -1,13 +1,28 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="dsh-plugin-debugging">
+<svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="dsh-plugin-debugging">
   <!--
-    自制图标（本仓所有，MIT，随包分发）。
-    语义：放大镜=去现场看；镜中三条横线=「产物在不同时机被读取」这一条贯穿原理。
-    约束（官方 host-plugin 参考）：SVG/PNG/JPEG/WebP、≤256 KiB、必须留在包内。
+    dsh-plugin-debugging 的插件页图标（本仓自制，MIT，随包分发）。
+
+    语义：放大镜=去现场看；镜中三条横线=「产物在不同时机被读取」这条贯穿原理。
+
+    几何：设计稿画在 128 格里，整组用 translate(7 7) scale(22/128) 搬进官方 36 格 ——
+    墨迹外接框 7..29，**四周各留 7**，与 dsh-workbuddy-bridge/icon.svg 的边距逐值一致
+    （姊妹仓落在官方 6–9 的边距窗口里；这里取 7 是为了和 workbuddy 对齐，不是另选一格）。
+
+    颜色只能写死：宿主按图片渲染，currentColor 与主题变量都不起作用（同姊妹仓）。
+    #4D6BFE 是 dsh 的品牌蓝。
+
+    注意：XML 注释里不许出现连续两个连字符（浏览器会当图片解析失败，
+    插件页静默回落成默认图形）。本文件的破折号一律用中文全角，不用 ASCII 连字符。
   -->
-  <rect width="128" height="128" rx="26" fill="#4D6BFE"/>
-  <circle cx="56" cy="56" r="27" fill="none" stroke="#FFFFFF" stroke-width="8"/>
-  <line x1="76" y1="76" x2="100" y2="100" stroke="#FFFFFF" stroke-width="11" stroke-linecap="round"/>
-  <line x1="43" y1="47" x2="69" y2="47" stroke="#FFFFFF" stroke-width="6" stroke-linecap="round" opacity="0.95"/>
-  <line x1="43" y1="58" x2="61" y2="58" stroke="#FFFFFF" stroke-width="6" stroke-linecap="round" opacity="0.7"/>
-  <line x1="43" y1="69" x2="69" y2="69" stroke="#FFFFFF" stroke-width="6" stroke-linecap="round" opacity="0.45"/>
+  <g transform="translate(7 7) scale(0.171875)">
+    <rect width="128" height="128" rx="26" fill="#4D6BFE"/>
+    <!-- 镜面 -->
+    <circle cx="56" cy="56" r="27" fill="none" stroke="#FFFFFF" stroke-width="8"/>
+    <!-- 镜柄 -->
+    <line x1="76" y1="76" x2="100" y2="100" stroke="#FFFFFF" stroke-width="11" stroke-linecap="round"/>
+    <!-- 镜中三条读取时机 -->
+    <line x1="43" y1="47" x2="69" y2="47" stroke="#FFFFFF" stroke-width="6" stroke-linecap="round" opacity="0.95"/>
+    <line x1="43" y1="58" x2="61" y2="58" stroke="#FFFFFF" stroke-width="6" stroke-linecap="round" opacity="0.7"/>
+    <line x1="43" y1="69" x2="69" y2="69" stroke="#FFFFFF" stroke-width="6" stroke-linecap="round" opacity="0.45"/>
+  </g>
 </svg>
