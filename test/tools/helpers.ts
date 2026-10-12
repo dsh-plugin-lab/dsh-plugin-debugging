@@ -97,7 +97,14 @@ export function configFor(
   dshHome: string,
   overrides: Partial<ResolvedConfig> = {},
 ): ResolvedConfig {
-  return { dshHome, profile: 'web', port: 0, timeoutMs: 15_000, ...overrides }
+  return {
+    dshHome,
+    dshHomeSource: 'config',
+    profile: 'web',
+    port: 0,
+    timeoutMs: 15_000,
+    ...overrides,
+  }
 }
 
 /** 造 deps（IO 用假实现，其余默认）。 */

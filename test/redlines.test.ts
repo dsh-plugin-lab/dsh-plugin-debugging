@@ -30,6 +30,15 @@ import { afterAll, describe, expect, it } from 'vitest'
  *    所以凡是「扫某个集合」的判据，都配一条同函数的反例，或一条「扫描器本身有效」的自检。
  *
  * 出处约定：`plugin-conventions.md` 指组织仓的 `docs/plugin-conventions.md`。
+ *
+ * **档位从属（A 组 vs B 组）**：A 组是组织 Must-agree 档的直接执行体，动它要回组织判据；
+ * B 组是**本仓自己的形状**。B 组里有一条要特别说明：
+ * **#7（`files` 覆盖 `skills/<name>/SKILL.md`）是本仓自选的更严判据，不是组织强制。**
+ * 组织判据 `:176` 的原文是「a pure host plugin **may be exempt** from the `files` item,
+ * **the host compatibility range must not be**」—— 本仓正是纯 host 插件，**豁免是被允许的**，
+ * 我们**选择不豁免**（技能随包分发是本仓 v1 的能力面，D12）。
+ * 写在这里的理由：判据从严可以，但**必须让人知道这是自选的** ——
+ * 否则下一个人会以为组织要求它，从而不敢动、也不敢查。
  */
 
 const REPO_ROOT = fileURLToPath(new URL('../', import.meta.url))

@@ -36,6 +36,14 @@ export interface PluginState {
 export interface ResolvedConfig {
   /** DSH_HOME 目录（绝对路径）。 */
   dshHome: string
+  /**
+   * `dshHome` 是怎么来的：`config` = 用户在插件配置里写了；`env` = 环境变量 `DSH_HOME`；
+   * `default` = 我们按宿主的默认值推的 `<homedir>/.dsh`。
+   *
+   * **必须带出去给用户看**：诊断工具最怕「看着成功其实读错了目录」，读默认目录这件事
+   * 本身要成为可见证据，而不是隐藏假设。
+   */
+  dshHomeSource: 'config' | 'env' | 'default'
   /** profile 名：用于拼 `<dshHome>/profiles/<profile>`。 */
   profile: string
   /** 要探测的宿主端口；`0` = 自己按监听端口推断。 */

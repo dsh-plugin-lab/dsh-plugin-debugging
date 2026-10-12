@@ -96,3 +96,20 @@ git diff --check
     所以它只会以来源头 `# == <本仓 cordis.patch.yml 路径>` 的形态出现。**按「带 patched by 标注」
     去判本插件有没有进树，永远判不过** —— 这个判据本身是错的（我们自己的验收书里犯过一次）。
     另外：`--dump-config` 退出码**恒 0**，能当门禁的只有 `--dump-config-schema` 的退出码。
+14. **解析 `dsh` 的 stderr 要认两种形状**，否则组合期错会**整条漏掉**：一种带严重级
+    （`dsh: error: …`），一种**不带严重级、只带来源**
+    （`dsh: [<file>] patch: name mismatch for "x" (expected …, got …), skipping`）。
+    只认前者时，错误明明打印了、你的工具却报成功 —— 本仓 `src/lib/dump.ts` 踩过。
+    同理：**不能用 `--dump-config-schema` 的退出码判断「有没有该管的组合期错」**，
+    组合期错走的是 `--dump-config`（退出码恒 0）那条路；判定要基于「已筛出的 actionable 列表是否非空」。
+15. **`defineTool` 拒绝非正 `timeoutMs`**（实测报 `timeoutMs must be a positive finite number`），
+    所以「预算已耗尽」这类用例**不能拿 0 构造**，测试要用注入时钟。
+16. **`prettier --write "src/lib/**/*.ts"` 在扁平目录下一个文件都匹配不到**（`**/` 要求至少一层
+    子目录），会让人以为「格式已经好了」。要么写 `src/lib/*.ts`，要么直接给目录名。
+17. **`**/` 这一族在别处同样咬人**：① 在**块注释里**写 `skills/**/SKILL.md`，其中 `*/` 会
+    **提前终止注释**，整文件解析失败（vitest 报 `Tests no tests`，不是语法错的行号）；写
+    `skills/<name>/SKILL.md`。② 正则里用 `['"]plugin['"]` 这种「引号紧邻」的写法，只认
+    argv 数组形态，`'dsh plugin add …'` 这种**字符串命令**形态会漏 —— 而漏掉的判据看起来是绿的。
+18. **判据的「假绿」要自己探**：本仓红线曾有三处确认的假绿（引号形态、fs 写入枚举、
+    提取失败静默 `skip`）。**最危险的是 skip** —— GitHub 把 skipped 当 Success，
+    所以「文件在但提不出任何名字」必须**判红**，不能当成「尚未实现」而跳过。
