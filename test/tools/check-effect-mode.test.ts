@@ -9,8 +9,13 @@
  */
 import { describe, expect, it } from 'vitest'
 
-import { createEffectModeTool, EFFECT_MODE_TOOL } from '../../src/tools/dsh_check_effect_mode.ts'
+import {
+  createEffectModeTool,
+  EFFECT_MODE_TOOL,
+  summarizeEffectMode,
+} from '../../src/tools/dsh_check_effect_mode.ts'
 import { TOOL_ERROR_KINDS } from '../../src/lib/errors.ts'
+import { renderToolResultText } from '../../src/lib/render.ts'
 import {
   cmdResult,
   configFor,
@@ -56,7 +61,11 @@ describe('dsh_check_effect_mode', () => {
       expect(data['mode']).toBe('hot')
       expect(data['baseline']).toBe('hot')
       expect(data['downgraded']).toBe(false)
-      expect((data['hmr'] as Record<string, unknown>)['usable']).toBe(true)
+      // 契约字段：一眼可读的 hmr 结论（模型不该靠 why 反推）。
+      expect(data['hmr']).toBe('present')
+      expect((data['hmrDetail'] as Record<string, unknown>)['usable']).toBe(true)
+      // why 必须点明**触发者在 hmr**，而不是只说「loader 会重读配置」。
+      expect(String(data['why'])).toContain('watches the patch files')
     })
 
     it('新装 bundle：不在 dependencies 里是热生效，在里面是必须重启', async () => {
@@ -101,6 +110,15 @@ describe('dsh_check_effect_mode', () => {
       // 文件层看不到 hmr → 必须补跑一次 dump 复核（否定的代价大）。
       expect(calls).toHaveLength(1)
       expect(calls[0]?.args).toContain('--dump-config')
+      // 契约字段 + 自解释的 why：模型必须**直接读到**「没人 watch patch 文件，所以改 config 不会生效」。
+      expect(data['hmr']).toBe('absent')
+      expect((data['hmrDetail'] as Record<string, unknown>)['usable']).toBe(false)
+      expect(String(data['why'])).toContain('nothing watches the patch files')
+      // 渲染首行必须把结论摆出来（模型不必从长 JSON 里找）。
+      const text = renderToolResultText(EFFECT_MODE_TOOL, { ok: true, data }, summarizeEffectMode)
+      expect(text).toContain('mode=restart-required')
+      expect(text).toContain('hmr=absent')
+      expect(text).toContain('nothing watches the patch files')
     })
 
     it('无 hmr 时客户端改动降级成「构建 + 刷新」，不是重启', async () => {

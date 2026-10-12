@@ -16,7 +16,7 @@ import { defaultFetchImpl } from '../lib/http.js'
 import type { SpawnImpl } from '../lib/exec.js'
 import { defaultSpawnImpl } from '../lib/exec.js'
 import type { LoaderReadResult } from '../lib/loader.js'
-import { renderToolResult, type TextBlockLike } from '../lib/render.js'
+import { renderToolResult, type ResultSummary, type TextBlockLike } from '../lib/render.js'
 
 /** 四个工具共享的依赖。 */
 export interface ToolDeps {
@@ -146,14 +146,19 @@ export const TOOL_OUTPUT_SCHEMA = { type: 'json' } as const
  * 造一个工具的 `output` 声明。
  *
  * @param toolName 工具名（渲染首行用）。
+ * @param summarize 可选的一句话结论：把该工具最重要的判定提到渲染首行，
+ *   免得模型从整块 JSON（可能含长证据）里自己找。只在成功结果上用。
  */
-export function toolOutput(toolName: string): {
+export function toolOutput(
+  toolName: string,
+  summarize?: ResultSummary,
+): {
   schema: typeof TOOL_OUTPUT_SCHEMA
   render(args: unknown, value: unknown): TextBlockLike[]
 } {
   return {
     schema: TOOL_OUTPUT_SCHEMA,
-    render: (_args: unknown, value: unknown) => renderToolResult(toolName, value),
+    render: (_args: unknown, value: unknown) => renderToolResult(toolName, value, summarize),
   }
 }
 

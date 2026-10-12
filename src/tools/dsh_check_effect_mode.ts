@@ -37,6 +37,9 @@ interface EffectModeArgs {
   alreadyInDependencies?: boolean
 }
 
+/** `data.hmr` 的取值：这个 profile 有没有**可用的** hmr（也就是有没有人在 watch patch 文件）。 */
+export type HmrAvailability = 'present' | 'absent'
+
 /** 返回的 `data`。 */
 interface EffectModeData {
   change: EffectChangeKind
@@ -46,7 +49,20 @@ interface EffectModeData {
   mode: string
   downgraded: boolean
   why: string
-  hmr: {
+  /**
+   * **一眼可读的 hmr 结论** —— 让模型不必从 `why` 里推理、也不必知道 `loader` 的内部机制。
+   *
+   * - `'present'`：该 profile 挂着**可用的** hmr，**而 watch patch 文件的正是它** ——
+   *   所以 patch/config 改动会被重读；
+   * - `'absent'`：没有可用的 hmr（行不存在，或被静态禁用）—— **没有任何东西在 watch patch 文件**，
+   *   所以改 config **必须重启**才生效。
+   *
+   * 实测依据（2026-10-13，无 hmr 的隔离实例）：改 patch 文件后 70 秒 / 21 个采样点读到的一直是旧值、
+   * stderr 为空；重启后立刻读到新值。见 `AGENTS.md` 活跃坑里那条「触发者在 hmr」。
+   */
+  hmr: HmrAvailability
+  /** 原始探测细节（谁参与了判定、probe 原文）—— 要复核 `hmr` 结论时看这里。 */
+  hmrDetail: {
     usable: boolean
     /** 哪些证据参与了判定。 */
     sources: string[]
@@ -92,7 +108,7 @@ export function createEffectModeTool(deps: ToolDeps): ToolDefinition {
           "profile's dependencies.",
       },
     },
-    output: toolOutput(EFFECT_MODE_TOOL),
+    output: toolOutput(EFFECT_MODE_TOOL, summarizeEffectMode),
 
     timeoutMs: deps.config.timeoutMs,
     isConcurrencySafe: () => true,
@@ -123,7 +139,9 @@ export function createEffectModeTool(deps: ToolDeps): ToolDefinition {
         mode: decision.mode,
         downgraded: decision.downgraded,
         why: decision.why,
-        hmr: { usable, sources: probe.sources, probe: probe.hmrProbe },
+        // 探测本来就在做（否则做不了降级判定）—— 这里只是把它从内部状态提升成契约字段。
+        hmr: usable ? 'present' : 'absent',
+        hmrDetail: { usable, sources: probe.sources, probe: probe.hmrProbe },
         profile: deps.config.profile,
         // 本工具不涉及端口 —— 报 `not-used` 而不是把配置里那个「由工具推断」的 0 当结论。
         resolved: effectiveConfig(deps.config),
@@ -159,7 +177,7 @@ async function probeHmrFor(
         present: true,
         disabled: 'no',
         evidence: fromFiles.evidence,
-        note: 'profile 文件里发现 hmr（未跑 dump 复核）',
+        note: 'found hmr in the profile files (skipped the dump re-check)',
       },
       sources: ['profile-files'],
     }
@@ -245,6 +263,25 @@ async function probeHmrFor(
 }
 
 /**
+ * 渲染首行的**一句话结论**。
+ *
+ * 为什么需要它：`data` 里带着 hmr 探测的证据行（patch 文件里的原文），整块 JSON 很长；
+ * 而模型唯一必须看到的是**判定本身，以及它与 hmr 的关系** ——
+ * 尤其是无 hmr 时那句「没人 watch patch 文件，所以改 config 不会生效」。
+ *
+ * @param data 工具的 `data`；形状不对时返回 `undefined`，让渲染退回纯 JSON。
+ */
+export function summarizeEffectMode(data: unknown): string | undefined {
+  if (typeof data !== 'object' || data === null) return undefined
+  const record = data as Partial<EffectModeData>
+  if (typeof record.mode !== 'string' || typeof record.hmr !== 'string') return undefined
+  const verdict = `verdict: mode=${record.mode} · hmr=${record.hmr}`
+  const downgrade = record.downgraded === true ? ' · downgraded (no usable hmr)' : ''
+  const why = typeof record.why === 'string' && record.why !== '' ? ` — ${record.why}` : ''
+  return `${verdict}${downgrade}${why}`
+}
+
+/**
  * 挑一句合适的下一步建议。
  *
  * @param mode 生效方式。
@@ -252,12 +289,12 @@ async function probeHmrFor(
 function nextStepWhy(mode: string): string {
   switch (mode) {
     case 'restart-required':
-      return '这一步需要重启宿主；v1 只提供只读判断，重启助手在 v1.1'
+      return 'this step needs a host restart; v1 gives the read-only verdict only — the restart helper is v1.1'
     case 'client-rebuild':
-      return '没有 hmr：客户端要重新构建后刷新页面（不用重启宿主）'
+      return 'no hmr: rebuild the client, then refresh the page (no host restart needed)'
     case 'hot':
-      return '配置类改动本该热生效；若没生效，多半是配置写错或被更高层整行覆盖'
+      return 'a config change is supposed to take effect live; if it did not, the config is likely wrong or a later layer replaced the whole row'
     default:
-      return '客户端改动由 HMR 自动换入，刷新页面即可'
+      return 'hmr swaps the client change in; just refresh the page'
   }
 }

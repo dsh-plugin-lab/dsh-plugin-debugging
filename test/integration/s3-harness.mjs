@@ -123,8 +123,11 @@ const cases = [
     args: { change: 'config' },
     expect: 'ok',
     check: (r) =>
-      r.data?.hmr?.usable === true && r.data?.mode === 'hot' && r.data?.downgraded === false,
-    checkWhy: 'hmr 在 → 配置改动判热生效、不降级',
+      r.data?.hmr === 'present' &&
+      r.data?.hmrDetail?.usable === true &&
+      r.data?.mode === 'hot' &&
+      r.data?.downgraded === false,
+    checkWhy: 'hmr 在 → 配置改动判热生效、不降级；且契约字段 hmr=present',
   },
 
   {
@@ -134,10 +137,11 @@ const cases = [
     args: { change: 'config' },
     expect: 'ok',
     check: (r) =>
-      r.data?.hmr?.usable === false &&
+      r.data?.hmr === 'absent' &&
+      r.data?.hmrDetail?.usable === false &&
       r.data?.mode === 'restart-required' &&
       r.data?.downgraded === true,
-    checkWhy: 'hmr disabled → 任何「热生效」必须降级成 restart-required',
+    checkWhy: 'hmr disabled → 任何「热生效」必须降级成 restart-required；且契约字段 hmr=absent',
   },
 
   {

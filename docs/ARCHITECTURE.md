@@ -152,7 +152,7 @@ src/
 
 | 工具 | 关键语义 |
 |---|---|
-| `dsh_check_effect_mode` | 「热生效」的前提是 profile 里真的挂了 `hmr` —— 没有 hmr 时 `reload()` 是**空操作**，任何变更都退化成 `restart-required` |
+| `dsh_check_effect_mode` | 「热生效」的前提是 profile 里真的挂了 `hmr`。**关键机制：loader 重读配置的能力一直都在，缺的是触发者 —— watch patch 文件的正是 hmr**（`…\dsh-hmr\lib\index.js:718` 的 `watchConfig` 遍历的就是 patch 文件）。无 hmr 时改 config 文件**没有任何东西去重读它**（实测：同一进程 70 秒 / 21 个采样点一直读到旧值、实例 stderr 为空；重启后立刻生效），所以一切「热生效」都降级成 `restart-required`。工具把这件事作为**契约字段**直接给出（`hmr` 取 `present` / `absent`），不让模型从 `why` 反推 |
 | `dsh_diagnose_plugin_load` | 三处外部证据（`bundles` / 安装形态 / 进程）**只证前置条件，不证加载成功**；Fiber 级状态没有查询入口；`Config.listConfigs` 的 `inactive` 混合「禁用 / 未导入 / 已销毁」三义，**从不报 FAILED**。启动失败的硬证据只在 `$DSH_HOME/logs/startup-*.log`，且**只在启动失败时生成** |
 | `dsh_check_auth` | `401` = 服务活着、认证没过；连接被拒 = 没启动。cookie 绑定 authority（`host:port`，`localhost` 与 `127.0.0.1` 不通用），签名密钥落盘、launch token 不落盘 —— 所以「同端口重启旧标签页照常可用、换端口才 401」 |
 | `dsh_dump_config` | `--dump-config` 退出码**恒 0**，不能当门禁；`--dump-config-schema` 退出码 **1 = 有 error**；`preset-*` 行的 `unrecognized Loader tree carrier` 是已知误报，判定看 error 的 `path` 是否指向你改过的行 |

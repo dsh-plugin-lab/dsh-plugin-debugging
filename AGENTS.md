@@ -219,3 +219,18 @@ git diff --check
     那份 pnpm 锁被**重新生成**（时间戳紧跟在编辑之后），所以删掉它会再长出来。
     处置：`.gitignore` 里忽略 `/pnpm-lock.yaml`（安装方式的副产物，不是本仓的包管理器选择）。
     **别把它提交进历史** —— 两个锁文件会让人以为本仓用 pnpm，而 CI 走的是 `npm ci`。
+34. **「配置会被重读」是真的，但触发者住在 hmr 里** —— 这是本仓最容易被误解的一条机制。
+    实测（2026-10-13，**无 hmr** 的隔离实例）：把插件行的 `config.profile` 从 `bench-nohmr` 改成 `bench`，
+    **同一进程跨改文件时刻连续 21 个采样点 / 70 秒**，`resolved.profile` **一直是旧值**，且**实例 stderr 全程为空**
+    （既没 watcher、也没报错）；**重启后**立刻读到新值。
+    对照：**有 hmr** 时走 `pluginManager` 会返回 `applied`、行当场变 `disabled`（task-14）—— 但那是 **manager 主动应用**，
+    不是 watcher 的功劳；而 **watch patch 文件的正是 hmr**：`…\dsh-hmr\lib\index.js:718` 的
+    `watchConfig(filename, …)` 遍历的就是 patch 文件，且 `watchConfig` 的**唯一出处**是 `dsh-hmr`。
+    → 所以 `baseline = hot`（描述 loader 的**能力**：一旦重读就按行重建）与 `downgrade`（补上**触发者**）自洽，
+    错的是「重读会自动发生」这个隐含前提。**工具输出必须点明触发者**（`why` 里已写 "nothing watches the patch files"）。
+35. **观察面纠正：`resolved` 里没有 `timeoutMs`**。`EffectiveConfigBlock` 的字段只有
+    `{ dshHome, dshHomeSource, profile, port, portSource }`（`src/tools/shared.ts:182-193`）。
+    想验「改了配置有没有被重读」，可观察的是 **`resolved.profile`**（`dsh_check_effect_mode`），
+    或 `resolved.port` / `portSource`（`dsh_check_auth` —— 但它在**错误路径**上不返回 `resolved`，
+    所以 `profile` 是这两者里唯一稳定的一项）。**别拿不存在的字段当判据**：
+    本轮任务卡就建议过读 `resolved.timeoutMs`，实际不存在，白跑一轮才知道。

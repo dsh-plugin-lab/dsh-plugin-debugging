@@ -19,14 +19,22 @@ export interface TextBlockLike {
 /** 渲染文本的长度上限（字符）。 */
 export const RENDER_MAX_CHARS = 6_000
 
+/** 可选的「一句话结论」：由各工具提供，把最重要的判定提到首行。 */
+export type ResultSummary = (data: unknown) => string | undefined
+
 /**
  * 渲染一个工具结果。
  *
  * @param toolName 工具名（放在首行，便于模型在长对话里认出这段属于谁）。
  * @param value 工具的规范返回值。
+ * @param summarize 可选的一句话结论；只在成功时用。
  */
-export function renderToolResult(toolName: string, value: unknown): TextBlockLike[] {
-  return [{ type: 'text', text: renderToolResultText(toolName, value) }]
+export function renderToolResult(
+  toolName: string,
+  value: unknown,
+  summarize?: ResultSummary,
+): TextBlockLike[] {
+  return [{ type: 'text', text: renderToolResultText(toolName, value, summarize) }]
 }
 
 /**
@@ -34,15 +42,28 @@ export function renderToolResult(toolName: string, value: unknown): TextBlockLik
  *
  * @param toolName 工具名。
  * @param value 工具的规范返回值。
+ * @param summarize 可选的一句话结论；只在成功时用。
  */
-export function renderToolResultText(toolName: string, value: unknown): string {
+export function renderToolResultText(
+  toolName: string,
+  value: unknown,
+  summarize?: ResultSummary,
+): string {
   const result = asToolResult(value)
   if (result === undefined) {
     return truncate(`[${toolName}]\n${stableJson(value)}`)
   }
   if (result.ok) {
+    // 结论前置：结构化 `data` 是**原始记录**，模型第一眼要的是判定本身
+    // —— 尤其当 data 里带着长证据（如 hmr 探测的 evidence 行）时。
+    const summary = summarize?.(result.data)
     return truncate(
-      [`[${toolName}] ok`, stableJson(result.data), nextStepLine(result.nextStep)]
+      [
+        `[${toolName}] ok`,
+        summary ?? '',
+        stableJson(result.data),
+        nextStepLine(result.nextStep),
+      ]
         .filter((part) => part !== '')
         .join('\n'),
     )

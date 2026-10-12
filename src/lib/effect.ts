@@ -121,7 +121,7 @@ export function probeHmr(configText: string): HmrProbe {
       present: false,
       disabled: 'no',
       evidence,
-      note: '组合树里没有可用的 hmr 行 —— 此时 reload() 是空操作，热生效一律降级为重启',
+      note: 'no usable hmr row in the composed tree — reload() is a no-op there, so every live verdict downgrades to a restart',
     }
   }
   return {
@@ -130,10 +130,10 @@ export function probeHmr(configText: string): HmrProbe {
     evidence,
     note:
       disabled === 'yes'
-        ? '组合树里有 hmr 行，但它被静态禁用了 —— 视同没挂'
+        ? 'the composed tree has an hmr row, but it is statically disabled — treated as not mounted'
         : disabled === 'conditional'
-          ? '组合树里有 hmr 行，但它的 disabled 是运行时表达式（按 profileContext 决定）——按可用处理，但结论带条件'
-          : '组合树里有 hmr 行且未被禁用',
+          ? 'the composed tree has an hmr row whose disabled is a runtime expression (decided by profileContext) — treated as usable, but the verdict carries that condition'
+          : 'the composed tree has an hmr row and it is not disabled',
   }
 }
 
@@ -206,13 +206,30 @@ function buildWhy(
 ): string {
   const reason = baselineReason(input)
   if (!downgraded) {
-    return `${reason}${mode === 'hot' ? '；该 profile 挂着 hmr，热生效成立' : ''}`
+    return `${reason}; ${mode === 'hot' ? HOT_WITH_HMR : CLIENT_WITH_HMR}`
   }
   if (baseline === 'hot') {
-    return `${reason}；但该 profile 没有可用的 hmr，reload() 是空操作 —— 所以热生效降级为必须重启`
+    // 这句是本工具存在的理由：**「loader 会重读配置」缺的不是能力，而是触发者**。
+    // 实测（2026-10-13，无 hmr 的隔离实例）：改 patch 文件 70 秒 / 21 个采样点零反应，
+    // stderr 为空；重启后立刻读到新值。而 watch patch 文件的正是 hmr
+    // （`…\dsh-hmr\lib\index.js:718` 的 `watchConfig(filename, …)`，被 watch 的是 patch 文件）。
+    return (
+      `${reason}; but there is no usable hmr in this profile — nothing watches the patch files, ` +
+      'so the change is not re-read and a restart is required'
+    )
   }
-  return `${reason}；但该 profile 没有可用的 hmr，客户端不会自动换入 —— 需要重新构建后刷新页面`
+  return (
+    `${reason}; but there is no usable hmr in this profile, so the client will not swap the ` +
+    'asset in — rebuild, then refresh the page'
+  )
 }
+
+/** 有 hmr 且不降级时，`hot` 那一支的解释。 */
+const HOT_WITH_HMR =
+  'hmr is mounted in this profile and it is what watches the patch files, so the change is re-read live'
+
+/** 有 hmr 且不降级时，客户端那一支的解释。 */
+const CLIENT_WITH_HMR = 'hmr is mounted in this profile, so the client swaps the asset in'
 
 /**
  * 每种改动的原理说明（SKILL §一「为什么」列）。
@@ -222,15 +239,17 @@ function buildWhy(
 function baselineReason(input: EffectInput): string {
   switch (input.change) {
     case 'config':
-      return 'loader 每次变更都重读配置、按行比较、只重建变化的行'
+      // 刻意**不**写成「loader 每次变更都重读配置」——那句会让人以为重读是自动发生的，
+      // 而实测的真相是：重读要有触发者，触发者住在 hmr 里（见 buildWhy 的注释）。
+      return 'the loader re-reads config and rebuilds only the rows that changed, once something signals a reload'
     case 'bundle-added':
       return input.alreadyInDependencies === true
-        ? '该包已经在 dependencies 里，只改选择时 loader 报 restart-required'
-        : '全新安装走 reload()'
+        ? 'the package is already in dependencies; flipping the selection reports restart-required'
+        : 'a fresh install goes through reload()'
     case 'host-code':
-      return '进程启动只装载一次模块，依赖变化还会改模块图'
+      return 'the process loads modules once at startup, and a dependency change alters the module graph'
     case 'client-code':
-      return '浏览器侧独立加载，与宿主模块缓存无关'
+      return 'the browser loads its bundle independently of the host module cache'
   }
 }
 
