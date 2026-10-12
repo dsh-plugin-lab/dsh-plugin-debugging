@@ -121,7 +121,7 @@ Port-based process identification is **Windows-only** in v1. Elsewhere the looku
 | `port` | `0` | Host port to probe; `0` finds the listening port. |
 | `timeoutMs` | `15000` | Ceiling for one spawned command or HTTP probe. |
 
-There is no settings card: how a plugin is configured is described in [AGENTS.md](AGENTS.md).
+There is no settings card: these fields belong to the plugin's config in the profile composition.
 
 ## License
 
