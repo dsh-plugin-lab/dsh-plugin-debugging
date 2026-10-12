@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "dsh-plugin-debugging",
-    "description": "Troubleshoot a running DSH instance: which change needs what to take effect, whether a plugin actually loaded, 401 vs connection-refused, and config dumps."
+    "title": "DSH Plugin Debugging",
+    "description": "Read-only diagnostics for a running DSH instance: whether a change needs a reload or a restart, whether a plugin actually loaded, 401 versus connection-refused, and what the composed config contains."
   }
 }
