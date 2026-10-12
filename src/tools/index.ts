@@ -18,11 +18,17 @@
  * | `dsh_check_auth` | §3.3 / §3.4 |
  * | `dsh_dump_config` | §3.8 |
  *
- * TODO(G3-A)：在 `src/tools/` 下逐个实现这四个文件，在这里聚合注册。
+ * **只读纪律（v1）**：不杀进程、不改 profile、不写 `$DSH_HOME`。
+ * 进程与端口一律**按端口**查（`lib/ports.ts`），不用命令行子串 —— 子串会误匹配派生 shell。
  */
 import type { Context } from '@deepseek-ai/cordis'
 
 import type { PluginState } from '../contracts.js'
+import { createCheckAuthTool } from './dsh_check_auth.js'
+import { createDiagnosePluginLoadTool } from './dsh_diagnose_plugin_load.js'
+import { createDumpConfigTool } from './dsh_dump_config.js'
+import { createEffectModeTool } from './dsh_check_effect_mode.js'
+import { createToolDeps } from './shared.js'
 
 /**
  * 聚合注册入口。
@@ -30,8 +36,17 @@ import type { PluginState } from '../contracts.js'
  * @param ctx 宿主上下文；`ctx.tools` 是唯一允许触碰的服务。
  * @param state 配置 + 技能半边的结果（工具可以据此在输出里提示技能没生效）。
  */
-export function registerTools(ctx: Context, _state: PluginState): void {
+export function registerTools(ctx: Context, state: PluginState): void {
   if (ctx.tools === undefined) return
 
-  // G3-A：四个工具在这里 register（每个一文件）。
+  const deps = createToolDeps(state.config)
+  const factories = [
+    createEffectModeTool,
+    createDiagnosePluginLoadTool,
+    createCheckAuthTool,
+    createDumpConfigTool,
+  ]
+  for (const create of factories) {
+    ctx.tools.register(create(deps))
+  }
 }

@@ -82,3 +82,17 @@ git diff --check
    env `DSH_PROFILE` / `DSH_PROFILE_DIR` 读。
 10. **npm 12 会拦 postinstall**（本仓曾因此去掉用不到的 `esbuild`）。要装带安装脚本的依赖，
     得先明确 `allowScripts`，否则本机与 CI 的行为会不一致。
+11. **`defineTool` 的 `output.schema` 要的是「作者层字面量」**，它自己编译成强制的 `JsonSchemaNode`。
+    把已标注 `ValueSchemaSpec` 的对象喂进去 = 把编译前后两层混了，而报错方向是**反的**
+    （`Type 'ValueSchemaSpec' is not assignable to 'JsonSchemaNode'`，真因是 `enum` 的
+    `readonly string[]` vs 可变数组）。中途想改用两分支 `oneOf` 会让推断出的 `data` 与返回类型对不上，
+    `execute` 静默退化成 `Promise<never>`。**取法：schema 用 `{ type: 'json' } as const`，
+    结构强制挪到返回前的 `ensureToolResult()` 里做**（绝不抛，形状不对就转 `internal` 失败）。
+12. **`cordis.patch.yml` 的 `insert:` 用裸包名时，只有该包能从「被启动 profile 的目录」解析到才挂得上。**
+    `--patch` 开发循环下若 profile 里没有这个包：组合树**照样有行、退出码 0**，但运行期
+    `dsh-plugin-debugging (dsh-plugin-debugging): failed to import` —— 行在、功能不在。
+    台子配方里因此必须多一步 junction（把仓链进 profile 的 `node_modules`），或直接走 `dsh plugin add`。
+13. **`patched by <file>` 后面跟的是「改动该行的那一层」，不是插入者。** 本仓 patch 是**插入者**，
+    所以它只会以来源头 `# == <本仓 cordis.patch.yml 路径>` 的形态出现。**按「带 patched by 标注」
+    去判本插件有没有进树，永远判不过** —— 这个判据本身是错的（我们自己的验收书里犯过一次）。
+    另外：`--dump-config` 退出码**恒 0**，能当门禁的只有 `--dump-config-schema` 的退出码。

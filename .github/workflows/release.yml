@@ -1,0 +1,190 @@
+# 发布：手动触发，本仓库唯一的发布入口。
+#
+# 认证用 npm Trusted Publishing（OIDC），没有 NPM_TOKEN 这种东西。
+# 代价是必须在 npmjs.com 上为本包配一次 trusted publisher（见 docs/PUBLISHING.md），
+# 收益是仓库里不存任何长期凭据，代币由 GitHub 现签、用完即废。
+#
+# 为什么本仓**不需要** GitHub App token：本流程只推 tag、不推 main。
+# 要往受保护分支直推就得多一把 App 私钥（姊妹仓 dsh-zhihu-search 就是那样），
+# 而本仓刻意选了「零 secret」那条路 —— 这也是它比另两份模板短的原因。
+#
+# 顺序是全有或全无：先证明产物是对的，再发。任何一步红了，后面都不会跑。
+#
+# 预发布：版本号里带预发布段（如 0.2.0-alpha.1）时，会发到**同名 dist-tag**，
+# latest 保持不动；不带预发布段时照旧发 latest。
+#
+# **版本驱动：本 workflow 不 bump 版本。** 发布的就是 package.json 里那个号 ——
+# 版本号是发布**之前**的独立一步（先 bump → 提交 → 再发布），
+# 理由：界面上的版本号就是清单里那个号，workflow 自己 bump 会让工作树永远停在
+# 「上一个已发布版本」。这条由 `npm run check:release` 的「发布流程不改写版本号」钉住。
+#
+# 改本文件后**必须手动 dispatch 实跑一次**：PR 上的 CI 只跑 ci.yml，
+# 动 release.yml 的 PR 就算绿勾也不代表发布链路验过。
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: 只做检查与打包，不真的发布，也不打 tag
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # 在仓库设置里建一个同名 environment，可以给它加人工审批与环境保护规则。
+    # npm 侧 Trusted Publisher 配的 environment 名必须与这里逐字一致。
+    environment: release
+    permissions:
+      contents: write # 发布成功后打 tag 用
+      id-token: write # Trusted Publishing 的 OIDC 换发
+    steps:
+      # release-guard 要 diff「上个 tag..HEAD」，浅克隆里没有 tag。
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+          cache: npm
+          # Trusted Publishing 要求 npm 走官方 registry 换 OIDC，别指向镜像。
+          registry-url: https://registry.npmjs.org
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      # 版本号写在两处：package.json 决定发布号，package-lock.json 决定 npm ci 装的树。
+      # 手工改前者会漏掉后者，所以每次推送与每次发布都各拦一次。
+      - name: Verify the lockfile version matches package.json
+        run: |
+          pkg=$(node -p "require('./package.json').version")
+          lock=$(node -p "require('./package-lock.json').version")
+          if [ "$pkg" != "$lock" ]; then
+            echo "::error::package-lock.json 是 $lock，package.json 是 $pkg"
+            echo "bump with: npm version <patch|minor|major> --no-git-tag-version"
+            exit 1
+          fi
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      # 发布态不变量：bundle 声明在不在、private 去掉没有、SKILL.md 随不随包。
+      # 判据是组织仓的 Must agree 一条，本仓的执行体是 scripts/check-release.mjs。
+      - name: Release preconditions
+        run: npm run check:release
+
+      # 产物没变就不该发版 —— 发了等于制造一个内容相同的新版本号。
+      # 首次发版还没有任何 tag，这一步自动跳过。
+      - name: Release guard
+        run: |
+          previous=$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || true)
+          if [ -z "$previous" ]; then
+            echo "没有历史 tag（首次发版），跳过守卫。"
+            exit 0
+          fi
+          echo "对比 $previous..HEAD"
+          git diff --name-only "$previous"..HEAD | node scripts/release-guard.mjs
+
+      # 幂等：补跑一条已经发成功的流水线时，不该在 npm 那里撞一个 403 就停住。
+      - name: Probe whether this version is already on npm
+        id: probe
+        run: |
+          name=$(node -p "require('./package.json').name")
+          version=$(node -p "require('./package.json').version")
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if npm view "$name@$version" version >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::$name@$version 已经在 npm 上，发布步骤会跳过。"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # 预发布版本（如 0.2.0-alpha.1）发到它自己的 dist-tag（alpha），**不动 latest**。
+      # dist-tag 由版本自己的预发布段推导，判据只此一处：publish 与 GitHub Release
+      # 两步读同一个输出，避免「推 latest 的那一档其实是预发布」。
+      - name: Publish
+        if: steps.probe.outputs.exists == 'false'
+        run: |
+          tag=$(node -e "const v=require('./package.json').version; const p=v.split('-'); process.stdout.write(p.length>1 && /^[A-Za-z]/.test(p[1]) ? p[1].split('.')[0] : 'latest')")
+          echo "dist-tag: $tag"
+          npm publish --provenance --tag "$tag"${{ inputs.dry-run && ' --dry-run' || '' }}
+
+      # git 侧的发布面：tag + GitHub Release。**两样都由流程产出，不靠人记得去补。**
+      # tag 名 = `v` + package.json 里的版本号，前缀是**显式补**的：npm version 的输出自带 v，
+      # 而 package.json 里没有；换数据来源时形状会跟着变，会把 tag 名带歪。
+      # 形状是判据不是审美：守卫与巡检靠 `git describe --match 'v[0-9]*'` 看它，
+      # 不带 v 的 tag 那个 `--match` **看不见**。
+      - name: Tag the release
+        if: steps.probe.outputs.exists == 'false' && !inputs.dry-run
+        run: |
+          tag="v${{ steps.probe.outputs.version }}"
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            echo "$tag 已存在，跳过。"
+          else
+            git tag "$tag"
+            git push origin "$tag"
+          fi
+
+      # 正文来源两级：**草稿 → `--generate-notes` 回落**。
+      #
+      # 草稿由 Release Drafter 维护（配置继承组织仓的 .github/release-drafter.yml，
+      # tag 是滚动名 `next`，永不与 `v<版本>` 相撞 —— 所以上面的存在性判断不会命中草稿）。
+      #
+      # **必须断言「草稿真的被读到了吗」**：读不到草稿与「草稿为空」都会走回落，
+      # 但前者是**配置坏了**（tag 改名、action 没跑、权限不足），后者是**正常情况**。
+      # 不区分的话，「发版成功但正文其实走了回落」是静默失败。
+      #
+      # 清理只按 action 名匹配（`/Release Drafter/d`）而**不抄那句提示语的全文**：
+      # 那句话归组织仓的模板所有，随时会被改写；照抄一句会变成一条静默失效的 sed。
+      - name: Pick the release body (draft first, then --generate-notes)
+        id: notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          draft="$(gh release view next --json body --jq '.body' 2>/dev/null || true)"
+          if printf '%s' "$draft" | grep -q 'Release Drafter'; then
+            printf '%s\n' "$draft" | sed '/Release Drafter/d' > /tmp/notes.md
+            # 草稿可能只有标题没有条目（无 PR 时）：那种仍算「读到但为空」，走回落。
+            if [ -n "$(grep -E '^[-*] ' /tmp/notes.md || true)" ]; then
+              echo "source=draft" >> "$GITHUB_OUTPUT"
+              echo "::notice::正文来自 Release Drafter 草稿（next）"
+            else
+              echo "source=generate" >> "$GITHUB_OUTPUT"
+              echo "::notice::草稿读到了但没有条目（本版没有带标签的 PR），回落 --generate-notes"
+            fi
+          else
+            echo "source=generate" >> "$GITHUB_OUTPUT"
+            echo "::warning::读不到 Release Drafter 草稿（next）—— 回落 --generate-notes。"
+            echo "::warning::若是配置坏了（tag 改名 / action 没跑 / 权限不足），这条 warning 就是唯一的信号。"
+          fi
+
+      - name: Create the GitHub Release
+        if: steps.probe.outputs.exists == 'false' && !inputs.dry-run
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="v${{ steps.probe.outputs.version }}"
+          case "${{ steps.probe.outputs.version }}" in
+            *-*) flags="--prerelease" ;;
+            *)   flags="" ;;
+          esac
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "$tag 的 Release 已存在，跳过。"
+          else
+            echo "建 Release：$tag $flags（正文来源：${{ steps.notes.outputs.source }}）"
+            if [ "${{ steps.notes.outputs.source }}" = "draft" ]; then
+              gh release create "$tag" --title "$tag" $flags --notes-file /tmp/notes.md
+            else
+              gh release create "$tag" --title "$tag" $flags --generate-notes
+            fi
+          fi

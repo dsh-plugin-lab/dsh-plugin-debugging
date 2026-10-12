@@ -39,6 +39,13 @@ jobs:
       - name: Format check
         run: npm run format:check
 
+      # 发布态不变量：bundle 声明在不在、private 去掉没有、SKILL.md 随不随包、
+      # 发布流程有没有偷偷改写版本号。
+      # 组织判据把这条定为 Must agree、由各仓 check:release 承担；放进 CI 是为了把
+      # 「发布前才发现」提前成「每次推送就发现」。判据本体在 scripts/check-release.mjs。
+      - name: Release invariants
+        run: npm run check:release
+
   # 收口 job —— ruleset 的 required_status_checks 只配这一个名字（CI Success），
   # 本仓内部 job 增删时规则集无需改动。改本 job 前必读三条：
   #   1. 判定只放 step 级：放 job 级时条件为假会让本 job 变 skipped，
