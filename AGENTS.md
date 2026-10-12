@@ -18,6 +18,10 @@
 - **改动连带同步点**：谁引用了你改过的路径 / 名字 / 规则，同批改。双语门面（[README.md](README.md)
   与 [README_zh.md](README_zh.md)）与两份 `locale/*.json` 是典型的成对件。
 - **不抄会漂的值**：宿主版本号、计数、行号一律现查；写「形状」，不写「值」。
+- **门面的语言切换行用 Markdown 链接**（`English | [中文](README_zh.md)`），**故意**与姊妹仓
+  的 HTML `<a href>` 写法不同：那样写会被链接校验报「引用未做成链接」两条警告。
+  代价是这一行不再居中；换来的是本仓链接校验 **0 警告**（见「常用命令」）。**这是有意的分歧**，
+  要改回去就同批改这里。
 
 ## 常用命令
 
@@ -30,10 +34,12 @@ npm run format:check   # 格式
 
 ```shell
 # 身份件比对：只比 5 个「逐字相同」件，离线只读，随时可跑
-node ../.github-dsh-plugin-lab/scripts/scaffold.mjs check .
+# （脚手架在**组织仓**，不在本仓；下面这条绝对路径是它的本机检出位置）
+node "D:\.github-dsh-plugin-lab\scripts\scaffold.mjs" check .
 
 # 链接校验与换行校验
-python ../.github-dsh-plugin-lab/scripts/check-links.py . --fragments --refs
+# （check-links.py 住**枢纽仓**的 scripts/，不在本仓；它同时是那边 CI 用的那一份）
+python "..\scripts\check-links.py" . --fragments --refs
 git diff --check
 ```
 
