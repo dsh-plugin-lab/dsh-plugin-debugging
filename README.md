@@ -35,7 +35,7 @@ One sentence holds this plugin together: **an artifact is read at a particular m
 
 ## Tools
 
-Installing it gives the model four tools, plus one skill:
+Installing it gives the model five tools — four read-only, one write-side — plus one skill:
 
 | Tool | In one line | Reach for it when |
 |---|---|---|
@@ -43,6 +43,7 @@ Installing it gives the model four tools, plus one skill:
 | `dsh_diagnose_plugin_load` | Whether a plugin is in `bundles`, how it is mounted, and what the Loader tree says | A plugin is installed but seems absent |
 | `dsh_check_auth` | Connection refused (not running) versus 401 (running, not authenticated) | The page returns 401, or you can't tell whether the host is up |
 | `dsh_dump_config` | The composed config tree and its diagnostics | You need to know what the composition actually resolved to |
+| `dsh_hot_reload` (**write-side**) | Swaps one mounted loader entry to the code on disk, in place | Host-side code changed and a restart would be worse than the change |
 
 `dsh-plugin-debugging` is the skill behind them: it carries the reasoning for every check, the three live-effect tiers, the installation forms, credential acquisition, process identification, and isolated instances. **The tools are accelerators; where one is ambiguous, the skill text wins.**
 
@@ -75,9 +76,10 @@ Installing it gives the model four tools, plus one skill:
 
 ## Read-only by design
 
-- Reads files an instance already has; stores no credentials and produces none.
-- Restarts nothing, rewrites no profile, writes nothing to `DSH_HOME`.
-- Restart and hot-reload helpers are deliberately absent: they are the only actions that can kill the host you are debugging.
+- The four diagnostics tools read files an instance already has; they store no credentials and produce none.
+- They restart nothing, rewrite no profile, and write nothing to `DSH_HOME`.
+- **The one write-side exception is `dsh_hot_reload`**: it touches only the **running module tree** (an in-place code swap) — it still writes no profile, writes nothing to `DSH_HOME`, and kills no process; on failure the previous version is put back (and on an import-time failure it was **never touched at all**).
+- A restart helper is deliberately absent: it is the only action that can kill the host you are debugging.
 
 ## Install
 

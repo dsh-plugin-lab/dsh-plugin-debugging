@@ -26,6 +26,15 @@ export const TOOL_ERROR_KINDS = [
   'command-failed',
   /** 调用方取消了这次执行（`exec.signal`）。**不要**自动重试。 */
   'cancelled',
+  /**
+   * 写侧工具：这次**替换没成功**（新代码 import 期或 apply 期抛了）。
+   *
+   * 为什么必须与 `internal` 分开：这两档都**不是**本插件的 bug，而模型要做的事
+   * 也不同 —— 要去改**被重载的那份插件代码**再重试。归到 `internal` 会让模型
+   * 去报一个不存在的 bug；归到 `command-failed` 会误导成「看子进程 stderr」。
+   * 至于「旧 fiber 有没有被碰过、有没有回滚」，那是 message / hint 的活。
+   */
+  'reload-failed',
   /** 兜底：本插件自己的意外。 */
   'internal',
 ] as const
