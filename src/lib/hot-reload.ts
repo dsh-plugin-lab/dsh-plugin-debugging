@@ -81,11 +81,43 @@ export interface ReloadFailure {
   hint: string
 }
 
-/** 一个模块缓存端口。**只暴露对象自己的方法**（T1：不假定它是 `Map`）。 */
+/**
+ * 一个模块缓存端口。
+ *
+ * ## 为什么不是 `get/set/delete`（这是真机红的根因，已确证到行）
+ *
+ * Node 24 的 `LoadCache` 不是普通 Map —— 它的**每个方法都多一个 `type` 参数**，
+ * 且第二个参数**必须是字符串**（实测 `internal/modules/esm/module_map` 的原函数体）：
+ *
+ * ```js
+ * get(url, type = kImplicitTypeAttribute) { validateString(type, 'type'); return super.get(url)?.[type] }
+ * set(url, type = kImplicitTypeAttribute, job) { validateString(type, 'type'); cachedJobsForUrl[type] = job; … }
+ * delete(url, type = kImplicitTypeAttribute) { const cached = super.get(url); if (cached) cached[type] = undefined }
+ * ```
+ *
+ * 所以 `set(url, slot)` 会把 **job 当成 type** 传进去 → `validateString` 抛
+ * `The "type" argument must be of type string. Received an instance of ModuleJob`。
+ * 这正是真机上 import 期失败被吞成 `internal` 的原因：回滚缓存那一步自己先炸了。
+ *
+ * → 端口因此**按语义**定义（读回 / 放回 / 清掉），把「type 是什么」留给适配层去发现与**验证**
+ * （`write` 返回是否成功，是**真的回读校验过**，不是「我调过了」）。
+ */
 export interface ModuleCachePort {
-  get(url: string): unknown
-  set(url: string, value: unknown): void
-  delete(url: string): void
+  /**
+   * 读一个 URL 上现存的全部 job（真机上是 `{ javascript: ModuleJob }` 那个槽里的值）。
+   *
+   * **绝不抛**：读不到就返回空数组。
+   */
+  read(url: string): unknown[]
+  /**
+   * 把一条 job 放回该 URL。
+   *
+   * **绝不抛**，且必须**回读验证**再返回 `true` —— 返回 `false` 表示这条没放回去，
+   * 调用方据此把「回滚没走完」如实说出去，而不是假装成功。
+   */
+  write(url: string, job: unknown): boolean
+  /** 让该 URL 上的缓存失效。**绝不抛**。 */
+  clear(url: string): void
 }
 
 /** 闭包遍历还需要「这个 URL 的子模块是谁」。 */
@@ -151,6 +183,27 @@ function isNonEmpty(value: string | undefined): value is string {
 }
 
 /**
+ * 把用户给的目标值归一成**匹配用的那个值**。
+ *
+ * 只有一处归一：`entryId` 上的 `include:` 前缀。为什么必须有它 ——
+ * **`dsh_diagnose_plugin_load` 报出来的就是 `include:<id>`**，而匹配键那边用的是
+ * `bareId(entry.id)`。不剥前缀，就等于「诊断的输出喂不回重载的输入」，
+ * 报出来是 `no-match`，看着像「树里没有这个 entry」（真机上 verifier 就是这么撞的）。
+ *
+ * **URL 形态不剥**：`file:///C:/…` 的第一个冒号在 scheme 里，剥了就成了垃圾。
+ * 所以判据是「不含 `://`」。
+ *
+ * @param kind 目标种类。
+ * @param raw 用户给的原值。
+ */
+function normalizeTargetValue(kind: ReloadTargetKind, raw: string): string {
+  const value = raw.trim()
+  if (kind !== 'entryId') return value
+  if (value.includes('://')) return value
+  return bareId(value)
+}
+
+/**
  * 把工具参数解析成**恰好一个**目标。
  *
  * 不给、或给多于一者都**不猜** —— 返回一条结构化失败。猜的代价是重载错的插件，
@@ -160,9 +213,15 @@ function isNonEmpty(value: string | undefined): value is string {
  */
 export function parseReloadTarget(args: ReloadArgs): TargetParse {
   const given: ReloadTarget[] = []
-  if (isNonEmpty(args.entryId)) given.push({ kind: 'entryId', value: args.entryId.trim() })
-  if (isNonEmpty(args.module)) given.push({ kind: 'module', value: args.module.trim() })
-  if (isNonEmpty(args.serverName)) given.push({ kind: 'serverName', value: args.serverName.trim() })
+  if (isNonEmpty(args.entryId)) {
+    given.push({ kind: 'entryId', value: normalizeTargetValue('entryId', args.entryId) })
+  }
+  if (isNonEmpty(args.module)) {
+    given.push({ kind: 'module', value: normalizeTargetValue('module', args.module) })
+  }
+  if (isNonEmpty(args.serverName)) {
+    given.push({ kind: 'serverName', value: normalizeTargetValue('serverName', args.serverName) })
+  }
 
   if (given.length === 0) {
     return {
@@ -276,11 +335,18 @@ export interface MatchOutcome {
  * 两轮：先**精确**（归一化后相等），再**子串**（≥3 字符）。分开是为了让
  * 「精确唯一命中」不受子串噪音影响 —— 否则一个短包名会把无关 entry 拖进来。
  *
+ * **归一放在这里**（而不是只放在 `parseReloadTarget`）：机制层可能被直接调用
+ * （测试、将来别的入口），而「`include:<id>` 匹配不上」是个**假阴性** ——
+ * 看着像「树里没有这个 entry」。两边都归一，从哪个入口进来都一样。
+ *
  * @param entries 全部候选。
  * @param target 目标。
  */
-export function matchEntries(entries: readonly ReloadEntryPort[], target: ReloadTarget): MatchOutcome {
-  const needle = normalizeKey(target.value)
+export function matchEntries(
+  entries: readonly ReloadEntryPort[],
+  target: ReloadTarget,
+): MatchOutcome {
+  const needle = normalizeKey(normalizeTargetValue(target.kind, target.value))
   const exact: ReloadEntryPort[] = []
   const loose: ReloadEntryPort[] = []
   for (const entry of entries) {
@@ -355,7 +421,8 @@ export function packageRootOf(url: string): string | undefined {
 
 /** 缓存备份：**回滚的唯一依据**（§2.1 第 3 步）。 */
 export interface CacheBackup {
-  entries: Array<{ url: string; slot: unknown }>
+  /** 每个 URL + 它在缓存里现存的 job（真机上一个 URL 通常只有一条）。 */
+  entries: Array<{ url: string; jobs: unknown[] }>
 }
 
 /**
@@ -367,12 +434,12 @@ export interface CacheBackup {
  * @param urls 闭包里的 URL。
  */
 export function backupAndClear(cache: ModuleCachePort, urls: readonly string[]): CacheBackup {
-  const entries: Array<{ url: string; slot: unknown }> = []
+  const entries: Array<{ url: string; jobs: unknown[] }> = []
   for (const url of urls) {
-    const slot = cache.get(url)
-    if (slot === undefined) continue
-    entries.push({ url, slot })
-    cache.delete(url)
+    const jobs = cache.read(url)
+    if (jobs.length === 0) continue
+    entries.push({ url, jobs })
+    cache.clear(url)
   }
   return { entries }
 }
@@ -380,11 +447,22 @@ export function backupAndClear(cache: ModuleCachePort, urls: readonly string[]):
 /**
  * 把备份放回缓存（import 期失败 / apply 期回滚都走它）。
  *
+ * **绝不抛**，并如实返回「是不是全部放回去了」：
+ * 这条路径本身跑在失败处理里，它再抛就会把**真正的原因**盖掉
+ * （真机上就是这么把一个 import 语法错变成了 `internal` + Node 内部文案）。
+ *
  * @param cache 模块缓存端口。
  * @param backup 备份。
+ * @returns 是否**每一条都**成功放回。
  */
-export function restoreCache(cache: ModuleCachePort, backup: CacheBackup): void {
-  for (const { url, slot } of backup.entries) cache.set(url, slot)
+export function restoreCache(cache: ModuleCachePort, backup: CacheBackup): boolean {
+  let complete = true
+  for (const { url, jobs } of backup.entries) {
+    for (const job of jobs) {
+      if (!cache.write(url, job)) complete = false
+    }
+  }
+  return complete
 }
 
 /** 重载成功后落进工具 `data` 的报告。 */
@@ -593,21 +671,35 @@ export async function hotReload(
     fresh = await host.importFresh(moduleUrl)
   } catch (error) {
     // import 期失败：旧 fiber 从未被碰过，把缓存放回再报错。
-    restoreCache(cache, backup)
+    // ⚠️ 放回失败**不影响**这条结论（旧 fiber 确实没被碰）—— 但要说出去，
+    // 因为它意味着那份模块下次会被重新求值。**绝不让它盖掉 import 的真原因**。
+    const restored = restoreCache(cache, backup)
     return {
       ok: false,
       failure: {
         reason: 'import-failed',
-        message: `the new code failed to import; the running entry was never touched: ${messageOf(error)}`,
-        hint: 'fix the import error and call again — nothing to undo, the old version is still active',
+        message: `the new code failed to import: ${messageOf(error)}`,
+        hint: restored
+          ? 'the running entry was never touched — nothing to undo; fix the import error on disk and call again'
+          : 'the running entry was never touched — nothing to undo; fix the import error and call again, ' +
+            'but note that the module cache could not be fully restored, so restart the host when convenient',
       },
       data: { ...(cleared as ReloadData), oldFiberTouched: false, rolledBack: false },
     }
   }
 
   if (isAborted(options.signal)) {
-    restoreCache(cache, backup)
-    return { ok: false, failure: cancelledFailure(), data: cleared as ReloadData }
+    const restored = restoreCache(cache, backup)
+    return {
+      ok: false,
+      failure: {
+        ...cancelledFailure(),
+        hint: restored
+          ? 'do not retry automatically; the caller gave up on purpose, and the module cache was restored'
+          : 'do not retry automatically; the caller gave up on purpose, but the module cache could not be fully restored — restart the host when convenient',
+      },
+      data: cleared as ReloadData,
+    }
   }
 
   // 第 6–7 步 —— 再 dispose 旧 fiber、挂载新的。两步同一个 try：
@@ -687,11 +779,8 @@ async function rollback(
       complete = false
     }
   }
-  try {
-    restoreCache(cache, backup)
-  } catch {
-    complete = false
-  }
+  // restoreCache 自己绝不抛，返回的是「是否全部放回」。
+  if (!restoreCache(cache, backup)) complete = false
   return complete
 }
 
@@ -964,10 +1053,22 @@ function internalOf(loader: unknown): Record<string, unknown> | undefined {
 }
 
 /**
+ * 真机 `LoadCache` 认识的模块 type。
+ *
+ * 实测（2026-10-13，本机 `0.2.1-alpha.2`，node **24.18.0**）：槽字典的键就是
+ * `['javascript']`，且 `Object.getPrototypeOf(slot) === null`。
+ *
+ * **但这里不把 `'javascript'` 写死成唯一答案** —— 它是**候选表**，
+ * 真正用哪个由 {@link cachePortOf} 里那次**回读校验**决定（见 `write`）。
+ * 写死一个值意味着宿主换 type 名就静默失效，而回读校验不会。
+ */
+const MODULE_TYPES = ['javascript', 'commonjs', 'module'] as const
+
+/**
  * 从一个 URL 的缓存槽里取出 ModuleJob。
  *
- * Node 22/23 直接存 job；24+（本机 v2）存 `{ [type]: ModuleJob }` 的形状
- * （type 形如 `javascript`）。两种都要认。
+ * Node 22/23 直接存 job；24+（本机 v2）存 `{ [type]: ModuleJob }` 的形状。
+ * 两种都要认 —— 认不出的形状返回 `undefined`，由调用方当「没读到」处理，**不抛**。
  *
  * @param slot 缓存槽。
  */
@@ -981,10 +1082,19 @@ function moduleJobOf(slot: unknown): Record<string, unknown> | undefined {
 }
 
 /**
- * 把 `internal.loadCache` 包成 {@link ClosurePort}（T1）。
+ * 把 `internal.loadCache` 包成 {@link ClosurePort}。
  *
- * **只调缓存对象自己的方法**：`instanceof Map === false`（另一个 realm），
- * 所以 `Map.prototype.*.call` 这条参考实现的路子在本机未必成立。
+ * ## 关键：`set` 的第二个参数是 `type`，不是值
+ *
+ * 真机 `LoadCache.set(url, type, job)` 会对 `type` 做 `validateString`。
+ * 传 `(url, job)` 就是本轮真机红的根因（job 被当成 type）。
+ * 所以 `write` **先挑一个 type，写进去，再回读确认** —— 校验过的成功才算成功。
+ *
+ * ## 只调对象自己的方法
+ *
+ * `instanceof Map === false`（实测：原型链 `[LoadCache, SafeMap]` 就断了，
+ * `SafeMap.prototype` 的原型是 `null`），所以 `Map.prototype.*.call` 那条参考实现的路子
+ * 在本机**不成立** —— 这里一次都不碰 `Map.prototype`。
  *
  * @param internal `loader.internal`。
  */
@@ -996,18 +1106,89 @@ function cachePortOf(internal: Record<string, unknown>): ClosurePort | undefined
   if (cache === undefined || cache === null || get === undefined || set === undefined || remove === undefined) {
     return undefined
   }
-  return {
-    get: (url) => get.call(cache, url),
-    set: (url, value) => {
-      set.call(cache, url, value)
+
+  /** 按已知 type 逐个读；`get(url, type)` 在真机上返回该 type 的 job。 */
+  const readOne = (url: string, type: string): unknown => {
+    try {
+      return get.call(cache, url, type)
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
+   * 一个参数的 `get(url)`。
+   *
+   * 两种形状下都返回**job**：Node 24 走默认 type 取 `slot[type]`；22/23 是裸 job。
+   * 但它在真机上**取不到 type 名**，所以只在按 type 读全空时用作兜底。
+   */
+  const readImplicit = (url: string): unknown => {
+    try {
+      return get.call(cache, url)
+    } catch {
+      return undefined
+    }
+  }
+
+  const port: ClosurePort = {
+    read: (url) => {
+      const jobs: unknown[] = []
+      for (const type of MODULE_TYPES) {
+        const job = readOne(url, type)
+        if (job !== undefined && job !== null) jobs.push(job)
+      }
+      if (jobs.length > 0) return jobs
+      const implicit = readImplicit(url)
+      return implicit === undefined || implicit === null ? [] : [implicit]
     },
-    delete: (url) => {
-      remove.call(cache, url)
+
+    write: (url, job) => {
+      // 挑一个 type 写进去，然后**回读确认**。校验不过就试下一个 ——
+      // 这样换 type 名不会静默失效，而「写不进去」也不会被谎报成成功。
+      for (const type of MODULE_TYPES) {
+        try {
+          set.call(cache, url, type, job)
+        } catch {
+          continue
+        }
+        if (readOne(url, type) === job) return true
+      }
+      // 兜底：隐式 type（Node 22/23 的裸 job 形状，或 type 不在候选表里）。
+      try {
+        set.call(cache, url, MODULE_TYPES[0], job)
+        return readImplicit(url) === job
+      } catch {
+        return false
+      }
     },
+
+    clear: (url) => {
+      // 真机 `delete(url, type)` 是**逐 type 置 undefined**（不是删键），
+      // 所以要按已知的 type 各清一次；再补一次隐式 type。
+      for (const type of MODULE_TYPES) {
+        try {
+          remove.call(cache, url, type)
+        } catch {
+          // 这个 type 清不动不影响别的 type。
+        }
+      }
+      try {
+        remove.call(cache, url)
+      } catch {
+        // 隐式 type 那条清不动就到此为止 —— clear 的契约是不抛。
+      }
+    },
+
     children: async (url) => {
-      const job = moduleJobOf(get.call(cache, url))
+      const job = moduleJobOf(port.read(url)[0])
       if (job === undefined) return []
-      const linked = await (job['linked'] as Promise<unknown> | undefined)
+      let linked: unknown
+      try {
+        linked = await (job['linked'] as Promise<unknown> | undefined)
+      } catch {
+        // 模块**刚抛过**时 `linked` 可能是个已拒绝的 promise —— 当作没有子模块。
+        return []
+      }
       const urls: string[] = []
       for (const request of iterate(linked)) {
         const child = asString(safeGet(request, 'url'))
@@ -1016,6 +1197,7 @@ function cachePortOf(internal: Record<string, unknown>): ClosurePort | undefined
       return urls
     },
   }
+  return port
 }
 
 /**
