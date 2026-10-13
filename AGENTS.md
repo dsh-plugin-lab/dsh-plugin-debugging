@@ -154,9 +154,14 @@ git diff --check
     **不要去 `import '@deepseek-ai/dsh-host-plugin-inventory'`**：实测 `ERR_MODULE_NOT_FOUND`
     （插件在 profile 的 `node_modules`，解析不到宿主内层，十条搜索路径都没有）；自己用
     `loader.entries()` 投影几行即可（官方那个函数本体也是这么写的）。
-20. **别用「拒绝数组」的 helper 去取 `Symbol.iterator`**：`loader.entries()` 返回的**就是数组**，
-    这类 helper 会把数组判成非法 → **每棵树都读出空**，表现得像「宿主没有任何 entry」。
-    这是最坏形态的静默错（结论完全错、却不报错）。本仓 `src/lib/fiber.ts` 第一版踩过。
+20. **别用「拒绝数组」的 helper 去取 `Symbol.iterator`**：`loader.entries()` 在**同一台机器上两种形状都出现过** ——
+    历史上读到的是**数组**；2026-10-13 真机复测（隔离实例、`0.2.1-alpha.2`）读到的是**可迭代对象**
+    （`Array.isArray()=false`、`hasIterator=true`、`ctor=""`、188 条 entry）`[已实测：真机实验A]`。
+    结论不是「哪一种才对」，而是：**必须按 `Symbol.iterator` 取，不能假定 `.find()` / `.length` 存在** ——
+    验证者的第一版探针只当数组用（`.find()`），`entryFound` **永远是 false**（**假阴性**，看着像「没有这个 entry」）。
+    坑的反面同样成立：**别用「拒绝数组」的 helper 去取 `Symbol.iterator`** —— 它会把数组判成非法 →
+    **每棵树都读出空**，表现得像「宿主没有任何 entry」（本仓 `src/lib/fiber.ts` 第一版踩过）。
+    **两种错法都静默**。现行写法见 `src/lib/loader.ts:185`（直接读 `Symbol.iterator`，两种形状通吃）。
 21. **读 `fiber._error` 时不要 `await fiber.await()`**：宿主的启动审计会 await，但**工具调用不能挂在一个
     可能永不 settle 的 fiber 上** —— 那会让「传输层先超时、再转结构化错误」这条纪律失效（工具永不返回）。
     只读已同步可见的字段。本仓用一条 `awaited` 标志的测试钉住这一点。

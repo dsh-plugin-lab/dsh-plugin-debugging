@@ -251,7 +251,7 @@ nextStep: dsh_check_effect_mode({"change":"config"}) — 先确认这次改动�
 | 10 | **推进** | 通道与形状都已确认（`resolveAgent` + `followup` + notice 形状）`[已核 §6.4]`；**仍待实测**：重启后「启动即唤醒」的时序（参考实现实测「3 秒时 `agents.get()` 还取不到」） |
 
 **一句话（2026-10-13 更新）**：`dsh_restart` 的三块拼图**都已实测/已核**（忙判定 C6/C7、恢复通道 C4/C5、拉起形态 B1–B8）—— 但**拉起形态的结论变了**：单级 detached 只覆盖「父自己 exit」，**外部 `/T` 树杀会断链**，自建就必须两级，且服务化场景（job object）**两级也未必够** → 取向改为**优先交给外部管理器**。
-`dsh_hot_reload` 的算法、回滚与前置条件（C1：`loader.internal` 无需开关）都已坐实，**唯一仍必须真机复现的是它的核心承诺**（import 期失败不碰旧 fiber / apply 期失败能回滚）—— 真机实验A 正在跑（task-21）。
+`dsh_hot_reload` 的算法、回滚与前置条件（C1：`loader.internal` 无需开关）都已坐实，**它的核心承诺也已在真机复现**（import 期失败不碰旧 fiber / apply 期失败能回滚 —— 三条判据全过，见 §6.6）。至此 §5 的 10 项里，**只剩第 6 条（静默泄漏能否检测）与第 8/9 条（契约与默认注册）**没有实测支撑。
 
 ---
 
@@ -337,4 +337,35 @@ nextStep: dsh_check_effect_mode({"change":"config"}) — 先确认这次改动�
 | C7 | **`workspace/session-activity` 是 waterfall；`dsh-schedule` 用的正是 `kind:'schedule'`** | `dsh-schedule/lib/index.js:2044,2049`（与 REF 写法逐字一致）；返回数组 `{kind, items}` | 闸② 的「已武装定时提醒」判据成立；⚠️ **必须 `await next()` 并把自己那段拼回**，否则短路后续应答者 |
 | C8 | **`appendPluginRecord(session, type, data)` 存在；前缀正则与强制 `ignorable: true` 逐字命中** | `dsh-session` 导出表 `lib/types/index.d.ts:117`；正则 `lib/index.js:1246`；`ignorable` 落值 `:1555` | 与坑 4 **完全一致**；§3.4 若真要写会话记录，走它 |
 
-**未核实（如实列，勿当结论）**：`UserMessage` 字段逐个；`job.status` 完整枚举；**dsh 进程内** `internal` 非空（C1 是进程外实测 + 静态推断，终局判据在实验A 第一步）；B9 那一整行。
+**未核实（如实列，勿当结论）**：`UserMessage` 字段逐个；`job.status` 完整枚举；B9 那一整行。
+（**「dsh 进程内 `internal` 非空」已不再未核实** —— 实验A 在进程内坐实，见 §6.6。）
+
+### 6.6 真机实验A（2026-10-13）：热重载的三条判据**全过**
+
+报告：`.coord/verify-hot-reload-isolation.md`。**同一实例（pid 428）、全程未重启**；观察面是 bench 插件注册的工具（返回 `MARKER`），用 `entry.fiber.state` 与 `apply-log.ndjson` 交叉作证。
+
+| 判据 | 结果 | 关键证据 |
+|---|---|---|
+| **3 · 成功（基准）** | **过** | `control-changed 05:50:48.752` → 新 `apply-start 05:50:48.765` → `05:50:54.751` 读到 `v1 → v2`；步骤 `cache-get(found) → cache-delete → reimport(ok) → snapshot-old(state=2) → dispose-old(1) → created-new(1) → await-new` |
+| **1 · import 期失败** | **过** | `reimport ok=false` → `rollback-caches restored=1`；**步骤里根本没有 `dispose-old`**；此后 `fiberState=2`、工具仍返回 `v2` ⇒ **「先 import、后 dispose」正是旧 fiber 没被碰过的原因** |
+| **2 · apply 期失败（async + sync 各一次）** | **过** | 两次都 `dispose-old → created-new → swap-failed → rollback-remove-new(removed=true) → rollback-replugin(1) → rollback-caches(1)`；`fiberState=2`、工具仍返回 `v2` |
+
+**最强证据**：`apply-log` 里坏版本之后**紧跟着旧版本的一整轮 `apply-start` + `tool-registered`** —— 坏版本在注册前就抛了，工具却照旧可用，只有「旧版本被**真的**重新实例化」解释得通。
+→ §2.1 的 8 步算法**不再是推断**：它的两个关键承诺（import 期失败不碰旧 fiber / apply 期失败能回滚）**已在真机复现**，且进程内 `loader.internal` 非空也一并坐实。
+
+**四条「写实现会踩」（全部已实测）**：
+
+| # | 事实 | 影响 |
+|---|---|---|
+| T1 | `loader.internal` 拿得到（无 `--expose-internals`），但 **`loadCache` 的 ctor 是 `LoadCache`、`instanceof Map === false`**（原型链 `[LoadCache, SafeMap]`，有 `get/set/has/delete`，size=807） | **别假设它是 Map**：参考实现那手 `Map.prototype.delete.call` 在本机**未必成立**；用**对象自己的 `delete`** 实测可用 |
+| T2 | `internal.resolveSync(name, baseUrl)` 对 **URL 形式的 name** 失败（报 `Cannot find package 'undefined'`） | 回落 `new URL(name, baseUrl)` |
+| T3 | `ctx.get('tools')` 在 `apply` 期是 `undefined`，必须走 `inject`；且回调**约 419ms 后**才到 | **观察面在 apply 返回之后才可用** —— 测时序必须留这段（探针第一版就因此读不到工具） |
+| T4 | `tools.register` 的 `output` 是**两层**：`{type:'json'}` → 「must declare output {schema, render}」；`{schema:{type:'json'}}` → 「schema.type must be one of object/array/…」；**要 `{schema:{type:'object'}}`** | `{type:'json'}` 是 `defineTool` 的**作者层**字面量；直接调运行期 `register` 时不是这个形状（本仓走 `defineTool` 不受影响，但**极易误导**） |
+
+**entry 匹配的两条实测**：`entry.id` 实际是 **`include:<id>`**（`overlay.yml` 里声明的 `reloadable-bench` 只是后缀）；`entry.options.name` 是 **`file://` URL**。
+→ **两个字段都要试 + URL 归一**：探针第一版只比 `entry.id`，`entryFound` **永远是 false**（**假阴性**，看着像「树里没有这个 entry」）。
+**`runtimeFibers` 是 `DisposableList`（len=1）不是数组**；换 fiber 前后形状与长度都没变（2 秒采样看不到中间态，故「中间态时长」答不了）。
+
+**顺带一处**：`loader.entries()` 在真机上的形状是**可迭代对象**（`Array.isArray()=false`、`hasIterator=true`、188 条），与坑 20 历史上记的「就是数组」不一致 → **按 `Symbol.iterator` 取才对两种形状都成立**（`AGENTS.md` 坑 20 已按实测改写；本仓 `src/lib/loader.ts:185` 本来就是这么取的）。
+
+**未做（如实记）**：回滚**本身**失败的分支；并发重载；group / MCP entry；中间态时长。
