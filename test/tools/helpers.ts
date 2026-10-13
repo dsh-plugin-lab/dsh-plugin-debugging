@@ -16,7 +16,7 @@ import type { CommandResult, RunCommandOptions, SpawnImpl } from '../../src/lib/
 import type { FetchImpl } from '../../src/lib/http.ts'
 import { createToolDeps, type ToolDeps } from '../../src/tools/shared.ts'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
-import type { NextStep, ToolData, ToolResult } from '../../src/lib/errors.ts'
+import type { JsonValue, NextStep, ToolData, ToolResult } from '../../src/lib/errors.ts'
 import type { LoaderEntrySnapshot } from '../../src/lib/fiber.ts'
 import type { LoaderReadResult } from '../../src/lib/loader.ts'
 
@@ -291,6 +291,69 @@ export async function run(
   exec: ToolRunContext = execWith(),
 ): Promise<ToolResult<unknown>> {
   return (await tool.execute(args, exec)) as unknown as ToolResult<unknown>
+}
+
+/**
+ * 走**工具自己的声明**取模型可见文本（不直接调 `renderToolResultText`）。
+ *
+ * 为什么：`toolOutput()` 已经绑好了工具名与输出表，直接调渲染函数就多一个
+ * 「红线自己拼装」的漂移点；走 `tool.output.render` 才是宿主真正的取数口。
+ *
+ * @param tool 工具定义。
+ * @param args 调用参数（渲染用）；没有渲染参数的工具传 `{}`。
+ * @param value 工具的返回值。
+ */
+export function renderText(tool: ToolDefinition, args: unknown, value: unknown): string {
+  const blocks = tool.output.render(args, value as JsonValue) as unknown as { text?: string }[]
+  return blocks.map((block) => block.text ?? '').join('\n')
+}
+
+/**
+ * 按 SHAPE §3.1 的冻结逐行格式切分渲染文本（与红线实现同源的取数口）。
+ *
+ * @param text 渲染文本。
+ */
+export function splitRender(text: string): {
+  head?: string
+  verdict?: string
+  l2: string[]
+  l3?: string
+} {
+  const headPattern = /^\[[\w_]+\] (ok|failed \([\w-]+\))$/
+  const truncPattern = /^\d+ more line\(s\) not shown — the full record is in the session log$/
+  const lines = text.split('\n')
+  const verdictIndex = lines.findIndex((line) => line.startsWith('verdict: '))
+  const nextStepIndex = lines.findIndex((line) => line.startsWith('nextStep:'))
+  const head = lines.find((line) => headPattern.test(line))
+  return {
+    ...(head === undefined ? {} : { head }),
+    ...(verdictIndex < 0 ? {} : { verdict: lines[verdictIndex]?.slice('verdict: '.length) }),
+    l2: lines
+      .slice(verdictIndex + 1, nextStepIndex < 0 ? lines.length : nextStepIndex)
+      .filter((line) => !truncPattern.test(line)),
+    ...(nextStepIndex < 0
+      ? {}
+      : { l3: (lines[nextStepIndex] ?? '').slice('nextStep:'.length).trim() }),
+  }
+}
+
+/**
+ * 找出 `a` 里**逐字出现在 `b` 中**的、长度 ≥`min` 的片段（B20b 的取交集手法）。
+ *
+ * 实现：把 `a` 按 `min` 宽滑窗，逐个查 `b.includes(window)` —— 只要没有窗口命中，
+ * 就不存在 ≥`min` 的共享串（任一更长的共享串必然包含一个命中的窗口）。
+ *
+ * @param a 描述文本。
+ * @param b 渲染文本。
+ * @param min 长度下限。
+ */
+export function sharedSubstrings(a: string, b: string, min: number): string[] {
+  const hits = new Set<string>()
+  for (let start = 0; start + min <= a.length; start += 1) {
+    const window = a.slice(start, start + min)
+    if (b.includes(window)) hits.add(window)
+  }
+  return [...hits]
 }
 
 /**
