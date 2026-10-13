@@ -58,7 +58,7 @@ Installing it gives the model five tools — four read-only, one write-side — 
 
 ### `dsh_diagnose_plugin_load` —— whether a plugin loaded
 
-- `package`: name to check, e.g. `dsh-zhihu-search` or `@scope/name`. Omit to list every bundle.
+- `package`: name to check, e.g. `my-dsh-plugin` or `@scope/name`. Omit to list every bundle.
 - `port`: host port to probe.
 
 **Boundary**: it reports **observed** evidence (the `loader` tree is readable: `fiber.state`, and `fiber === undefined` for modules that failed at import) separately from **inferred** evidence (the three preconditions: `bundles` membership, install form, entry file). When the tree cannot be read, the output says `mode=inferred` explicitly. Processes are found **by port**, never by command-line substring.
@@ -96,7 +96,7 @@ Installing it gives the model five tools — four read-only, one write-side — 
 dsh plugin --profile web add dsh-plugin-debugging
 ```
 
-Not on npm yet — this path starts working at the first release.
+Published as `0.1.0` (2026-10-13 — released by hand, so that release carries **no** npm provenance; versions published through this repository's release workflow do).
 
 ### From source
 
