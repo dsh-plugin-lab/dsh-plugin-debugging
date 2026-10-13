@@ -111,11 +111,10 @@ git diff --check
       → v1.1 可考虑让本仓自己的某个工具报出「技能半边注册成了没有、几个 agent」，
       这样「注册了但没生效」这类问题不必靠 winner 反推。
 - [ ] **`SKILL.md` 已解冻**（维护者 2026-10-13 拍板）：技能**跟着插件一起演化**，不再逐字冻结在 v2.1.4。
-      要做两件：① **新增「干预」一节**，纳入写侧（`hot_reload` / `restart`）与派生（`sign_cookie`）工具
-      —— 原 SKILL 定位是「排障」、只含诊断，写侧与派生工具在原文里**没有家**；② 顺带修正 §3.8 前半句
-      「Fiber 级状态没有查询入口」（**已被证伪**，见活跃坑 19）。排期与形态见
-      [docs/SHAPE.md](docs/SHAPE.md) §9。**红线连带**：SHAPE §10 拟补 **B12b**（断言「干预」一节存在且非空），
-      否则「解冻了却没写」是静默的（现有 B12 **不比对 v2.1.4 原件**，只查 frontmatter 合规与正文长度 → 解冻不会让它变红）。
+      ① **「干预」一节已落地**（纳入写侧 `hot_reload` 与派生 `sign_cookie`，并写明 `restart` 尚不存在）；
+      ② **仍待做**：修正 §3.8 前半句「Fiber 级状态没有查询入口」（**已被证伪**，见活跃坑 19）。
+      **红线 B12b 已补**（断言「干预」一节存在且非空）—— 之前不补的话「解冻了却没写」是静默的
+      （现有 B12 **不比对 v2.1.4 原件**，只查 frontmatter 合规与正文长度 → 解冻不会让它变红）。
 - [x] **非 Windows 的端口识别** —— **已落地**（Windows / Linux / macOS 三平台；Linux 走 `ss` 两档、
       macOS 走 `lsof` → `netstat`；方案表在 `src/lib/ports.ts` 的 `portLookupPlan`，别在文档里抄命令名）。
       **这层能被 CI 真验**（CI 在 ubuntu 上），与「只能本机红线」的项不同。
@@ -128,11 +127,13 @@ git diff --check
       真源是 `test/redlines.test.ts` 里 `describe('B…')` 的闭集，规则与逐条判据见 [docs/SHAPE.md](docs/SHAPE.md) §10）。
       其中 **`B24`** 是 SHAPE §4 说的「契约的承载条件」（`execute` 全路径不抛）。
       **B17 的取值面已改**（L1/L2 ∪ 目标工具自己的描述）。三条空转口见 [docs/SHAPE.md](docs/SHAPE.md) §10.0。
-      ⚠️ **待补的只剩 `B12b`**（上面那条 `SKILL.md` 解冻的连带），其余缺口以 SHAPE §10 为准。
-- [ ] **技术债：收敛重复的测试助手**（契约改造期 `test/tools/helpers.ts` 被冻结，
-      四名成员各自内联了一份）。实测：`renderText` 在 **5 个文件**（其中 4 个逐字节相同）、
-      `splitRender` 5 个、`sharedSubstrings` 3 个 —— 预计可减 **800–1000 行**。
-      **必须串行**（那 6 个文件分属不同 owner，得等写者全停手）。
+- [x] **技术债：收敛重复的测试助手** —— **已收敛**（2026-10-13）。`renderText` / `splitRender` /
+      `sharedSubstrings` 三条各从 5/5/3 份合成 1 份，`test/tools/helpers.ts` 只增不改既有导出。
+      实测净减 **183 行**（此前估的 350–500 与更早的 800–1000 都偏高：这三条助手本体只有 3–18 行，
+      大头是各自的注释，而接收方要一次性付掉定义成本）。**用例数前后未变**，即没有丢断言。
+      ⚠️ **尚余一处**：`test/redlines.test.ts` 里的 `withPlatformRedline` 与 `helpers.ts` 的
+      `withPlatform` 逐字同构，且该文件文末「已知限度」第 29 条写着「收敛那笔债时连它一起收」——
+      债还了要把那条**删掉**，不是留着。
 - [ ] **两条独立复验留下的残余**（都不影响模型决策，方向安全，故未阻塞发布）：
       ① `resolvedDir` 对 `link:` 包报 realpath，偏离宿主的 `packageDirFromAnchor`（只进 `audit`，不进 `key`）；
       ② 凭据存在性扫描对 `records` 段内**更深层**的同名键会判 true（需 `grant` + 同名键同时出现才触发）。

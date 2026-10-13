@@ -15,8 +15,8 @@
 | 类 | 工具 | 粒度判据 |
 |---|---|---|
 | **观察** | `dsh_check_effect_mode` · `dsh_diagnose_plugin_load` · `dsh_check_auth` · `dsh_dump_config` | 这是四个**问题**，不是一个工具的四个参数：何时生效 / 加载没有 / 是 401 还是没起 / 组合成什么。**加工具不改这一层** |
-| **派生** | `dsh_sign_cookie`（未做） | 唯一会**产出凭证**的工具：不同权限（要读密钥）、不同参数（authority / ttl）。**绝不能并进 `check_auth`** —— 那会把秘密带进一个判定型输出 |
-| **行动** | `dsh_hot_reload`（有）· `dsh_restart`（未做） | 可逆与不可逆是两种权限面：前者失败放回旧版；后者不可逆。判据是**要不要审批闸门** |
+| **派生** | `dsh_sign_cookie` | 唯一会**产出凭证**的工具：不同权限（要读密钥）、不同参数（authority / ttl）。**绝不能并进 `check_auth`** —— 那会把秘密带进一个判定型输出 |
+| **行动** | `dsh_hot_reload` · `dsh_restart` | 可逆与不可逆是两种权限面：前者失败放回旧版；后者不可逆。判据是**要不要审批闸门**。**哪个还没做见 §9 的推进顺序**，本表只答归属 |
 | **实例** | 建 / 列 / 销毁 → **另起插件** | 它起长期进程、写另一个 `DSH_HOME`、分配端口 —— **越出本仓两条边界**（B10 诊断半边只读 / B15 写侧只碰进程内树），且它管的是**另一个**进程 |
 
 **两条纪律**：
@@ -31,6 +31,7 @@
 - 这条同时解释了 `sign_cookie` 为什么独立 —— 它可重试、可撤销，**不同在可逆性**，而在**输出里带凭证**。判据是第二条：**有没有秘密要经手**。
 
 **接缝**：观察层四个工具加一个 `dshHome` 参数（默认仍取配置）。隔离实例因此**本身可被观察**，不必给每个工具引入 `instance` 概念。
+⚠️ **本句按字面实现不了**，核不上的地方与候选替代见 §1.2 —— **先别照它实现，等维护者拍板。**
 
 **工具名是冻结的模型可见 API**。加工具、改描述可以；改已有工具名不行。「描述层」因此是**唯一还能调路由的杠杆**。
 
@@ -82,6 +83,25 @@
 
    `cordis_inspect_*` 属于后者（它只查宿主有什么，判断在模型）；`plugin_manager` 也属于后者（列出来由模型决定装不装）。**我们的工具属于前者**：`--dump-config` 的退出码语义、`preset-*` 的已知误报、`hmr` 缺失导致一切降级 —— 这些**在原始数据里读不出来**，必须由工具判定。`verdict` 因此不是「替模型决策」，而是**把工具独有的宿主知识交出去**；`key` 才是留给模型决策的原料。
    → 若哪天某个工具的 `verdict` 变成「原始数据的一行摘要」，它就退化成多余的中间层，**该按官方的做法去掉它**。这条写在这里当**重开条件**。
+
+### 1.2 §1 那句「接缝」按字面实现不了（**待维护者拍板**）
+
+§1 末尾那句「观察层四个工具加一个 `dshHome` 参数，隔离实例因此本身可被观察」**核不上**，没有按它的字面实现。
+**本节只标出「错在哪」与候选替代，不替维护者选** —— 选了才算实现决策。
+
+**三条核不上的理由**（架构评估）：
+
+- **`diagnose` 的 Loader 半边是进程内的**（`ctx.get('loader')`）→ **跨 home 永远不可得**。换个 `dshHome` 参数也答不了另一个实例的树状态。
+- **spawn 型工具不注入 env 会读回本进程 home**（`src/lib/exec.ts` 的 `env` 默认 `process.env`）→ `effect_mode` / `dump_config` 起的 `dsh` 子进程**不会**跟着参数走。`dshHome` 今天只由插件配置 / `DSH_HOME` / 默认值在加载时定一次（`src/config.ts`），**没有任何工具把它当参数接**。
+- **`check_auth` 要的是 authority（`host:port`），不是 `dshHome`** → 一个 `dshHome` 参数喂不进它。
+
+**后果**：「隔离实例本身可被观察」今天**不成立**。四个观察工具里只有 `dump_config` 能看到另一个实例（它跑 `dsh --profile … --dump-config`），但换 home 要改**插件配置或环境变量**，**不是调用时给一个参数**；`diagnose` 跨不了，`check_auth` 喂不进。
+
+**候选替代（都还没被拍板）**：
+
+- **按工具分**：只给「本来就走子进程 / 读目录」的那几个加 `dshHome`，`diagnose` 不给（它跨不了），`check_auth` 换成 `authority`。
+- **只承认进程内那半边**：`dshHome` 只用来定位**磁盘证据**（profile 目录、启动日志），Loader 半边显式标注「只覆盖本进程」。
+- **不做接缝**：隔离实例归 §6「另起插件」，本仓工具**恒定观察自己这一棵**。
 
 ---
 
@@ -593,19 +613,29 @@ interface ToolResult { content: ContentBlock[]; isError: boolean; meta?: JsonVal
 | **标题文字** | 客户端的**工具名 → locale key** 表 | `TOOL_TITLE_KEYS:134` `cordis_inspect_query: "tool.title.queryRuntime"` → `dsh-client-ui-conversation:19846` `"Query runtime"` |
 | **摘要 `host`** | 客户端从 **args** 推 | `deriveSummary(variant, argsRaw)` + `SUMMARY_KEYS`（args 派生；注释自己写明「result-derived summaries are a ledger item」） |
 | **粗体** | **CSS 按工具名前缀** | `client.js:1473`：`.o3BgMG_root[data-tool^=cordis_] .o3BgMG_title{font-weight:500}` / `.o3BgMG_title{font-weight:400}`；而 `data-tool` = `toolName`（`:1764`） |
-| **图标** | 客户端的**工具名 → variant → 图标**表 | `VARIANT_ICONS`（`:1789-1797`）+ `classifyTool`（`:169-171` 查 `TOOL_VARIANTS`）；另一条按前缀的路是 `detailIcon`（`:3990-4000`，`toolName.startsWith("cordis_")` → `IconCordisPluginOutlineRegular`） |
+| **图标** | 客户端的**工具名 → variant → 图标**表 | `VARIANT_ICONS`（`:1789-1797`）+ `classifyTool`（`:169-171` 查 `TOOL_VARIANTS`）；另一条按前缀的路是 `detailIcon`（`:3990-4000`，`toolName.startsWith("cordis_")` → `IconCordisPluginOutlineRegular`）。`[已实测]` 那张卡走的是**后一条**（DetailsRow，见本节末） |
 
-**所以：那行粗体是 `cordis_` 前缀白拿的**（`font-weight:500`），我们的 `dsh_*` 前缀永远是 `400`；图标同理。**工具侧没有任何字段能改这两样** —— `presentCall` 连读都没人读（§8.2）。
+**⚠️ 纠正本节原来那句结论**（原文：「那行粗体是 `cordis_` 前缀白拿的，我们的 `dsh_*` 前缀永远是 `400`；图标同理。工具侧没有任何字段能改这两样」）。
+
+- **错在后半句**：注册 keyed 条目之后，**那一行就是我们自己的组件** → `fontWeight:500` 直接写在行内样式里即可，**不是只能白拿**。原文把「宿主自己派发的那一行」当成了「我们注册的那一行」。
+- **改不了粗体的是宿主自己派发的 generic 行**：它按 `[data-tool^=cordis_]` 选择器决定（`data-tool` = `toolName`，`:1764`），而全文件**只有那两条** `font-weight`（`:1473`）。我们的工具名不落在 `cordis_` 前缀上，所以落在 `400`。
+- **「工具侧没有任何字段能改」这半句仍成立**，但它的对象是 `presentCall`（§8.2 无人读），**不是**客户端组件的 props。
 
 **要复用，只有一条路：给本仓加客户端半边。**
 
 - 形态：`package.json` 的 `dsh.client` 声明 + `ctx.slots.register('tool.call.toolview', …)` 注册 **keyed** 条目（**范本：`dsh-client-ui-cordis/lib/client.js:1446-1482`**，它注册自己的 `CordisDefineRow` / `CordisRunRow`）。
-- **图标可直接复用**（都在 `@deepseek-ai/dsh-client-ui-primitives` 的导出表里）：`IconCordisPluginOutlineRegular`（`cordis_` 前缀用的那个，最可能是截图里那个）、`IconBrowseOutlineRegular`（`read` variant 用）、`IconSparkleRegular`（`others` 兜底）。
+- **图标可直接复用**（都在 `@deepseek-ai/dsh-client-ui-primitives` 的导出表里）：`IconCordisPluginOutlineRegular`（`cordis_` 前缀用的那个，`[已实测]` **就是截图里那颗**）、`IconBrowseOutlineRegular`（`read` variant 用）、`IconSparkleRegular`（`others` 兜底）。
+- **复用没有「双 React」风险**（`[已实测]`）：`dsh-client-ui-primitives` 走**浏览器模块表**（`window.__ModuleLoader__`）而不是 npm 解析 → 宿主内层的包在插件里同样可得（`dsh-client-ui-tool` 自己就这么 `require`），`require('react')` 拿到的是**同一个** React 实例。
 - **粗体照抄 500**（不自己发明一个新值），**结构照抄 `标题 · 摘要`**（`sep` 是 2px 圆点，`margin:0 8px`）。
 - **注意它不是 `presentResult` 的替代品**：keyed 条目拿的是**冻结的 call/result 切片 + `block.meta`**，所以 §5 的 `audit`（走 `presentationMeta`）正好是它的输入 —— 两条设计在这里接上。
 - **代价照实记**：新增一个客户端构建产物（要进 `files`、要过 `check:release`、多一份 HMR/replay 语义），且 keyed 条目必须在 **call/result 两侧都可重放**。→ 因此**排在形态改造之后**，不进 §9 的 ⓪–⑥。
+- **加 `dsh.client` 必须重启宿主一次**（`[已实测]`）：`dsh-client-modules` 把 **package.json 元数据缓存到重启为止**（其 README `:72`）。此后改**产物内容**走 HMR 的 `rebuilt()`，不用重启；⚠️ **但磁盘上删字段也要重启才生效** —— 缓存的反面同样成立。
 
-**未定**：截图里那颗图标究竟是 `IconCordisPluginOutlineRegular`（走 `detailIcon`，说明那一行是 **DetailsRow**）还是 `VARIANT_ICONS.others = IconSparkleRegular`（走 generic 卡）—— 取决于客户端把 `cordis_inspect_query` 的结果派发到了哪条行渲染路径（它有 `inspectionDetails` 的解析分支，`:3730-3745`）。**做之前先在那张卡上量一次**，别猜。**这条不影响「必须加客户端半边」的结论。**
+**`[已实测]` 那张卡走 DetailsRow、图标是 `IconCordisPluginOutlineRegular`**（原先这条「未定」销掉）。
+
+- **走哪条行**：**DetailsRow** —— `client.js:4074-4083` 给三个 `cordis_inspect_*` 逐个注册了 keyed 条目。所以走的是 `detailIcon`（`cordis_` 前缀那一支），**不是** `VARIANT_ICONS.others = IconSparkleRegular`。
+- **展开栏的结构**：`detailList`（`groups` / `items` / `fields` / `code`）+ 折叠 + 代码块复制 + hover 才现的 `Inspect` 按钮（`.o3BgMG_inspectButton`）。
+- **对方案的影响**：只影响「抄哪套结构与图标」。**不影响「必须加客户端半边」这个结论。**
 
 ---
 
@@ -620,8 +650,8 @@ interface ToolResult { content: ContentBlock[]; isError: boolean; meta?: JsonVal
 | **①b 推广到其余四个** | 把 ①a 定稿的骨架套到 `effect_mode` / `check_auth` / `dump_config` / `hot_reload` | ①a 已经把所有形状决策做完，这一步是**搬运**，不再做设计 |
 | **② 三个补字段** | 启动日志解析、`dsh.bundle` 检查、Client failure 措辞 | 无新机制；`diagnose` 已经读了同样的源（且它在 ①a 里已被改过，正好接上） |
 | **③ 双投影** | `data` 三段化收口 + `presentationMeta` 带 `audit`（**不再附带 `presentCall`** —— 对 Web 客户端无效，见 §8.2） | 依赖 ⓪ 的结论与 ①a 的三层渲染定稿 |
-| **⑦ 客户端半边**（形态之外，最后） | 加 `dsh.client` + keyed `tool.call.toolview`：**粗体标题（500）+ 复用宿主图标 + `标题 · 摘要` 结构**，读 `block.meta` 里的 `audit`（§8.5） | 它只影响**人**通道、不影响模型；代价是新构建产物与 replay 语义 → 排一切之后 |
-| **④ `dsh_sign_cookie`** | 独立工具 + 真机红线 | 算法是照抄（SKILL §3.4 已实测），但**错误信号是二值**、调试困难，值一条独立真机红线 |
+| **⑦ 客户端半边**（形态之外，最后） | 加 `dsh.client` + keyed `tool.call.toolview`：**粗体标题（500）+ 复用宿主图标 + `标题 · 摘要` 结构**，读 `block.meta` 里的 `audit`（§8.5） | 它只影响**人**通道、不影响模型 → 排一切之后。代价分两类：**已实测** = 视觉来源已定（走 DetailsRow、图标、粗体可在自有组件内写、图标可复用且无双 React 风险、加 `dsh.client` 要重启宿主一次）；**仍是推断** = 新构建产物要进 `files` 并过 `check:release`、keyed 条目在 call/result 两侧都可重放、多一份 HMR 语义（§8.5） |
+| **④ `dsh_sign_cookie`（已完成）** | 独立工具 + 真机红线 | 算法是照抄（SKILL §3.4 已实测），但**错误信号是二值**、调试困难，值一条独立真机红线。实现与契约见 [ARCHITECTURE.md](ARCHITECTURE.md) §5 |
 | **⑤ `dsh_restart`** | 四道闸 + marker + 恢复 | 不可逆，排一切之后 |
 | **⑥ 隔离实例** | 另一个仓 | 与本仓边界已由 §1 划清 |
 
@@ -710,7 +740,7 @@ interface ToolResult { content: ContentBlock[]; isError: boolean; meta?: JsonVal
 | 描述里同义改写了输出结构（例：把「退出码恒 0」写成 `the plain dump always reports success`） | **抓不到** → 归**评审清单**（下方），不是红线 |
 
 **因此 B18 / B20 各拆两条，不是一条**（B18→B18a/B18b、B20→B20a/B20b；另加 B12b。B24 本就在表内，不另计。编号故意留 `a/b` 后缀、不重排，避免与已引用的编号漂）。
-**⚠️ 不要再在文档里数「一共几条」**：这个数每加一条红线就变一次，而它一漂就骗人。**数就数 `test/redlines.test.ts` 里 `describe('B…')` 的闭集**（`B12b` 是唯一的「已规划未落地」，别把它算进已落地）。
+**⚠️ 不要再在文档里数「一共几条」**：这个数每加一条红线就变一次，而它一漂就骗人。**数就数 `test/redlines.test.ts` 里 `describe('B…')` 的闭集**。
 
 **评审清单（不进红线，因为不可机械断言）**：
 
@@ -805,6 +835,8 @@ npm pack @deepseek-ai/dsh-tools@0.1.7-rc.1     # → 解出 package/lib/types/pr
 | 可复用的图标集（`Icon*OutlineRegular`） | `@deepseek-ai/dsh-client-ui-primitives` | `lib/index.js` | 末尾的 `export { … }` 表 |
 | 官方 **keyed 卡片**范本（将来客户端半边的样板） | `@deepseek-ai/dsh-client-ui-cordis` | `lib/client.js`、`lib/types/client/slots.d.ts` | `tool.call.toolview` · `tool.view.cordis` |
 | 客户端半边怎么声明 | **任一** `@deepseek-ai/dsh-*` | `package.json` | `dsh.client` |
+| **客户端包的元数据缓存到重启为止**（加 `dsh.client` 必须重启一次） | `@deepseek-ai/dsh-client-modules` | 包内 `README`（`:72`） | `cached per Loader specifier` · `rebuilt()` |
+| 客户端半边走**浏览器模块表**（不是 npm 解析，故宿主内层的包可得、React 同实例） | `@deepseek-ai/dsh-client-ui-tool` | `lib/client.js` | `window.__ModuleLoader__.load` · `require("react")` |
 | client 查询三态措辞（`Client failure` 的真出处） | `@deepseek-ai/dsh-cordis-host-runner` | `lib/index.js` | `Client failure` · `hasLiveClient` |
 | 「有没有在线页面」 | `@deepseek-ai/dsh-api-gateway` | `lib/index.js` | `hasLiveClient` |
 | 创造模式**独有**什么（对照两个 preset 的工具行） | `@deepseek-ai/dsh-web-app` | `presets/cordis.patch.yml` vs `presets/standard.patch.yml` | 都比 `dsh-tool-` 行 |
