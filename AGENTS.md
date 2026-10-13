@@ -251,3 +251,10 @@ git diff --check
     或 `resolved.port` / `portSource`（`dsh_check_auth` —— 但它在**错误路径**上不返回 `resolved`，
     所以 `profile` 是这两者里唯一稳定的一项）。**别拿不存在的字段当判据**：
     本轮任务卡就建议过读 `resolved.timeoutMs`，实际不存在，白跑一轮才知道。
+36. **共享工作树里别用 `git reset --hard` 同步分支**（Lead 本轮真踩，且**吞掉了别人的在途改动**）：
+    Lead 在自己分支上 `git reset --hard origin/main` 同步时，`arch-scout` **正在同一棵工作树里**
+    改 `test/redlines.test.ts`（它刚发现 `stripComments` 的行号缺陷并修好）—— 重置把它的改动**静默吞掉**，
+    `git status` 随即变空，**看起来像「它没保存」，实际是被覆盖了**（线索是它自己报的「隔离跑 53 / 全量跑 52」计数差）。
+    处置：有并发写者时同步分支只用**不改工作区**的方式（`git fetch` + `merge --ff-only`），或先确认没人正在写。
+    **「工作区是干净的」不等于「没人正在写」** —— 重置与写入之间有一个窗口，落进去的改动会无声消失。
+    与坑 31（`git add -A` 卷进别人半成品）同族：**共享工作树上的破坏性 git 操作，要当成对别人的写来对待。**
