@@ -50,7 +50,10 @@ v1 的能力面已经封版：**1 个技能 + 4 个只读工具** `[已实测：
 ### 2.2 边界
 
 - **插件在 cordis 之外拿的裸资源检测不到**：`setInterval`、裸 socket、`process.on`、外部文件句柄、worker —— 这些东西不归 cordis 的 effect 管，dispose 旧 fiber 时不会释放，于是**静默泄漏**。
-  *对策（推断，未验）*：插件在 `package.json` 里声明 `"dsh": { "hotReload": false }`，本工具遇到这种包**直接拒绝热重载、改走重启**。这条声明的读取方与语义**必须先确认**（见 §5）。
+  *对策（部分已核对，见 §6.4）*：插件在 `package.json` 里声明 `"dsh": { "hotReload": false }`，本工具遇到这种包**直接拒绝热重载、改走重启**。
+  `[已读源码]` 这条约定**真实存在且有人在读**：`dsh-hot-reload` 的 `lib/index.js:15` 注释与 `:442-443` 的判断（`rec.json?.dsh?.hotReload === false` → 报 `stale` 并提示「restart dsh」）。
+  ⚠️ **但运行时本身不读它**：在本机运行时（`0.2.1-alpha.2`）里 grep `hotReload` **零命中** `[已核对：本机 node_modules 只读 grep]`。
+  → 它是**生态约定**、不是宿主特性：**「谁来读」必须由本仓自己实现**（否则写了没人读＝静默无效，正是 §5 第 7 条）。
 - **内置 HMR 不追踪 `node_modules`** `[推断：`dsh-hot-reload` 自述；与本仓已实测的「watch 触发者住在 hmr 里」一致但不等于同一件事]`，所以「升级依赖后要不要重启」的答案是**要**，除非本工具自己清缓存。
 - **热重载不是「更安全的重启」**：它只覆盖原位替换得了的东西；拿不准时应当**拒绝并建议重启**，而不是尽力而为。
 
@@ -224,6 +227,25 @@ nextStep: dsh_check_effect_mode({"change":"config"}) — 先确认这次改动�
 | 9 | 工具是否默认注册（参考实现的同类工具默认关） | `dsh-desktop-auto-restart` 自述 | 装完即生效 vs 需显式开启；影响 README 的安装分档 |
 | 10 | 重启后 notice 的投递通道（能否送到「发起者那个会话」，而非全体） | `dsh-smart-restart` 自述 | §3.4 的恢复语义与 §3.6 的返回文案 |
 
+### 5.1 2026-10-13 更新：哪些条目已被「读源码 + 本机运行时核对」推进
+
+上面那张表**保留原样**（它是当时的推断状态，不改写历史）。本轮的推进如下（依据全在 §6.4）：
+
+| # | 现状 | 说明 |
+|---|---|---|
+| 1 | **部分推进** | notice 的**投递**不需要自定义会话事件：参考实现走 `agent.followup(普通 user 消息 + source 描述符)`，本机运行时同形 `[已核 §6.4]`。**仍待实测**：`appendPluginRecord()` 的可用性与前缀约束（若我们要写自己的 `plugin:` 记录） |
+| 2 | **大幅推进** | 通道找到了：`sessionController.resolveAgent(SessionId(id))` + `agents.get(SessionId(id))` + `agent.followup(...)`，三者在**本机运行时都存在** `[已核 §6.4]`。**仍待实测**：「按会话原有预设」这一语义（参考实现自述如此，未在本机验） |
+| 3 | **部分推进** | 判据有了：`agents.list()` 的 `status`/`inbox`、`jobs.list()`、`workspace/session-activity` 的 `schedule` `[已读源码 §6.4]`；`agents.list` 在本机存在。**仍待核**：`jobs` 服务名在本机是否同名、`workspace/session-activity` 这条 waterfall 是否在本机存在 |
+| 4 | **部分推进** | 形态有了**可照抄的样本**（临时 `.cjs` helper + `detached`/`stdio:'ignore'`/`windowsHide` + 等端口释放 + 同 argv/cwd）`[已读源码 §6.4]`。**仍待实测**：在本机（Windows）是否可靠 —— 参考实现的加固记录恰恰说明它踩过坑 |
+| 5 | **未推进** | 仍只有参考实现自述；**必须真机复现**（这是 `dsh_hot_reload` 的核心承诺） |
+| 6 | **未推进** | 仍待验证；不过 §6.4 已确认 `dsh.hotReload` 是生态约定 → 即便检测不了，靠声明的路仍是必要的 |
+| 7 | **推进** | 结论明确：**运行时零命中** → 声明有效的前提是**本仓自己实现读取方** `[已核 §6.4]` |
+| 8 | 未推进 | 仍待定 |
+| 9 | 未推进 | 参考实现默认关；本仓待定 |
+| 10 | **推进** | 通道与形状都已确认（`resolveAgent` + `followup` + notice 形状）`[已核 §6.4]`；**仍待实测**：重启后「启动即唤醒」的时序（参考实现实测「3 秒时 `agents.get()` 还取不到」） |
+
+**一句话**：`dsh_restart` 的三块拼图（忙判定 / 恢复通道 / detached 拉起）**都已有可照抄的实现与已核对的 API**；`dsh_hot_reload` 的算法与回滚**有完整参考**，但它的**核心承诺（失败不碰旧 fiber）仍必须在本仓真机复现一次**。
+
 ---
 
 ## 6. 参考实现索引
@@ -252,5 +274,33 @@ nextStep: dsh_check_effect_mode({"change":"config"}) — 先确认这次改动�
 
 ### 6.3 调研边界（如实记）
 
-- 上表的「核心做法」**全部来自各项目 README 的自述**，**没有读过它们的实现源码**（本轮只取了 README + 根目录文件清单）。
-- 表里每一条与「我们已经实测过的东西」冲突的可能，都以本仓实测为准（已实测的只有：坑 4、坑 34、`fiber.state` 三档、`ctx.get('agents')` 可见性与 serial 派发）。
+- 上表的「核心做法」源自各项目 README 的自述；**热重载与重启的核心路径已在 2026-10-13 补读实现源码**（见 §6.4），未补读的部分仍按「自述」对待。
+- 参考实现面向的**不是**本机运行时版本（本机 `0.2.1-alpha.2`；`dsh-restart` 自述其 `latest` 基线是 `dsh-v0.1.1-rc.2`）→ 涉及 API 形状的结论**必须回到本机运行时核对**，不能照抄。
+- 表里每一条与「我们已经实测过的东西」冲突的可能，都以本仓实测为准。
+
+### 6.4 已读源码（2026-10-13 补）+ **本机运行时核对**
+
+调研方式：6 个参考仓 clone 到**枢纽仓的 `.local/refs/`**（`git check-ignore` 已确认 `/.local/` 被忽略 → **不在任何项目里**，用完可删），只读源码；再逐条回到本机运行时（`…\@deepseek-ai\dsh`，`0.2.1-alpha.2`）grep 核对 API 是否存在。
+「本机存在」＝ 在本机运行时里 grep 到实证，**不是**参考实现的自述。
+
+| 事实 | 参考实现出处 | 本机运行时 | 对我们的意义 |
+|---|---|---|---|
+| 清模块缓存走 **`loader.internal.loadCache`**（ESM，且需 `Map.prototype.delete.call` 绕过 Node 24 的 slot-only delete）+ `require.cache`（CJS） | `dsh-plugin-reload/src/index.ts:337-354`；`dsh-hot-reload/lib/index.js:278-330` | ✅ 存在 —— `…\dsh-hmr\lib\index.js:472-473` **自己也在用** `internal.loadCache` | §2.1 第 4 步成立；**官方自己就是这么清缓存的** |
+| 重新加载 = **`loader.import(url)` 再 `loader.unwrapExports(...)`** | `dsh-plugin-reload/src/index.ts:364` | ✅ `unwrapExports` 命中 7 处（`…\dsh-loader\lib\index.js:460,667`） | §2.1 第 5 步的调用面确认 |
+| 换 fiber 要经 **`entry.fiber` → `fiber.runtime` → `runtime.fibers` / `runtime.callback`**，**先 dispose 旧 fiber 再起新的**，最后把 `entry.fiber` 指回新 fiber；fiber 从未启动时走 `entry.refresh()` | `dsh-plugin-reload/src/index.ts:371-400`；`dsh-hot-reload/lib/index.js:343,390,427` | ✅ `entry.refresh()` 存在；`fiber._refresh()` 见 `…\dsh-loader\lib\index.js:843` | §2.1 第 6/7 步确认；**「先 import、后 dispose」被两个独立实现同时采用** |
+| 回滚 = 把备份的缓存条目**放回**（ESM `cacheSet` + CJS `require.cache[fp] = module`）；import 期失败紧随其后抛出 | `dsh-plugin-reload/src/index.ts:356-368`（`rollbackCaches`） | ✅ 纯 Node 侧机制，不依赖宿主 API | §2.1 第 8 步**不必自己发明** |
+| **忙判定**：`agents.list()` 排除调用方 → `status === 'running'`；`inbox.nextTurn/nextStep` 排队；`jobs.list(agent?.id)` 的 `running`/`stopping`；`ctx.waterfall('workspace/session-activity', …)` 里的 `kind === 'schedule'` | `dsh-desktop-auto-restart/lib/index.js:123-160` | ✅ `agents.list` ✓（`…\dsh-agents\lib\index.js:984`）；`jobs` 服务名**未核**（→ §5 第 3 条） | §3.2 **闸②** 有了具体判据；注意它 **fail-closed**：服务不可用 → `{known:false, idle:false}` = 拒绝 |
+| 忙判定的精确语义：**只把「调用方自己那个会话」从 running/排队里排除；后台任务与定时提醒照旧全算（含调用方自己的）** | 同上 `:120-122`（其注释自述为 2026-10-07 用户实测反馈） | —（语义层） | §3.2 闸② 的语义细化：「调用方不算忙」**不是全豁免** |
+| **唤醒/通知**：先 `ctx.get('sessionController').resolveAgent(SessionId(id))`（官方通道），再 `ctx.get('agents').get(SessionId(id))` → **`agent.followup(notice)`** | 同上 `:218-238` | ✅ `resolveAgent` ✓（`…\dsh-agents\lib\index.js:190`）、`sessionController` 服务名 ✓、`.followup` ✓ | §3.4 的恢复通道确认 |
+| notice 形状：`{ role:'user', id, content:[{type:'text',text}], source:{ kind, form:'notice', summary } }` | 同上 `:186-193` | ✅ 同形（`followup(createUserMessage({…}))`，`…\dsh-agents\lib\index.js:100`） | §3.4 照此即可，**正好绕开坑 4**（不写自定义 SessionEvent） |
+| **恢复清单是独立 JSON 文件**（`readPending`/`writePending`/`clearPending`），完成时写 `{sessions:[], done:true, doneAt}` 而非删文件 | 同上 `:194-207` | — | §3.4「marker 用独立文件」**参考实现已如此**，与坑 4 结论一致 |
+| **会话 id 归一化**：运行期键是 `session-<uuid>`，调用方常传裸 uuid → 统一补前缀；非法则空串（据此判失败） | 同上 `:208-217` | — | §3.4/§3.6 的入参校验 |
+| **唤醒要延迟+重试**：其注释自述「启动后 3 秒去唤醒，`agents.get()` 还取不到 agent（会话尚未就绪）」；配置 `wakeDelayMs` 默认 3000 | 同上 `:496`、`:31-32` | — | §3.4「唤醒失败保留清单、下次重试」**是踩出来的，不是理论要求** |
+| 配置读取坑：`wakeOnStart: vol(Schema.boolean().default(true))` 若整包 unvolatile，字段仍是对象 → `=== true` 永不成立 → 功能静默失效 | 同上 `:31-32,56-57` | — | 与坑 1 同族：**开关类配置必须自己校验形状** |
+| **detached 拉起**：helper 写成临时 `.cjs`（**不能 `node -e`** —— 引号活不过内联参数），`spawn(process.execPath, [helperPath], { detached:true, stdio:'ignore', env:process.env, windowsHide:true })`；helper 内 `setTimeout(delay)` → **等旧进程释放监听端口** → 用**同一份 argv + cwd** 起新 DSH → 自删 → `exit(0)` | `dsh-restart/src/index.ts:252-312`（`delayMs + 800`） | — | §3.3 的 spawn 形态有了**可照抄的样本**（含「等端口释放」这一细节） |
+| `package.json` 的 `dsh.hotReload: false` 约定**真实且被第三方读取** | `dsh-hot-reload/lib/index.js:15,442-443` | ❌ **运行时零命中** | §2.2/§5-7：**本仓必须自己实现读取方**，否则该声明无效 |
+
+**仍缺源码阅读**：`dsh-smart-restart`（`src/canary.ts` 107KB / `src/index.ts` 75KB，含 canary 预检与 systemd 识别，与闸④ 相关但优先级低于上表）、`dsh-hotswap` 托管区块的实现细节。
+
+**参考源码的位置与去向**：`D:\ProjectSomething\dsh-plugins\.local\refs\<包名>\`（枢纽仓 `.local/`，已被 `.gitignore` 忽略）。
+→ **按维护者 2026-10-13 的指定：可以拉取，但不得进入任何项目仓**；`.local/` 既不在插件仓、也不在枢纽仓的版本控制里。用完可整目录删除。
