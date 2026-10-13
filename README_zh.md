@@ -5,8 +5,8 @@
 <h1 align="center">dsh-plugin-debugging</h1>
 
 <div align="center">
-  <p><strong>Read-only debugging toolkit for a running DSH instance</strong></p>
-  <p><em>给正在跑的 DSH 实例排障：只读</em></p>
+  <p><strong>Diagnose a running DSH instance — read-only checks, plus one in-place hot reload</strong></p>
+  <p><em>给正在跑的 DSH 实例排障：只读诊断，外加一个就地热重载</em></p>
 
   <p>
     <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/powered_by_dsh-4D6BFE?style=flat&logo=deepseek&logoColor=white" alt="由 dsh 驱动"></a>
@@ -14,9 +14,11 @@
 
   <p>
     <a href="https://github.com/dsh-plugin-lab/dsh-plugin-debugging/actions/workflows/ci.yml"><img src="https://github.com/dsh-plugin-lab/dsh-plugin-debugging/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+    <a href="https://www.npmjs.com/package/dsh-plugin-debugging"><img src="https://img.shields.io/npm/v/dsh-plugin-debugging.svg?style=flat" alt="npm"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=flat" alt="MIT 许可证"></a>
-    <!-- 首次发布到 npm 后补这两枚（现在挂上去只会显示 not found）：
-         <a href="https://www.npmjs.com/package/dsh-plugin-debugging"><img src="https://img.shields.io/npm/v/dsh-plugin-debugging.svg?style=flat" alt="npm"></a>
+    <!-- SLSA 徽章**故意不挂**：0.1.0 是手动发的，npm 上没有 provenance（SLSA 要求由
+         release.yml 走 Trusted Publisher 发布）。第一次由 CI 带 provenance 发版之后再补这枚 ——
+         在那之前挂上去就是假声明：
          <a href="https://www.npmjs.com/package/dsh-plugin-debugging"><img src="https://img.shields.io/badge/SLSA-Build%20L2-green?logo=slsa&style=flat" alt="SLSA Build L2"></a> -->
   </p>
 
@@ -74,7 +76,7 @@
 
 **边界**：`--dump-config` 退出码恒 0，不能当门禁；`--dump-config-schema` 退出码 1 表示有 error，而 `preset-*` 那类已知误报会与「指向你改过的那一行」的真错分开。
 
-## 刻意只读
+## 刻意只读（一个例外）
 
 - 四个诊断工具只读实例本来就有的文件；不存凭据，也不产生凭据。
 - 它们不重启进程、不改写 profile、不往 `DSH_HOME` 写任何东西。

@@ -5,8 +5,8 @@
 <h1 align="center">dsh-plugin-debugging</h1>
 
 <div align="center">
-  <p><strong>Read-only debugging toolkit for a running DSH instance</strong></p>
-  <p><em>给正在跑的 DSH 实例排障：只读</em></p>
+  <p><strong>Diagnose a running DSH instance — read-only checks, plus one in-place hot reload</strong></p>
+  <p><em>给正在跑的 DSH 实例排障：只读诊断，外加一个就地热重载</em></p>
 
   <p>
     <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/powered_by_dsh-4D6BFE?style=flat&logo=deepseek&logoColor=white" alt="powered by dsh"></a>
@@ -14,9 +14,11 @@
 
   <p>
     <a href="https://github.com/dsh-plugin-lab/dsh-plugin-debugging/actions/workflows/ci.yml"><img src="https://github.com/dsh-plugin-lab/dsh-plugin-debugging/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+    <a href="https://www.npmjs.com/package/dsh-plugin-debugging"><img src="https://img.shields.io/npm/v/dsh-plugin-debugging.svg?style=flat" alt="npm"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=flat" alt="MIT License"></a>
-    <!-- 首次发布到 npm 后补这两枚（现在挂上去只会显示 not found）：
-         <a href="https://www.npmjs.com/package/dsh-plugin-debugging"><img src="https://img.shields.io/npm/v/dsh-plugin-debugging.svg?style=flat" alt="npm"></a>
+    <!-- SLSA 徽章**故意不挂**：0.1.0 是手动发的，npm 上没有 provenance（SLSA 要求由
+         release.yml 走 Trusted Publisher 发布）。第一次由 CI 带 provenance 发版之后再补这枚 ——
+         在那之前挂上去就是假声明：
          <a href="https://www.npmjs.com/package/dsh-plugin-debugging"><img src="https://img.shields.io/badge/SLSA-Build%20L2-green?logo=slsa&style=flat" alt="SLSA Build L2"></a> -->
   </p>
 
@@ -74,7 +76,7 @@ Installing it gives the model five tools — four read-only, one write-side — 
 
 **Boundary**: `--dump-config` always exits 0, so its exit code is not a gate; `--dump-config-schema` exits 1 when there are errors, and the known `preset-*` false positive is separated from errors that point at a row you changed.
 
-## Read-only by design
+## Read-only by design, with one exception
 
 - The four diagnostics tools read files an instance already has; they store no credentials and produce none.
 - They restart nothing, rewrite no profile, and write nothing to `DSH_HOME`.

@@ -1,7 +1,7 @@
 {
   "name": "dsh-plugin-debugging",
   "version": "0.1.0",
-  "description": "Read-only diagnostics for a running DSH instance: whether a change needs a reload or a restart, whether a plugin actually loaded, 401 versus connection-refused, and what the composed config contains.",
+  "description": "Diagnostics for a running DSH instance: reload vs restart, whether a plugin actually loaded, 401 vs connection-refused, and what the composed config contains — plus one in-place hot reload.",
   "keywords": [
     "dsh",
     "deepseek-harness",
