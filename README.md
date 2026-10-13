@@ -33,78 +33,36 @@
 
 ---
 
-One sentence holds this plugin together: **an artifact is read at a particular moment, and that moment decides what you must do after changing it.** Config is re-read on every change; a process loads code once at startup; the browser swaps assets by fingerprint. When a change "doesn't work", the first question is which of those three you are looking at.
+An artifact is read at a particular moment, and that moment decides what you must do after changing it.
+Config is re-read on every change; a process loads code once at startup; the browser swaps assets by fingerprint.
+When a change "doesn't work", the first question is which of those three you are looking at.
 
-## Tools
+## What it does
 
-Installing it gives the model five tools — four read-only, one write-side — plus one skill:
+Installing it gives the model the tools to answer that question, and one skill carrying the reasoning behind them.
 
-| Tool | In one line | Reach for it when |
-|---|---|---|
-| `dsh_check_effect_mode` | Which of the three readings your change falls under | A change had no effect and you don't know whether to reload or restart |
-| `dsh_diagnose_plugin_load` | Whether a plugin is in `bundles`, how it is mounted, and what the Loader tree says | A plugin is installed but seems absent |
-| `dsh_check_auth` | Connection refused (not running) versus 401 (running, not authenticated) | The page returns 401, or you can't tell whether the host is up |
-| `dsh_dump_config` | The composed config tree and its diagnostics | You need to know what the composition actually resolved to |
-| `dsh_hot_reload` (**write-side**) | Swaps one mounted loader entry to the code on disk, in place | Host-side code changed and a restart would be worse than the change |
+- **Classify what a change needs** — live, restart, or hot reload, probed against the running profile rather than guessed.
+- **Check whether a plugin loaded** — bundle membership, mount form, and the Loader tree, separating observed from inferred evidence.
+- **Tell "not running" from "not authenticated"** — connection refused and 401 get opposite advice, so they must not be the same answer.
+- **Show what a profile resolved to** — the composed tree plus the diagnostics that explain it.
+- **Swap one mounted entry to the code on disk** — in place, no restart, rolled back on failure.
+- **Sign a browser-session cookie** — so a script or CLI client can authenticate against your own instance.
 
-`dsh-plugin-debugging` is the skill behind them: it carries the reasoning for every check, the three live-effect tiers, the installation forms, credential acquisition, process identification, and isolated instances. **The tools are accelerators; where one is ambiguous, the skill text wins.**
-
-### `dsh_check_effect_mode` —— what a change needs
-
-- `change` (**required**): `config` (config / patch / enablement / uninstall) · `bundle-added` (a newly installed bundle) · `host-code` (host-side code of an installed plugin) · `client-code` (client code / UI).
-- `alreadyInDependencies`: only meaningful for `change: bundle-added`.
-
-**Boundary**: it first probes whether the profile actually mounts `hmr`. Without `hmr`, `reload()` is a no-op, so any "takes effect live" verdict is downgraded to `restart-required`. It restarts nothing.
-
-### `dsh_diagnose_plugin_load` —— whether a plugin loaded
-
-- `package`: name to check, e.g. `my-dsh-plugin` or `@scope/name`. Omit to list every bundle.
-- `port`: host port to probe.
-
-**Boundary**: it reports **observed** evidence (the `loader` tree is readable: `fiber.state`, and `fiber === undefined` for modules that failed at import) separately from **inferred** evidence (the three preconditions: `bundles` membership, install form, entry file). When the tree cannot be read, the output says `mode=inferred` explicitly. Processes are found **by port**, never by command-line substring.
-
-### `dsh_check_auth` —— not running, or not authenticated
-
-- `port`: host port to probe.
-- `host`: hostname, default `127.0.0.1`.
-
-**Boundary**: the authority is a literal `host:port` match, so `localhost` and `127.0.0.1` are not interchangeable. It reports whether the `client-connection` / `browser-session` entries **exist**; v1 extracts no keys and signs no cookies.
-
-### `dsh_dump_config` —— what the composition resolved to
-
-- `profile`: profile name; omit to use the plugin's configured profile.
-
-**Boundary**: `--dump-config` always exits 0, so its exit code is not a gate; `--dump-config-schema` exits 1 when there are errors, and the known `preset-*` false positive is separated from errors that point at a row you changed.
-
-## Read-only diagnostics, one in-place fix
-
-- The four diagnostics tools read files an instance already has; they store no credentials and produce none.
-- They restart nothing, rewrite no profile, and write nothing to `DSH_HOME`.
-- **The one write-side exception is `dsh_hot_reload`**: it touches only the **running module tree** (an in-place code swap) — it still writes no profile, writes nothing to `DSH_HOME`, and kills no process; on failure the previous version is put back (and on an import-time failure it was **never touched at all**).
-- A restart helper is deliberately absent: it is the only action that can kill the host you are debugging.
+The skill behind them carries the installation forms, credential acquisition, process identification, and isolated instances.
+**The tools are accelerators; where one is ambiguous, the skill text wins.**
 
 ## Install
-
-### Prerequisites
-
-- **The supported DSH range is in [package.json](package.json)** (`engines.dsh`, and the same range on every `@deepseek-ai/dsh-*` peer) — the only source of truth; not copied here, because a copied range goes stale silently.
-- Node `>= 20`.
-
-### From npm
 
 ```shell
 dsh plugin --profile web add dsh-plugin-debugging
 ```
 
-On npm — the version badge above is the current release. Versions published through this repository's release workflow carry npm provenance; `0.1.0` was released by hand and does not.
-
-### From source
+From source:
 
 ```shell
 git clone https://github.com/dsh-plugin-lab/dsh-plugin-debugging.git
 cd dsh-plugin-debugging
 npm install && npm run build
-
 dsh plugin --profile web add "$PWD"
 ```
 
@@ -112,11 +70,26 @@ dsh plugin --profile web add "$PWD"
 
 Restart `dsh --profile web` for the install to take effect.
 
+Requirements: Node `>= 20`, and a DSH range that satisfies [package.json](package.json) — the only source of truth for the supported range.
+
+## Safety and boundaries
+
+- The diagnostics tools read files an instance already has, and produce no credentials.
+- They restart nothing, rewrite no profile, and write nothing to `DSH_HOME`.
+- `dsh_hot_reload` touches only the **running module tree**; it writes no profile, writes nothing to `DSH_HOME`, and kills no process.
+- `dsh_sign_cookie` reads your local signing key to sign a cookie for your own instance. It sends no request and writes nothing; the cookie value is deliberately **not** returned.
+- A restart helper is deliberately absent: it is the only action that can kill the host you are debugging.
+
 ## Platform support
 
-Port-based process identification is **Windows-only** in v1. Elsewhere the lookup reports `probed: false` with the platform in the message — deliberately not "no listener", because "couldn't check" and "not running" are opposite conclusions. Everything else is platform-neutral.
+Port-based process identification covers Windows, Linux and macOS.
+When no usable command is found it reports that it could not check — deliberately not "no listener", because those are opposite conclusions.
+The two weaker fallbacks may name a listener without naming its process; that stays reported as unidentified rather than as an empty list.
+Everything else is platform-neutral.
 
 ## Configuration
+
+There is no settings card: these fields belong to the plugin's config in the profile composition.
 
 | Field | Default | Meaning |
 |---|---|---|
@@ -124,8 +97,6 @@ Port-based process identification is **Windows-only** in v1. Elsewhere the looku
 | `profile` | `$DSH_PROFILE`, else the default profile | Which profile the tools inspect. |
 | `port` | `0` | Host port to probe; `0` finds the listening port. |
 | `timeoutMs` | `15000` | Ceiling for one spawned command or HTTP probe. |
-
-There is no settings card: these fields belong to the plugin's config in the profile composition.
 
 ## License
 
