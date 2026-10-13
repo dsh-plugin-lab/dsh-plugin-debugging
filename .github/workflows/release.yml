@@ -195,3 +195,27 @@ jobs:
               gh release create "$tag" --title "$tag" $flags --generate-notes
             fi
           fi
+
+      # 正文取走之后**必须把草稿让位**，否则下一次发版会读到上一批的正文。
+      #
+      # Release Drafter 以「最新的正式版」作分界线，它自己不认哪个草稿被消费过。
+      # 不删的后果不是「草稿空白」，而是**草稿停在旧分界**（实测踩过：0.3.0 发版后
+      # `next` 草稿的内容仍停在 0.3.0 之前那一批，#30–#33 全部不在里面）——
+      # 正文是**上一批的**，而表面上看草稿「有内容」，属静默错。
+      #
+      # ⚠️ **`if` 必须与上面 `Create` 那条一致**（含 `!inputs.dry-run`）：dry-run
+      # 不建任何正式版，若此时删掉草稿，那批正文就**永久丢了**。
+      #
+      # 只删 tag 不以 `v` 开头的那一个草稿：不按标题匹配，也不碰任何 `v<版本>` 的正式版
+      # （`gh release delete <tag>` 默认连带删 tag，这里显式关掉）。
+      - name: Retire the drafter's next draft
+        if: steps.probe.outputs.exists == 'false' && !inputs.dry-run && steps.notes.outputs.source == 'draft'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          draft_tag="$(gh release list --limit 30 --json tagName,isDraft \
+            --jq '[.[] | select(.isDraft) | .tagName] | map(select(startswith("v") | not)) | .[0] // ""')"
+          if [ -n "$draft_tag" ]; then
+            gh release delete "$draft_tag" --yes --cleanup-tag=false
+            echo "已删除草稿 $draft_tag（下一批合并后 Release Drafter 会重建它）"
+          fi
