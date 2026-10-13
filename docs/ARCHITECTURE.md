@@ -8,14 +8,16 @@
 
 ## 1. 定位与边界
 
-把一份排障知识本体（`skills/dsh-plugin-debugging/SKILL.md`，v2.1.4）随包分发，并用四个**只读**工具把其中
-可机械判定的部分做成加速器。
+把一份排障知识本体（`skills/dsh-plugin-debugging/SKILL.md`，v2.1.4）随包分发，并用四个**只读**工具 +
+一个**写侧**工具（v1.1 的 `dsh_hot_reload`）把其中可机械判定的部分做成加速器。
 
-**管**：改动何时生效（热生效 / 重启 / HMR）、插件到底加载没有、`401` 与连接被拒的分辨、组合后的配置树。
+**管**：改动何时生效（热生效 / 重启 / HMR）、插件到底加载没有、`401` 与连接被拒的分辨、组合后的配置树、**就地热重载**（v1.1）。
 **不管**：写插件、选扩展点、改 preset、列可安装包。
 
-**v1 只读是设计决定，不是进度妥协。** 唯一会杀掉「正在被排障的那个宿主」的动作是重启与热重载；
-它们的审批语义、冷却、失败恢复边界没定之前不引入（见 [AGENTS.md 的「待办」](../AGENTS.md#待办)）。
+**诊断半边只读是设计决定，不是进度妥协**；v1.1 起有写侧，但写侧只做**不杀进程**的那一种 ——
+就地换模块（`dsh_hot_reload`），失败时把旧版本放回。**唯一会杀掉「正在被排障的那个宿主」的动作是重启**，
+它的审批语义、冷却、失败恢复边界没定之前不引入（见 [AGENTS.md 的「待办」](../AGENTS.md#待办)）。
+两侧的边界由 `test/redlines.test.ts` 的 B10（诊断半边不许改系统状态）与 B15（写侧只许碰进程内树）守着。
 
 ## 2. 分层
 
@@ -25,7 +27,7 @@ src/
 ├─ contracts.ts    跨半边共享的**类型**（不含逻辑）：SkillReport / PluginState / ResolvedConfig
 ├─ config.ts       Config schema + resolveConfig（把「可能没配」补齐成工具半边认的形状）
 ├─ skills/         技能半边：解析 frontmatter → 注册进宿主注册表
-├─ tools/          工具半边：四个只读工具，一个工具一个文件
+├─ tools/          工具半边：四个只读工具 + 一个写侧工具（dsh_hot_reload），一个工具一个文件
 └─ lib/            纯逻辑：exec / http / ports / profile / dump / errors / render / timeouts / credentials
 ```
 
