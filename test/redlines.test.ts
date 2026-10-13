@@ -1062,6 +1062,161 @@ describe('B13 仓内 .ps1 带 UTF-8 BOM（否则 PowerShell 5.1 按 GBK 解码�
 })
 
 /**
+ * B14 判据：**`src/**` 里模型可见的字符串不得含 CJK**（注释除外）。
+ *
+ * 判据原话：凡是可能到达模型或用户眼里的字符串都必须英文（工具 `data` 的文本字段、
+ * `fail` 的 `message`/`hint`、`nextStep.why`、render 的文本）；**只被实现内部 catch、
+ * 进不了工具结果 / `SkillReport` 的字符串不受此约束**（例如测试替身自己的中文 Error）。
+ *
+ * **边界**：只扫 `src/**`。`test/**` 的中文一律放过 —— 那正是上面那条例外的落点。
+ * 本仓约定注释写中文，所以注释必须跳过，否则这条判据会把「解释规则的文字」判成违规。
+ */
+const CJK = /[\u3000-\u303F\u3040-\u30FF\u3400-\u4DBF\u4E00-\u9FFF\uFF00-\uFFEF]/
+
+/**
+ * 从一个 TS 源文本里挑出「**字符串字面量**里含 CJK」的命中（带行号与原样文本）。
+ *
+ * 手写状态机而不是正则：注释、三种引号、转义、以及**未闭合**四种情况要分开处理，
+ * 一条正则表达不了，而表达不准的扫描器会**永远绿**（本仓已有三处假绿判例）。
+ *
+ * 两条防偏措施：
+ * - 单/双引号串**不允许跨行**（TS 也不允许裸换行）：行内没闭合就把那个引号当**普通字符**。
+ *   这是为了防正则字面量里的引号（如 `/['"]/`）把状态机带跑偏 —— 那会让扫描器吞掉后面整段代码。
+ * - 模板串允许跨行，且串内的 `//` 不当注释（它确实在字符串里）。
+ *
+ * @param source 源文本全文。
+ * @returns 命中列表（行号 1 起、原文已 trim）。
+ */
+function collectCjkInStringLiterals(source: string): Array<{ line: number; literal: string }> {
+  const hits: Array<{ line: number; literal: string }> = []
+  let i = 0
+  let line = 1
+  const n = source.length
+
+  while (i < n) {
+    const ch = source[i]
+    const next = source[i + 1]
+
+    // 行注释：跳到行尾（不消费换行，交给主循环计行）。
+    if (ch === '/' && next === '/') {
+      while (i < n && source[i] !== '\n') i += 1
+      continue
+    }
+    // 块注释：跳到配对的结束标记。
+    if (ch === '/' && next === '*') {
+      i += 2
+      while (i < n && !(source[i] === '*' && source[i + 1] === '/')) {
+        if (source[i] === '\n') line += 1
+        i += 1
+      }
+      i += 2
+      continue
+    }
+
+    if (ch === "'" || ch === '"' || ch === '`') {
+      const quote = ch
+      const startLine = line
+      let body = ''
+      let j = i + 1
+      let closed = false
+      while (j < n) {
+        const c = source[j]
+        if (c === '\\') {
+          body += c + (source[j + 1] ?? '')
+          if (source[j + 1] === '\n') line += 1
+          j += 2
+          continue
+        }
+        if (c === quote) {
+          closed = true
+          j += 1
+          break
+        }
+        if (c === '\n') {
+          if (quote !== '`') break
+          line += 1
+        }
+        body += c
+        j += 1
+      }
+      if (closed) {
+        if (CJK.test(body)) hits.push({ line: startLine, literal: body.trim() })
+        i = j
+        continue
+      }
+      // 未闭合：单/双引号当普通字符继续扫（防正则字面量带偏）；模板串只能走到 EOF。
+      i = quote === '`' ? j : i + 1
+      continue
+    }
+
+    if (ch === '\n') line += 1
+    i += 1
+  }
+  return hits
+}
+
+/** B14 判据：扫一组源码，返回违规（`路径:行 → 命中原文`）。 */
+function judgeCjkInSourceStrings(sources: readonly { path: string; text: string }[]): string[] {
+  const offenders: string[] = []
+  for (const { path, text } of sources) {
+    for (const hit of collectCjkInStringLiterals(text)) {
+      offenders.push(`${path}:${hit.line} → ${JSON.stringify(hit.literal)}`)
+    }
+  }
+  return offenders
+}
+
+describe('B14 src/** 的模型可见字符串不含 CJK（注释除外）', () => {
+  it('真实源码里没有含 CJK 的字符串字面量', () => {
+    const sources = readSourcesUnder('src')
+    // 非空自证：真的扫到了源码（0 个文件时这条会假绿）。
+    expect(sources.length, 'src/** 下没扫到 TS 源码 —— 判据没跑到').toBeGreaterThan(5)
+
+    const offenders = judgeCjkInSourceStrings(sources)
+    expect(
+      offenders,
+      describeOffenders('src/** 的字符串字面量里出现 CJK', offenders) +
+        '\n模型可见字符串必须用英文；若这是内部字符串，请确认它不会进入工具结果' +
+        '（data 文本字段 / message / hint / nextStep.why / render 文本）。注释写中文不受此限。',
+    ).toEqual([])
+  })
+
+  it('扫描器非空转：三种引号里的 CJK 必须报出来，注释里的必须放过', () => {
+    const sample = [
+      "const a = '中文'",
+      'const b = "中文"',
+      'const c = `中文`',
+      '// 行注释里的中文不算',
+      '/* 块注释里的中文也不算 */',
+      "const ok = 'plain english'",
+    ].join('\n')
+    // 三行字符串各命中一次、行号 1/2/3；注释与英文一行都不报。
+    expect(collectCjkInStringLiterals(sample).map((hit) => hit.line)).toEqual([1, 2, 3])
+  })
+
+  it('扫描器非空转：纯英文样本必须一个都不报', () => {
+    expect(collectCjkInStringLiterals("const a = 'hello world'\nconst b = `hi`")).toEqual([])
+  })
+
+  it('判据可被否证：全角标点也算（真实命中过的那一族）', () => {
+    expect(collectCjkInStringLiterals("const sep = '；'")).toHaveLength(1)
+    expect(collectCjkInStringLiterals("const end = part.join('。')")).toHaveLength(1)
+  })
+
+  it('正则字面量里的引号不会把扫描器带偏（未闭合即当普通字符）', () => {
+    const sample = ['const re = /[\'"]/', "const s = '中文'"].join('\n')
+    // 第 1 行的引号是正则的一部分，不该被当成字符串起点把第 2 行吞掉。
+    expect(collectCjkInStringLiterals(sample).map((hit) => hit.line)).toEqual([2])
+  })
+
+  it('转义引号不会提前闭合', () => {
+    expect(
+      collectCjkInStringLiterals("const q = 'a \\' 中文 \\' b'").map((hit) => hit.line),
+    ).toEqual([1])
+  })
+})
+
+/**
  * # 本文件的已知限度
  *
  * 这一节本身是判据的一部分：它让下一个改实现的人知道**哪些红线会跟着失效**。
@@ -1084,6 +1239,7 @@ describe('B13 仓内 .ps1 带 UTF-8 BOM（否则 PowerShell 5.1 按 GBK 解码�
  * | 11 | B12 的正文切片 `raw.indexOf('\n---', 4)` | 假定 frontmatter 之后没有更早的 `\n---` | 切错区域仍可能 > 500 → **假绿**（潜在）。【推断】 |
  * | 12 | A6 的 tag 形状 | 对 `release.yml` 做正则形状匹配 | 换一种同样正确的拼法（先赋 `V="v"`）会**红**（误报）；tag 改到别处生成则**看不见**（假绿）。【推断】 |
  * | 13 | A5 的反例控制 | 守卫的报错文案、以及注入锚点 `'          npm publish'` 的确切缩进 | 两者都已在文件里做成**响亮失败**（含「变异真的落地」自检），但都与实现细节耦合。【已探明】 |
+ * | 14 | B14 的 CJK 扫描 | 自写状态机（注释 / 三种引号 / 转义 / 未闭合）；**引号未闭合时当普通字符** | 极端写法（跨行未闭合的引号）会**漏** —— TS 本就不允许裸换行，代价可忽略；模板串里 `${}` 表达式的文本会并入同一段 body，其中的 CJK 也照出（属真命中，不是误报）。【已探明】 |
  *
  * **B10 已知未覆盖的写入通道**（明确列出，不静默排除）：
  * `process.binding`、原生 addon、`require()`（本仓纯 ESM）、把 fs 方法先赋给别的变量再调用
