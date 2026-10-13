@@ -30,9 +30,6 @@ export const DESCRIPTION_MAX_CHARS = 240
 /** 合成后的行数上限：骨架就是四段。 */
 export const DESCRIPTION_MAX_LINES = 4
 
-/** 该工具**全部参数**描述的字符合计上限（现状合计 1230）。 */
-export const PARAMETER_DESCRIPTIONS_MAX_CHARS = 100
-
 /**
  * 按固定顺序把四段拼成最终的 description。
  *

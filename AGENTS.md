@@ -312,8 +312,10 @@ HOST-CONTRACTS 答「宿主实际上是什么样」，PUBLISHING 答「怎么发
 39. **`tool.parameters` 是编译后的 JSON schema，不是作者写的那个字面量** —— 参数描述的判据**必须点进
     `.properties`**。实测（2026-10-13，本仓五个工具）：`Object.values(tool.parameters)` 拿到的是
     `'object'` **字符串**与 properties 对象本身（rawKeys = `["type","properties","required"]`），
-    于是每条 `description` 都是 `undefined` → **合计恒为 0** → `≤100` 这条上界**恒真**。
-    **本仓五个工具的测试里曾有四份是这种写法**（`hot-reload.test.ts` 是唯一写对的），
-    改前实测 `total = 0`、改后才是真值（88 / 86 / 55）。同族于第 11 条（`defineTool` 编译 schema）
-    与第 18 条（假绿）。**取法**：读 `parameters.properties`，并配**两条下界** ——
-    「参数个数 > 0」与「每个参数描述非空」「合计 > 0」，否则换个写法照样空转。
+    于是每条 `description` 都是 `undefined` → **合计恒为 0**。当时那条「合计 ≤100」的上界因此
+    **恒真**（`0 ≤ 100`）—— **上界已于 2026-10-13 删除（SHAPE §2），现在接住它的正是那两条下界**，
+    这反过来证明「下界才是防空转的那一半」。**本仓五个工具的测试里曾有四份是这种写法**
+    （`hot-reload.test.ts` 是唯一写对的），改前实测 `total = 0`、改后才是真值（88 / 86 / 55）。
+    同族于第 11 条（`defineTool` 编译 schema）与第 18 条（假绿）。**取法**：读 `parameters.properties`，
+    并配**两条下界** —— 「参数个数 > 0」「每个参数描述非空」「合计 > 0」，否则换个写法照样空转。
+    **上界删掉之后，参数描述的质量归人工评审**（SHAPE §10.1 第 4 项：自问「模型看不到会不会填错」）。
