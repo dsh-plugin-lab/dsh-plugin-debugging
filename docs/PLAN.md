@@ -137,7 +137,13 @@ nextStep: dsh_diagnose_plugin_load(<package>) — 旧 fiber 应仍是 active
 ```
 
 - **marker 必须落盘、必须在 spawn 之前** `[推断：`dsh-desktop-auto-restart` 自述「先写『待唤醒清单』，再调重启脚本（`delaySeconds` 默认 10 秒，留给回执落盘）」]`。
-- **拉起新进程必须用 detached 的 Node 进程** —— `[推断，未验]` PowerShell detached 会**静默退出**。参考实现里这条被反复加固过（`dsh-restart` 有 `legacyRestart` 旧 PowerShell/WMI 路径且**默认关闭**；`dsh-desktop-auto-restart` 记录到「执行策略 `Restricted` 时脚本根本不执行，而 WMI 照样返回 rc=0 ⇒ 工具报『已拉起』却什么都没发生」）。
+- **拉起新进程的形态** —— `[已实测：真机实验B + 补测，详见 §6.5]`，这条从「推断」升级成了实测，而且**结论与原方案不同**：
+  - **旧宿主自己 `exit()`** → **单级 detached 够用**：helper 活过父进程退出并写出标记（对照：仅去掉 `detached`，其余相同，**3/3 都没写出来**）。
+  - **旧宿主被外部 `taskkill /PID /T /F` 树杀** → **单级 detached 断链**。机制：`/T` 沿**当时的活链 PPID** 枚举，而 **`detached` 并不改变 PPID**。
+  - **两级 detached 才逃得掉**：`A --detached--> H --detached--> G`，**H 派完 G 后立刻退出**即可断开那条活链（实测 G 逃出 `/T` 并写出标记）。
+  - ⚠️ **未测、且可能比 `/T` 更狠**：**job object / Windows 服务 / `KILL_ON_JOB_CLOSE`** —— 那种场景下子孙一律被杀，**两级也逃不掉**。这很可能是服务化部署的真实约束。
+  - → 因此本仓的取向应当是：**优先把「拉起新进程」交给外部**（supervisor / Windows 服务 / systemd），插件只做「查闸门 → 落盘 marker → 退出」；自建 helper 是**降级路径**，且必须是两级。
+- **临时 `.cjs` 的理由要写对** —— `[已实测：§6.5]` 原样本注释说「引号活不过内联 `node -e`」，**实测推翻**：`spawn(exe, ['-e', code])`（argv 直传、**不经 shell**）引号**全活**，与临时 `.cjs` 逐字相同；真正的杀手是 **shell**。而「命令串 + `shell:true`」那种形态是 **exit 0 + stderr 空 + 什么也没做**（静默假成功，与坑 18 同族）。→ 保留 `.cjs`，但注释理由写成**「避免过 shell」**。
 - **绝不按进程名批量杀** —— 按**监听端口 + 精确 PID** 定位 `[推断：两条参考实现都自述如此；与本仓已实测的「按端口找进程，不按命令行子串」一致 —— 见 `dsh_check_auth` / `dsh_diagnose_plugin_load` 的边界]`。
 - **不拥有 watchdog** `[推断]`：`dsh-restart` 自述在 `0.1.3-alpha.4` **移除**了内置 detached watchdog，理由是把进程生命周期交给 systemd / Windows 服务等外部管理器。→ 本仓若做自动拉起，需先决定「自己做看门狗还是交给外部」，且**默认应当是后者**。
 
@@ -244,7 +250,8 @@ nextStep: dsh_check_effect_mode({"change":"config"}) — 先确认这次改动�
 | 9 | 未推进 | 参考实现默认关；本仓待定 |
 | 10 | **推进** | 通道与形状都已确认（`resolveAgent` + `followup` + notice 形状）`[已核 §6.4]`；**仍待实测**：重启后「启动即唤醒」的时序（参考实现实测「3 秒时 `agents.get()` 还取不到」） |
 
-**一句话**：`dsh_restart` 的三块拼图（忙判定 / 恢复通道 / detached 拉起）**都已有可照抄的实现与已核对的 API**；`dsh_hot_reload` 的算法与回滚**有完整参考**，但它的**核心承诺（失败不碰旧 fiber）仍必须在本仓真机复现一次**。
+**一句话（2026-10-13 更新）**：`dsh_restart` 的三块拼图**都已实测/已核**（忙判定 C6/C7、恢复通道 C4/C5、拉起形态 B1–B8）—— 但**拉起形态的结论变了**：单级 detached 只覆盖「父自己 exit」，**外部 `/T` 树杀会断链**，自建就必须两级，且服务化场景（job object）**两级也未必够** → 取向改为**优先交给外部管理器**。
+`dsh_hot_reload` 的算法、回滚与前置条件（C1：`loader.internal` 无需开关）都已坐实，**唯一仍必须真机复现的是它的核心承诺**（import 期失败不碰旧 fiber / apply 期失败能回滚）—— 真机实验A 正在跑（task-21）。
 
 ---
 
@@ -286,8 +293,8 @@ nextStep: dsh_check_effect_mode({"change":"config"}) — 先确认这次改动�
 | 事实 | 参考实现出处 | 本机运行时 | 对我们的意义 |
 |---|---|---|---|
 | 清模块缓存走 **`loader.internal.loadCache`**（ESM，且需 `Map.prototype.delete.call` 绕过 Node 24 的 slot-only delete）+ `require.cache`（CJS） | `dsh-plugin-reload/src/index.ts:337-354`；`dsh-hot-reload/lib/index.js:278-330` | ✅ 存在 —— `…\dsh-hmr\lib\index.js:472-473` **自己也在用** `internal.loadCache` | §2.1 第 4 步成立；**官方自己就是这么清缓存的** |
-| 重新加载 = **`loader.import(url)` 再 `loader.unwrapExports(...)`** | `dsh-plugin-reload/src/index.ts:364` | ✅ `unwrapExports` 命中 7 处（`…\dsh-loader\lib\index.js:460,667`） | §2.1 第 5 步的调用面确认 |
-| 换 fiber 要经 **`entry.fiber` → `fiber.runtime` → `runtime.fibers` / `runtime.callback`**，**先 dispose 旧 fiber 再起新的**，最后把 `entry.fiber` 指回新 fiber；fiber 从未启动时走 `entry.refresh()` | `dsh-plugin-reload/src/index.ts:371-400`；`dsh-hot-reload/lib/index.js:343,390,427` | ✅ `entry.refresh()` 存在；`fiber._refresh()` 见 `…\dsh-loader\lib\index.js:843` | §2.1 第 6/7 步确认；**「先 import、后 dispose」被两个独立实现同时采用** |
+| 重新加载 = **`loader.import(url)` 再 `loader.unwrapExports(...)`** | `dsh-plugin-reload/src/index.ts:364` | ✅ 命中 —— 但**包名要纠正**：不是 `@deepseek-ai/dsh-loader`（**该包不存在**），而是 **`cordis-plugin-loader`**（`lib/index.js:460,667` 行号对得上）`[已核：host-verifier]` | §2.1 第 5 步的调用面确认。⚠️ `import` **不在 Loader 上、在 `EntryTree`**（`cordis-plugin-loader/src/config/tree.ts:112-129`）；`unwrapExports` 只做**导出形状归一**（`src/index.ts:200-208`），**不做依赖图解析** |
+| 换 fiber 要经 **`entry.fiber` → `fiber.runtime` → `runtime.fibers` / `runtime.callback`**，**先 dispose 旧 fiber 再起新的**，最后把 `entry.fiber` 指回新 fiber；fiber 从未启动时走 `entry.refresh()` | `dsh-plugin-reload/src/index.ts:371-400`；`dsh-hot-reload/lib/index.js:343,390,427` | ✅ `entry.refresh()` 存在；`fiber._refresh()` 见 `…\cordis-plugin-loader\lib\index.js:843`。⚠️ **`fiber.dispose()` 是实例属性不是原型方法**（构造完成前 `typeof` 是 `undefined`）；`fiber.state` 枚举是 **0 PENDING / 1 LOADING / 2 ACTIVE / 3 FAILED / 4 DISPOSED / 5 UNLOADING** 且**现算** `[已核：host-verifier]` | §2.1 第 6/7 步确认；**「先 import、后 dispose」被两个独立实现同时采用** |
 | 回滚 = 把备份的缓存条目**放回**（ESM `cacheSet` + CJS `require.cache[fp] = module`）；import 期失败紧随其后抛出 | `dsh-plugin-reload/src/index.ts:356-368`（`rollbackCaches`） | ✅ 纯 Node 侧机制，不依赖宿主 API | §2.1 第 8 步**不必自己发明** |
 | **忙判定**：`agents.list()` 排除调用方 → `status === 'running'`；`inbox.nextTurn/nextStep` 排队；`jobs.list(agent?.id)` 的 `running`/`stopping`；`ctx.waterfall('workspace/session-activity', …)` 里的 `kind === 'schedule'` | `dsh-desktop-auto-restart/lib/index.js:123-160` | ✅ `agents.list` ✓（`…\dsh-agents\lib\index.js:984`）；`jobs` 服务名**未核**（→ §5 第 3 条） | §3.2 **闸②** 有了具体判据；注意它 **fail-closed**：服务不可用 → `{known:false, idle:false}` = 拒绝 |
 | 忙判定的精确语义：**只把「调用方自己那个会话」从 running/排队里排除；后台任务与定时提醒照旧全算（含调用方自己的）** | 同上 `:120-122`（其注释自述为 2026-10-07 用户实测反馈） | —（语义层） | §3.2 闸② 的语义细化：「调用方不算忙」**不是全豁免** |
@@ -304,3 +311,30 @@ nextStep: dsh_check_effect_mode({"change":"config"}) — 先确认这次改动�
 
 **参考源码的位置与去向**：`D:\ProjectSomething\dsh-plugins\.local\refs\<包名>\`（枢纽仓 `.local/`，已被 `.gitignore` 忽略）。
 → **按维护者 2026-10-13 的指定：可以拉取，但不得进入任何项目仓**；`.local/` 既不在插件仓、也不在枢纽仓的版本控制里。用完可整目录删除。
+
+### 6.5 真机实测（2026-10-13）：detached 拉起 与 宿主契约
+
+两份报告：`.coord/verify-detached-spawn.md`（真机实验B + 补测）、`.coord/verify-host-contracts.md`（源码契约核实）。
+下列全部是**实测或源码原文**，不是自述推断。
+
+| # | 结论 | 证据 | 对设计的影响 |
+|---|---|---|---|
+| B1 | **detached helper 活过父进程退出** | 父 pid 35748 于 `05:34:00.492` exit，helper(38172) `05:34:06.52` 写出标记，标记里 `ppid=35748` 是**已死的父** | §3.3「父自己退」这条路成立 |
+| B2 | **对照组（去掉 `detached`）3/3 都没写出标记** | 其余完全相同 | 证明 B1 不是必然成功 |
+| B3 | **`node -e` 的引号问题是误解，真正的杀手是 shell** | A `spawn(exe,['-e',code])` 无 shell → exit 0、标记有、三种引号**全活**；B 命令串+`shell:true` → exit 0、**标记无**、stderr 空（**静默假成功**）；C `spawn(...,{shell:true})` → exit 1 `DEP0190`；D 临时 `.cjs` → 与 A 逐字相同 | 保留 `.cjs`，但**理由改写成「避免过 shell」**；并把 B 那种「exit 0 + 空 stderr」列为新坑候选 |
+| B4 | **等端口释放可行** | 端口 18411：`waitedMs=2032`、`tries=10`；父 `close` 后 **64ms** 写出标记，**未撞 TIME_WAIT** | §3.3 的「等端口释放」这一环照抄即可 |
+| B5 | **helper 再拉新进程那一环通了** | S1 里 helper 的 `grandSpawnedPid=35376`，**孙进程标记出现**，其 `ppid` 正是 helper | §3.3 的完整链（父退 → helper → 新进程）实测可通 |
+| B6 | **父被 `/F` 强杀（不带 `/T`）时 detached helper 仍存活** | 父存活中被 `taskkill /PID /F` → helper 完成工作；非 detached 的没有 | helper **不依赖旧进程善终** |
+| B7 | ⚠️ **`taskkill /PID <A> /T /F` 会连 detached helper 一起杀** | `taskkill` 原文点名「PID 37480 (child process of PID 4916) has been terminated」，helper **未写出标记**；对照基准（A 自己 exit）写出了 | **单级 detached 覆盖不了外部树杀** —— §3.3 的形态必须改 |
+| B8 | **两级 detached 逃得掉 `/T`** | `A --detached--> H --detached--> G`，H 派完 G **立刻退出** → G 写出标记，`taskkill` 这次只提到 A | 若自建 helper，**必须两级**；机制是「`/T` 按**当时的活链**枚举，不是历史血缘」 |
+| B9 | ❌ **未测**：job object / Windows 服务 / `KILL_ON_JOB_CLOSE`；按名杀（`taskkill /IM`）；G 的长期存活 | 报告如实列为未做 | **服务化部署可能两级也无效** → 强化「优先交给外部管理器」的取向 |
+| C1 | **`loader.internal` 在本机默认拿得到，不需要任何开关** | `cordis-plugin-loader/src/index.ts:85` 公开字段；`internal.ts:108-118` 是「`--expose-internals` **或** `require('node-addon-require-builtin').requireBuiltin(id)`」；本机该 addon（`0.1.9`）与平台原生件**都装着**；宿主命令行**不含** `--expose-internals` 却正常运行 | §2.1 第 4 步**无前置门**；REF 那句抛错在本机**不会触发** |
+| C2 | ⚠️ **`internal.loadCache` 是 Map 形状但 `instanceof Map` = false** | 实测 `[object Map]`、`constructor.name = LoadCache`、`isMap: false`（Node 内部 loader 在**另一个 realm**） | 判据用 `[object Map]`/鸭子类型，**别用 `instanceof`** |
+| C3 | ⚠️ **别用 Node 版本或 arity 判 v1/v2 形状** | 源码 `internal.ts:87-97` 明确警告：`24.0–24.11.1` 会被大版本判据错标，且 `resolveSync` 两种形状 arity **都是 2**；**v2 的 `resolveSync(parentURL, request)` 参数顺序与 v1 相反** | 清缓存/解析模块时**按 API 形状判**，别按版本 |
+| C4 | **`sessionController.resolveAgent(sessionId)` = resolve **或** resume 且并发去重、按会话原预设、不抛** | `dsh-api-session-controller`（`super(ctx,'sessionController',{namespace:'session'})`）；返回 `{agent} \| {error}`，不存在 → `session/not-found` | §3.4 的恢复通道成立，且**要按 `{error}` 分支判失败**，不要靠 try/catch |
+| C5 | **`agents.get(id)` 只查 live、不 resume；`followup(message)` 不返回 Promise** | `dsh-agent/lib/index.js:594`、`dsh-agent-loop/lib/index.js:806` | 顺序不能反：**先 `resolveAgent` 再 `get`**（REF 正是这个顺序） |
+| C6 | ⚠️ **`jobs` 服务在，但 `dsh-jobs` 只是抽象 seam** | `dsh-jobs/lib/index.js:117` 原文 `throw new Error("…is the abstract job registry seam; load an implementation such as @deepseek-ai/dsh-jobs-local instead")`；本机实现是 `dsh-jobs-local`；`list(caller)` 收 **owner id** | 闸② 可照抄，但**必须确认实现包在场**、并过滤 `status ∈ {running, stopping}` |
+| C7 | **`workspace/session-activity` 是 waterfall；`dsh-schedule` 用的正是 `kind:'schedule'`** | `dsh-schedule/lib/index.js:2044,2049`（与 REF 写法逐字一致）；返回数组 `{kind, items}` | 闸② 的「已武装定时提醒」判据成立；⚠️ **必须 `await next()` 并把自己那段拼回**，否则短路后续应答者 |
+| C8 | **`appendPluginRecord(session, type, data)` 存在；前缀正则与强制 `ignorable: true` 逐字命中** | `dsh-session` 导出表 `lib/types/index.d.ts:117`；正则 `lib/index.js:1246`；`ignorable` 落值 `:1555` | 与坑 4 **完全一致**；§3.4 若真要写会话记录，走它 |
+
+**未核实（如实列，勿当结论）**：`UserMessage` 字段逐个；`job.status` 完整枚举；**dsh 进程内** `internal` 非空（C1 是进程外实测 + 静态推断，终局判据在实验A 第一步）；B9 那一整行。
