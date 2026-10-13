@@ -255,6 +255,20 @@ type NextStep =
 
 「必须带动作」这条只有在**动作可分派**时才可机械断言。`manual: true` 是「重建客户端后刷新页面」这类没有工具可调的动作的**显式出口** —— 它的代价是那类 `nextStep` 多一个字段，收益是**「裸结论伪装成下一步」在类型上就写不出来**（现状 `nextStep: — <why>` 正是这种裸结论）。
 
+**两种合法形态，以及 `{ tool, args: 空 }` 为什么非法（2026-10-13 真机抓到并定案）**：
+
+| 形态 | 含义 | 合法性 |
+|---|---|---|
+| `{ tool, args: <非空>, why }` | 去问一个**更具体**的问题 | ✅ 永远合法 |
+| `{ tool, args: {} }` | 「原样重跑」 | **看失败性质**：`timeout` 等**非确定性**失败 → ✅（重试可能不同）；`not-configured` / `not-found` / `command-failed` / `internal` 等**确定性**拒绝 → ❌ |
+| `{ manual: true, why }` | 下一步是**用户动作** | ✅ 永远合法；**此时不许同时带 `tool`** |
+
+**判据的真正分界不是「args 空不空」，是「这次失败会不会自己变」**：
+- `not-configured` 的成因（端口来源三条都没有）**不会**因为你再调一次而改变 → 带工具名就是**不动点**（死路）；确定端口是**人的动作** → 该走 `manual` 支。**真机原文**：`nextStep: dsh_check_auth() — re-run this check with an explicit port once you know which one…`（模型此刻并不知道端口）。
+- `timeout` 的成因（预算耗尽）**可能**变 → 「retry once」是真实动作。
+
+**这一条由 B18a 机械断言**（读 `kind` 闭枚举，不靠人读 `why` 的语义）；「非确定性失败」白名单写在判据里，新增 `kind` 时必须同步裁决它属哪一档。
+
 **`ok` 的语义不变**：`ok:false` = 操作没完成；「诊断成功、只是结论是坏消息」走 `ok:true` + `data`（`verdict` 承载结论）。变的是**槽的数量**。
 
 **一处新事实**：本仓工具**从不 throw**，所以宿主的 `isError` 对本仓**恒为 `false`** —— 宿主眼里我们的 `{ok:false}` 是一个**成功结果**。`[已核]`（`dsh-tools/lib/index.js` 的 `createSuccessResult` 只对抛出的异常走 `toolErrorResult`；且实测 `dsh_check_auth` 的失败分支被 `render` 正常渲染过 —— `render` 只在成功分支被调用）。

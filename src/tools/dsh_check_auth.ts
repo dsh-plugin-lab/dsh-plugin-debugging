@@ -211,8 +211,12 @@ async function probeAuthentication(
           audit: {},
         },
         {
-          tool: CHECK_AUTH_TOOL,
-          // 不给 `args`：此刻**没有任何**观测到的端口可指（B17 的例外正对准这种情形）。
+          // **用户动作，不套工具名**：此刻没有任何**已观测到的**端口可指（B17 的例外正对准这种情形），
+          // 而 `why` 的前提是「once you know which one」—— 模型此刻**不知道**端口。
+          // 套上工具名会让模型逐字重调本工具、拿到**同一个** `not-configured`：
+          // 那是个**不动点**（死路），正是 SHAPE §4.1 禁止的「带工具名却不产生新信息」。
+          // 确定端口是**人的动作**（看监听端口 / 改插件配置 / 设 `DSH_WEB_URL`）。
+          manual: true,
           why: 're-run this check with an explicit port once you know which one the host listens on',
         },
       ),

@@ -147,6 +147,10 @@ export type ToolResult<T> = ToolOk<T> | ToolFail<T>
  * 形状判据因此只写在这里一份：`ensureToolResult` 用它决定要不要换掉返回值，
  * `render` 用它决定要不要退化成一行原始 JSON。
  *
+ * 判据是**两段**：§4.1 的形状表，**加上**「可无损落 JSON」（`jsonValueProblem`）。
+ * 后者是宿主边界的一条硬要求，而形状表照不到它 —— `data.key` 里挂一个 `undefined`
+ * 在形状上完全合法，放行的代价却是宿主侧的一次硬失败（模型拿不到 `verdict` / `key` / `audit`）。
+ *
  * @param value 工具的候选返回值。
  */
 export function toolResultProblem(value: unknown): string | undefined {
@@ -169,7 +173,10 @@ export function toolResultProblem(value: unknown): string | undefined {
     const nextStepProblemText = nextStepProblem(nextStep)
     if (nextStepProblemText !== undefined) return nextStepProblemText
   }
-  return undefined
+  // 形状对了**还不够**：宿主逐值校验「可无损落 JSON」（`jsonValueProblem`，四条判据）。
+  // 形状合法但含 `undefined` / `NaN` / 负零 / 循环引用的结果，在这里换掉 ——
+  // 放行就等于把一次硬失败交给宿主，而那一侧的代价是模型拿不到 `verdict` / `key` / `audit`。
+  return jsonValueProblem(value, 'the result')
 }
 
 /**
@@ -248,6 +255,121 @@ function nextStepProblem(value: unknown): string | undefined {
 }
 
 /**
+ * 「这个工具结果**可无损落 JSON**吗」—— 第一条违规（宿主 `walkJsonValue` 的四条判据）。
+ *
+ * ## 判据逐字来自宿主（`@deepseek-ai/dsh-util-values` 的 `walkJsonValue`）
+ *
+ * 1. `undefined` / 函数 / symbol / bigint —— `typeof current !== 'object'` 且不是合法标量；
+ * 2. 非有限数：`!Number.isFinite(v)` **或** `Object.is(v, -0)` —— 宿主的判据原话是
+ *    「lossless finite JSON number, excluding negative zero」（**负零也不行**）；
+ * 3. 循环引用（`ancestors.has(current)`）；
+ * 4. symbol 键或不可枚举自有属性 —— 活的类实例（`Error` / `AbortSignal` / `Map` 等）也中招。
+ *
+ * ## 为什么这道闸住在**我们这一侧**（2026-10-13）
+ *
+ * 宿主把返回值丢给 `dsh-tools` 的 `snapshotToolValue` 校验，失败即抛
+ * `ToolOutputError(toolName, ['value is not lossless JSON'])`。**那是一次硬失败**：
+ * 模型拿到的是宿主的一句报错，拿不到 `verdict` / `key` / `audit` ——
+ * 契约 §4「绝不抛、绝不交出非法值」的承载条件在宿主边界上就失效了。
+ * 也就是说：`ensureToolResult` 只校验形状（`toolResultProblem`）时，任何一个
+ * `data.key` / `data.audit` 里的 `undefined` 都能一路穿到宿主被拒。
+ * 所以形状之外还必须要求**可无损落 JSON** —— 不满足就走**既有的** `malformedResult`
+ * 响亮失败，而不是原样放行把异常交给宿主。
+ *
+ * ## 绝不抛
+ *
+ * 宿主那份 `walkJsonValue` 是会抛的；本函数不抛 —— `errors.ts` 的整个文件头承诺
+ * 「绝不抛」（`ensureToolResult` 的返回路径不许炸，而它正是靠本函数做决定）。
+ * 两层兜底：整体一个 `try/catch`（`Proxy` 的 `ownKeys` / `getOwnPropertyDescriptor`
+ * 陷阱真的会抛），加上一个递归深度上限（超限**响亮**判红，绝不当成「合法」放行）。
+ *
+ * @param value 待查的值。
+ * @param path  违规要报出来的路径（供人复核用，**面向模型所以用英文**）。
+ */
+export function jsonValueProblem(value: unknown, path = 'the result'): string | undefined {
+  try {
+    return walkJsonValue(value, path, 0, [])
+  } catch (error) {
+    // 读不出来**不等于**合法：宁可判红（宿主会拒）也不放行。
+    return `${path} could not be verified as lossless JSON (${error instanceof Error ? error.message : String(error)})`
+  }
+}
+
+/**
+ * `jsonValueProblem` 的递归体（`ancestors` 沿调用链传，不走模块级状态）。
+ *
+ * @param value     待查的值。
+ * @param path      当前路径。
+ * @param depth     递归深度。
+ * @param ancestors 祖先栈（判据第 3 条）。
+ */
+function walkJsonValue(
+  value: unknown,
+  path: string,
+  depth: number,
+  ancestors: readonly object[],
+): string | undefined {
+  if (depth > MAX_JSON_WALK_DEPTH) return `${path} exceeds the supported nesting depth`
+  if (value === null) return undefined
+  switch (typeof value) {
+    case 'string':
+    case 'boolean':
+      return undefined
+    case 'number':
+      // `isJsonNumber` 的原话：lossless **finite** JSON number，**排除负零**。
+      if (!Number.isFinite(value)) return `${path} is ${String(value)}, which JSON cannot represent`
+      if (Object.is(value, -0)) return `${path} is negative zero, which JSON cannot represent`
+      return undefined
+    case 'undefined':
+      return `${path} is undefined (an absent key, not an undefined value)`
+    case 'bigint':
+      return `${path} is a bigint, which JSON cannot represent`
+    case 'function':
+      return `${path} is a function, which JSON cannot represent`
+    case 'symbol':
+      return `${path} is a symbol, which JSON cannot represent`
+    case 'object':
+      break
+    default:
+      return `${path} is a ${typeof value}, which JSON cannot represent`
+  }
+
+  const object = value as object
+  // 判据第 3 条只认**祖先**，不认「见过」：同一个对象在两处出现（DAG 的共享节点）
+  // 是合法的 JSON，用「全局见过」会把那种形状误判成循环。
+  if (ancestors.includes(object)) return `${path} is a circular reference`
+  const chain: object[] = [...ancestors, object]
+  if (Array.isArray(object)) {
+    // 数组的 `length` 是不可枚举的自有属性 —— 对数组**不适用**判据第 4 条。
+    for (const [index, item] of object.entries()) {
+      const problem = walkJsonValue(item, `${path}[${String(index)}]`, depth + 1, chain)
+      if (problem !== undefined) return problem
+    }
+    return undefined
+  }
+  const symbolKeys = Object.getOwnPropertySymbols(object)
+  if (symbolKeys.length > 0) {
+    return `${path} has ${String(symbolKeys.length)} symbol key(s), which JSON cannot represent`
+  }
+  for (const key of Object.getOwnPropertyNames(object)) {
+    const descriptor = Object.getOwnPropertyDescriptor(object, key)
+    if (descriptor === undefined) return `${path}.${key} is not an own property`
+    if (descriptor.enumerable !== true) {
+      return `${path}.${key} is a non-enumerable own property, which JSON cannot represent`
+    }
+    if (!('value' in descriptor)) {
+      return `${path}.${key} is an accessor property, whose value is not a plain data value`
+    }
+    const problem = walkJsonValue(descriptor.value, `${path}.${key}`, depth + 1, chain)
+    if (problem !== undefined) return problem
+  }
+  return undefined
+}
+
+/** 递归深度的上限（超过就**响亮**判红，不当成「合法」放行）。 */
+const MAX_JSON_WALK_DEPTH = 64
+
+/**
  * 把任意值收敛成合法的工具结果，**绝不抛**。
  *
  * 为什么需要它：输出 schema 用的是 `{ type: 'json' }`（无损 JSON，不做结构强制），
@@ -265,23 +387,46 @@ export function ensureToolResult(value: unknown): ToolResult<unknown> {
 }
 
 /**
- * 把一个形状不对的返回值转成 `internal` 失败。
+ * 把一个形状不对 / 不是无损 JSON 的返回值转成 `internal` 失败。
  *
  * 合成的 `data` 必须是**合规形状**（否则守卫自己产出的东西也要被自己拒掉）：
- * `verdict` 说清形状错在哪，`key` 为空对象，`audit` 只记一句收到的形状摘要。
+ * `verdict` 说清**哪一条判据**没过，`key` 为空对象，`audit` 只记一句收到的形状摘要。
+ *
+ * ## 为什么走的是这一条而不是别的路
+ *
+ * 备选是「原样放行，让宿主去拒」。**不行**：宿主那次拒绝是**硬失败** ——
+ * 模型拿到的是 `Error: tool "…" returned invalid output: value is not lossless JSON`，
+ * `verdict` / `key` / `audit` 一个都拿不到，而契约 §4 说的正是「绝不 throw、绝不交出非法值」。
+ * 所以四种情况（形状非法 / 值不是无损 JSON / 读不出来 / 递归超深）全部收敛到**这一条**响亮失败上：
+ * 模型至少还拿到一句「这次的结果不可信」与 `internal` 这个可分派的 kind。
  *
  * @param value 原始值（只用于描述，不原样回显大对象）。
- * @param problem 形状问题（来自 {@link toolResultProblem}）。
+ * @param problem 判据给出的违规原因（来自 {@link toolResultProblem}）。
  */
 function malformedResult(value: unknown, problem: string): ToolFail {
+  const aboutJson = isJsonShapeProblem(problem)
+  const what = aboutJson ? 'does not survive a lossless JSON round trip' : 'has an invalid shape'
   return fail(
-    { kind: 'internal', message: `Tool result has an invalid shape: ${problem}` },
+    { kind: 'internal', message: `Tool result ${what}: ${problem}` },
     {
-      verdict: `this call produced a result whose shape is invalid (${problem}), so nothing in it can be trusted`,
+      verdict: `this call produced a result that ${what} (${problem}), so nothing in it can be trusted`,
       key: {},
       audit: { received: describe(value) },
     },
   )
+}
+
+/**
+ * 违规原因说的是「不是无损 JSON」而不是「形状不对」。
+ *
+ * 形状判据每条都以 `"<字段名>" must …` 起头（`toolResultProblem` 里那几条），
+ * 而 `jsonValueProblem` 的每条都以 `the result` / `the result.<path>` 起头 ——
+ * 于是**判据自己**知道这一条属于哪一族，不必把来源当参数传下去。
+ *
+ * @param problem 违规原因。
+ */
+function isJsonShapeProblem(problem: string): boolean {
+  return problem.startsWith('the result')
 }
 
 /**
