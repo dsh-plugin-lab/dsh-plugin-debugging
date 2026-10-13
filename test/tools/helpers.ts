@@ -16,7 +16,7 @@ import type { CommandResult, RunCommandOptions, SpawnImpl } from '../../src/lib/
 import type { FetchImpl } from '../../src/lib/http.ts'
 import { createToolDeps, type ToolDeps } from '../../src/tools/shared.ts'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
-import type { ToolResult } from '../../src/lib/errors.ts'
+import type { NextStep, ToolData, ToolResult } from '../../src/lib/errors.ts'
 import type { LoaderEntrySnapshot } from '../../src/lib/fiber.ts'
 import type { LoaderReadResult } from '../../src/lib/loader.ts'
 
@@ -140,8 +140,16 @@ export function loaderWith(entries: LoaderEntrySnapshot[]): () => LoaderReadResu
   return () => ({ ok: true, entries })
 }
 
-/** 造一个「降级」的 loader 替身。 */
-export function loaderUnavailable(reason = '测试：读不到 loader'): () => LoaderReadResult {
+/**
+ * 造一个「降级」的 loader 替身。
+ *
+ * 默认 `reason` 必须**英文且短**：它会逐字进模型可见的 L2（`reason: …`），
+ * 而红线 B16 把「两份 fixture 里都出现、且 ≥40 字符的行」判红 —— 替身里的默认值
+ * 也一样会被算进去。与 `src/tools/shared.ts` 的 `unavailableLoader()` 同值。
+ *
+ * @param reason 降级原因（原样进输出，所以别写中文长句）。
+ */
+export function loaderUnavailable(reason = 'no host context'): () => LoaderReadResult {
   return () => ({ ok: false, reason, entries: [] })
 }
 
@@ -285,28 +293,59 @@ export async function run(
   return (await tool.execute(args, exec)) as unknown as ToolResult<unknown>
 }
 
-/** 断言成功并取出 `data`。 */
-export function expectOk(result: ToolResult<unknown>): Record<string, unknown> {
-  if (!result.ok) throw new Error(`期望成功，实际失败：${JSON.stringify(result.error)}`)
-  return result.data as Record<string, unknown>
+/**
+ * 一个工具 `data` 的测试视图（SHAPE §4.1 的三层记录）。
+ *
+ * `key` / `audit` 在契约里分别是泛型与 `JsonValue`，断言里按记录用更顺手 ——
+ * 转型只发生在这个测试助手里。
+ */
+export interface ToolDataView {
+  verdict: string
+  key: Record<string, unknown>
+  audit: Record<string, unknown>
 }
 
-/** 断言失败并取出 `error`。 */
-export function expectFail(result: ToolResult<unknown>): {
-  kind: string
-  message: string
-  hint: string
-} {
-  if (result.ok) throw new Error(`期望失败，实际成功：${JSON.stringify(result.data)}`)
-  return result.error
+/** 断言成功并取出 `data`（三层记录）。 */
+export function expectOk(result: ToolResult<unknown>): ToolDataView {
+  if (!result.ok) throw new Error(`期望成功，实际失败：${JSON.stringify(result.error)}`)
+  return viewOf(result.data)
 }
 
 /**
- * 断言失败并取出 `evidence`（没有就是 `undefined`）。
+ * 断言失败并取出 `error` 与 `data`。
  *
- * 与 `expectFail` 分开：绝大多数失败**不该**带证据，所以「有没有」本身要能被断言。
+ * `hint` **没有了**（SHAPE §4.1 删掉它）：它的内容现在只有两个家 ——
+ * 恒定知识在描述层边界段、具体动作在 `nextStep`。所以这里也不再返回它。
+ *
+ * `data` 一并给出来，因为**失败分支也有 L1 与被观测到的事实**（旧契约的 `evidence`），
+ * 大多数断言要看的就是它。
+ *
+ * @param result 工具返回值。
  */
-export function expectFailEvidence(result: ToolResult<unknown>): unknown {
+export function expectFail(result: ToolResult<unknown>): {
+  kind: string
+  message: string
+  data: ToolDataView
+  nextStep?: NextStep
+} {
   if (result.ok) throw new Error(`期望失败，实际成功：${JSON.stringify(result.data)}`)
-  return result.evidence
+  return {
+    kind: result.error.kind,
+    message: result.error.message,
+    data: viewOf(result.data),
+    ...(result.nextStep === undefined ? {} : { nextStep: result.nextStep }),
+  }
+}
+
+/**
+ * 把三层记录转成测试视图。
+ *
+ * @param data 工具的 `data`。
+ */
+function viewOf(data: ToolData<unknown>): ToolDataView {
+  return {
+    verdict: data.verdict,
+    key: data.key as Record<string, unknown>,
+    audit: data.audit as Record<string, unknown>,
+  }
 }

@@ -1,7 +1,7 @@
 # dsh-plugin-debugging — 设计说明
 
 **本文职责**：这个插件**为什么这样分层**、每条设计的理由与代价。
-**不负责**：**宿主侧已核 / 未核的事实** → [HOST-CONTRACTS.md](HOST-CONTRACTS.md)（本文只引用结论，不重述证据）；**没做的工具的方案** → [RESTART-PLAN.md](RESTART-PLAN.md)；怎么在这个仓里干活 → [AGENTS.md](../AGENTS.md)；发布流程 → [PUBLISHING.md](PUBLISHING.md)；决策快照 → [.agents/notes/](../.agents/notes/)。
+**不负责**：**宿主侧已核 / 未核的事实** → [HOST-CONTRACTS.md](HOST-CONTRACTS.md)（本文只引用结论，不重述证据）；**插件最终长什么样、接下来怎么改** → [SHAPE.md](SHAPE.md)；怎么在这个仓里干活 → [AGENTS.md](../AGENTS.md)；发布流程 → [PUBLISHING.md](PUBLISHING.md)；决策快照 → [.agents/notes/](../.agents/notes/)。
 **读者纪律**：本文里的宿主行为结论都标了真源。**在跑的宿主**与**源码检出**常常不是同一个版本 —— 引用之前先确认哪一份。
 
 ---
@@ -137,22 +137,27 @@ src/
 
 ## 5. 工具半边
 
-五个工具都遵守同一条输出契约：
+五个工具都遵守同一条输出契约（冻结签名见 [SHAPE.md](SHAPE.md) §4.1）：
 
 ```ts
-{ ok: true,  data: {...}, nextStep?: {...} }                      // 成功
-{ ok: false, error: { kind, message, hint }, evidence?, nextStep? }  // 预期内失败
+{ ok: true,  data: { verdict, key, audit }, nextStep? }            // 成功
+{ ok: false, error: { kind, message }, data: { ... }, nextStep? }  // 预期内失败
 ```
 
-- **`execute` 绝不 throw**。`kind` 是**闭枚举**，决定模型该不该重试；`message` 给人看；`hint` 是下一步。
+- **`execute` 绝不 throw**。`kind` 是**闭枚举**，决定模型该不该重试。
+  `message` 是**这次操作为什么没做成**（操作视角，由守卫或 `toToolError` 产生），
+  与 `verdict`（世界视角的结论）**角色不同**；它**不进模型文本**，留在结构化值里供人复核。
 - **`ok` 只描述「工具这次操作有没有完成」，不描述系统健不健康**。所以「诊断成功、只是结论是坏消息」
-  走 `ok: true` + `data`（`verdict` 承载结论，`dsh_diagnose_plugin_load` 是样板），
-  只有「操作没完成、但看到了值得留下的事实」才走 `ok: false`。
-- **`evidence` 是失败路径上观测到的事实**（如 `oldFiberTouched` / `rolledBack` / `actionable` /
-  `credentials`），与成功的 `data` **分开命名**：它不是成功 payload 的替代品，而是「我看到了什么，
-  而操作没成」。**没有证据时不写这个字段**（空对象会让「有没有证据」不可判）。渲染层会把它打成
-  一行 `evidence: {...}`，并让 `summarize` 在失败时也跑一次（否则工具作者写在 hook 里的那句判定到不了模型）。
-- **每个工具都给 `nextStep`**：排障进度不能靠模型背历史（compaction 会丢），要把下一步落进工具结果。
+  走 `ok: true` + `data`（`verdict` 承载结论），只有「操作没完成、但看到了值得留下的事实」才走 `ok: false`。
+- **`data` 两分支同形且必填**，顶层**恰好三个键**：
+  - `verdict` —— 一句话结论（L1），**必填非空**，成功失败都有；
+  - `key` —— 下一个决定可能要用到的（L2），判据是「模型看不到它，会不会做出不同的下一步」；
+  - `audit` —— 给人复核的（**不进模型文本**，可以为 `{}`）。
+
+  旧的 `evidence` 字段已并入 `data`：失败路径的观测事实就是那时的 `key`。
+- **`nextStep` 必须带动作**：`{ tool, args?, why }` 或 `{ manual: true, why }`，
+  **没有动作就不出现**（旧形状「裸结论伪装成下一步」已在类型上写不出来）。
+  排障进度不能靠模型背历史（compaction 会丢），所以有动作时要落进工具结果。
 - **`exec.signal` 透传**到 fetch / spawn，让宿主的取消能到 IO 层。
 - **工具侧超时 > 传输层超时**：让传输层先超时，得到结构化错误，而不是裸 `TimeoutError`。
 - **零运行时依赖**：只用 `node:` 内建与宿主服务。加依赖要先过决策。
@@ -165,7 +170,7 @@ src/
 | `dsh_check_effect_mode` | 「热生效」的前提是 profile 里真的挂了 `hmr`。**关键机制：loader 重读配置的能力一直都在，缺的是触发者 —— watch patch 文件的正是 hmr**（`…\dsh-hmr\lib\index.js:718` 的 `watchConfig` 遍历的就是 patch 文件）。无 hmr 时改 config 文件**没有任何东西去重读它**（实测：同一进程 70 秒 / 21 个采样点一直读到旧值、实例 stderr 为空；重启后立刻生效），所以一切「热生效」都降级成 `restart-required`。工具把这件事作为**契约字段**直接给出（`hmr` 取 `present` / `absent`），不让模型从 `why` 反推 |
 | `dsh_diagnose_plugin_load` | 三处外部证据（`bundles` / 安装形态 / 进程）**只证前置条件，不证加载成功**；Fiber 级状态没有查询入口；`Config.listConfigs` 的 `inactive` 混合「禁用 / 未导入 / 已销毁」三义，**从不报 FAILED**。启动失败的硬证据只在 `$DSH_HOME/logs/startup-*.log`，且**只在启动失败时生成** |
 | `dsh_check_auth` | `401` = 服务活着、认证没过；连接被拒 = 没启动。cookie 绑定 authority（`host:port`，`localhost` 与 `127.0.0.1` 不通用），签名密钥落盘、launch token 不落盘 —— 所以「同端口重启旧标签页照常可用、换端口才 401」 |
-| `dsh_dump_config` | `--dump-config` 退出码**恒 0**，不能当门禁；`--dump-config-schema` 退出码 **1 = 有 error**；`preset-*` 行的 `unrecognized Loader tree carrier` 是已知误报，判定看 error 的 `path` 是否指向你改过的行。**`actionable` 里的字段是宿主按需带的**（真机实测：patch `name` 不匹配时条目**只有 `path`**；`insert` 一个不存在的包时 **`entryId` 与 `path` 都有**）—— 工具**原样透传、不自己造**，hint 里那句「check entryId / path」对两种形状都成立 |
+| `dsh_dump_config` | `--dump-config` 退出码**恒 0**，不能当门禁；`--dump-config-schema` 退出码 **1 = 有 error**；`preset-*` 行的 `unrecognized Loader tree carrier` 是已知误报，判定看 error 的 `path` 是否指向你改过的行。**`actionable` 里的字段是宿主按需带的**（真机实测：patch `name` 不匹配时条目**只有 `path`**；`insert` 一个不存在的包时 **`entryId` 与 `path` 都有**）—— 工具**原样透传、不自己造**，描述 boundary 段那句「check entryId / path」对两种形状都成立 |
 | `dsh_hot_reload`（v1.1，**写侧**） | 就地换一个 entry 的代码，不重启。**顺序是判据**：定位 entry → 备份本地模块闭包 → 只清那批缓存 → **先 `import` 成功** → **再** dispose 旧 fiber → 挂载新的。import 期失败时**旧 fiber 从未被碰**（实测：步骤里根本没有 `dispose-old`）；apply 期失败则从备份回滚（旧版本被真的重新实例化）。匹配 entry 要**两个字段都试 + URL 归一**（`entry.id` 实际是 `include:<id>`、`options.name` 是 `file://` URL，只比 id 会得到假阴性）。**它测不到的**：插件在 cordis 之外开的资源（定时器 / socket / `process.on` / 文件句柄 / worker）不会被追踪，会**静默泄漏** |
 
 ## 6. 配置

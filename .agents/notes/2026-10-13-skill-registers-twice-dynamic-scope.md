@@ -40,7 +40,7 @@
 
 - **包不可解析时默认会话直接建不起来**：`agentPresets[standard].broken = "…never started"`，
   且 `session/create` 返回 `agent-preset/invalid`。**standard 是默认 preset** → 插件一坏，默认体验全哑。
-  这与本插件「只读、不打扰宿主」的定位直接冲突。
+  这与本插件「不打扰宿主」的定位直接冲突。
 - **四个工具被一起限进 preset 层**：全局层 `schemas()` 只剩 `working_directory` →
   `ptc`/`minimal`/`cordis` 会话拿不到这四个工具。
 - 附带维护债：restate 等于把上游 preset **冻结在抄下来的那一刻**，上游升级后被静默盖回。

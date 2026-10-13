@@ -41,7 +41,7 @@ v1.1 要加两个**写侧**工具（`dsh_hot_reload` / `dsh_restart`）。维护
 
 ## 证据出处
 
-- 三段契约与闸门语义：[RESTART-PLAN.md](../../docs/RESTART-PLAN.md) §3（流程）、§4（恢复逻辑）、§8（协作纪律：先 `dsh_check_effect_mode` 再动写侧工具）
+- 三段契约与闸门语义：[SHAPE.md](../../docs/SHAPE.md) §6.1（流程、恢复逻辑、协作纪律：先 `dsh_check_effect_mode` 再动写侧工具）
 - 恢复通道（`sessionController.resolveAgent` + `agents.get` + `agent.followup`）：[HOST-CONTRACTS.md](../../docs/HOST-CONTRACTS.md) §2.2 的 C4 / C5
 - 拉起形态（单级 detached 只覆盖「父自己 exit」；外部 `/T` 树杀会断链 → 两级或交给外部）：[HOST-CONTRACTS.md](../../docs/HOST-CONTRACTS.md) §2.1 的 B1–B8
 - 热重载算法已实测（失败隔离与回滚三条判据全过）：[HOST-CONTRACTS.md](../../docs/HOST-CONTRACTS.md) §1

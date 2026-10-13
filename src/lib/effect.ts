@@ -193,6 +193,18 @@ function downgrade(baseline: EffectMode, hmrUsable: boolean): EffectMode {
 /**
  * 拼可读理由。
  *
+ * ## 收尾句的判据是「**实际结论**」，不是 `mode` 一个字（2026-10-13 修，W2-A2）
+ *
+ * 原实现是 `mode === 'hot' ? HOT_WITH_HMR : CLIENT_WITH_HMR` —— 只看 `mode`，**没看这一档
+ * 到底是不是降级**。于是 **hmr 可用 + `host-code`**（或 `bundle-added` 且已在
+ * `dependencies`）时，判定是 `restart-required`，收尾句却说「hmr 挂了，客户端会换入」
+ * —— **判定对了、解释反了**。
+ *
+ * 为什么这种错特别值得单独修：判错会被断言抓住，**解释反了只有人读得出来**；
+ * 而它躺着的位置正是 `audit`（定义就是「给人复核的」，SHAPE §5）—— 复核者会被它带偏。
+ * 所以三条收尾句各自绑到**它成立的那个结论**上：`hot` 说重读、`hmr` 说客户端换入、
+ * `restart-required` 说重启**并说明 hmr 在这一档为什么帮不上忙**。
+ *
  * @param input 判定输入。
  * @param baseline 原表答案。
  * @param mode 最终答案。
@@ -206,7 +218,12 @@ function buildWhy(
 ): string {
   const reason = baselineReason(input)
   if (!downgraded) {
-    return `${reason}; ${mode === 'hot' ? HOT_WITH_HMR : CLIENT_WITH_HMR}`
+    if (mode === 'hot') return `${reason}; ${HOT_WITH_HMR}`
+    if (mode === 'hmr') return `${reason}; ${CLIENT_WITH_HMR}`
+    // 走到这里只剩 `restart-required`：它**不是**降级（原表本来就要重启，例如
+    // host-code / 已在 dependencies 里的 bundle），所以 hmr 在不在都一样 ——
+    // 客户端那句说明在这一档是反话，不许再挂上去。
+    return `${reason}; ${input.hmrUsable ? RESTART_DESPITE_HMR : RESTART_ONLY_PATH}`
   }
   if (baseline === 'hot') {
     // 这句是本工具存在的理由：**「loader 会重读配置」缺的不是能力，而是触发者**。
@@ -230,6 +247,19 @@ const HOT_WITH_HMR =
 
 /** 有 hmr 且不降级时，客户端那一支的解释。 */
 const CLIENT_WITH_HMR = 'hmr is mounted in this profile, so the client swaps the asset in'
+
+/**
+ * **hmr 可用、但这一档本来就要重启**时的收尾句。
+ *
+ * 要点：说明 hmr 的能力边界（它换的是配置行与客户端资源），而不是暗示它会替你做这件事。
+ */
+const RESTART_DESPITE_HMR =
+  'hmr cannot apply this change live: it re-reads config rows and swaps client assets, but it ' +
+  'cannot change the host module graph or the bundle selection — a restart is required'
+
+/** 没有 hmr、且这一档本来就要重启时的收尾句（连同 hmr 也帮不上忙一起说清）。 */
+const RESTART_ONLY_PATH =
+  'no live path applies this change, and there is no usable hmr in this profile either — a restart is required'
 
 /**
  * 每种改动的原理说明（SKILL §一「为什么」列）。

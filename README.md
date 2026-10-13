@@ -76,7 +76,7 @@ Installing it gives the model five tools — four read-only, one write-side — 
 
 **Boundary**: `--dump-config` always exits 0, so its exit code is not a gate; `--dump-config-schema` exits 1 when there are errors, and the known `preset-*` false positive is separated from errors that point at a row you changed.
 
-## Read-only by design, with one exception
+## Read-only diagnostics, one in-place fix
 
 - The four diagnostics tools read files an instance already has; they store no credentials and produce none.
 - They restart nothing, rewrite no profile, and write nothing to `DSH_HOME`.

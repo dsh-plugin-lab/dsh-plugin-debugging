@@ -1,20 +1,32 @@
 /**
  * `dsh_diagnose_plugin_load` —— 「插件到底加载了吗」的外部三处 + 启动日志。
  *
- * 对应 SKILL §3.1 / §3.2 / §3.8。工具的输出里必须带上一句**否定性**的说明：
- * Fiber 级状态**没有查询入口**，`Config.listConfigs` 的 `inactive` 混合了
- * 「禁用 / 未导入 / 已销毁」三义、**从不报 FAILED**。所以下面查到的三处
- * （bundles 列表、安装形态、entry 在不在）**都只证前置条件，不证加载成功**。
- * 不说这句话，模型就会把「三处都在」读成「插件活着」。
- *
- * 真正的硬证据只有一条：**启动失败**时才会生成的
+ * 对应 SKILL §3.1 / §3.2 / §3.8。真正的硬证据只有一条：**启动失败**时才会生成的
  * `$DSH_HOME/logs/startup-<ISO>-<uuid>.log`。所以「一条都没有」= 好消息。
  *
- * 进程一律**按端口**查（SKILL §3.5）：命令行子串会误匹配派生 shell。
+ * ## 这一版（W1 样板）的三处形状改造 —— 见 docs/SHAPE.md §2 / §3 / §5
+ *
+ * 1. **恒定知识搬去描述层**：旧的 `loadProofCaveat`（365 字符）与 `observation.note`
+ *    （156 字符）每次调用逐字重复，现在只在 `description` 的**边界段写一次**
+ *    （本工具是观察类，没有「代价段」，所以边界段占两行、合成后仍是四行）。
+ *    `startupLogsNote` 同理（它也是恒定的），它的知识压进了描述第 3 行。
+ * 2. **`data` 三段划分**（判据是 §5 那句：**模型看不到它，会不会做出不同的下一步？**）：
+ *    - `verdict`：`buildVerdict` 的结果（L1）。成功、失败两条路都有。
+ *    - `key`：要模型决策的原料 —— 观测模式与原因、树里 entry 总数与相位直方图、
+ *      每个包的名字/相位/命中的 entryId/错误、入口的三值判定、在不在 bundles、
+ *      产物是否比进程新、启动日志的**三值状态与路径**、以及实际用的目录/profile/端口。
+ *    - `audit`：其余全部（bundles 全列表、安装形态与 patch 细节、`missingInject` /
+ *      `fiberState` / `basis`、`port.lookup`、启动日志全字段）—— 给人复核，不进模型文本。
+ *    - **三值不许压成两值**：入口是 `present|missing|unknown`、启动日志是
+ *      `present|none|unknown`。把「没查到」印成「不在」/「没有」是静默坏
+ *      （缺 A 的假红与活跃坑 18 各是一次教训）。
+ * 3. **不再有「结论当下一步」**：旧代码是 `ok({ ...data, verdict }, { why: verdict })`
+ *    （同一个 const 绑了两次）。现在 `nextStep` 要么带工具与参数、要么 `manual: true`、
+ *    要么根本不出现。
  */
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools'
 
-import { fail, ok } from '../lib/errors.js'
+import { fail, ok, toToolError, type JsonValue } from '../lib/errors.js'
 import { budgetFor, createDeadline } from '../lib/timeouts.js'
 import { indexByIdentifier, projectFiberPhase, worstOf, type FiberPhase } from '../lib/fiber.js'
 import type { LoaderEntrySnapshot } from '../lib/fiber.js'
@@ -25,16 +37,29 @@ import {
   profileDir,
   readInstallShape,
   readProfileManifest,
+  readTextIfExists,
   type EntryCheck,
   type InstallShape,
+  type Presence,
+  type ResolutionSource,
   type StartupLog,
+  type StartupLogsResult,
 } from '../lib/profile.js'
+import type { RenderTable } from '../lib/render.js'
+import {
+  parseStartupLog,
+  unreadableStartupLog,
+  type StartupLogParse,
+  type StartupLogReport,
+} from '../lib/startup-log.js'
+import { composeDescription, type ToolDescription } from './describe.js'
 import {
   assertResolvedDshHome,
   effectiveConfig,
   resolvePort,
   toOutput,
   toolOutput,
+  type EffectiveConfigBlock,
   type ToolDeps,
 } from './shared.js'
 
@@ -47,7 +72,7 @@ interface DiagnoseArgs {
   port?: number
 }
 
-/** 一个包的诊断条目。 */
+/** 一个包的诊断条目（内部记录；`key` / `audit` 是它的两种投影）。 */
 interface PackageDiagnosis {
   packageName: string
   /** 是否在 profile 的 `dsh.profile.bundles` 里。 */
@@ -68,7 +93,7 @@ interface PackageDiagnosis {
    * `install` / `entry` / `inBundles` 只证前置条件，这一项才回答「崩没崩」。
    */
   observed?: {
-    /** 命中Loader 树里的哪几行（可能 0 行 = 装了但树里没有这一行）。 */
+    /** 命中 Loader 树里的哪几行（可能 0 行 = 装了但树里没有这一行）。 */
     matchedEntryIds: string[]
     phase: FiberPhase
     error?: string
@@ -78,23 +103,216 @@ interface PackageDiagnosis {
   }
 }
 
-/** 观测的整体状态。 */
+/** 观测的整体状态（**不含**任何恒定的解释文字 —— 那些在描述层边界段）。 */
 interface ObservationBlock {
   /** `observed` = 读到了宿主 Loader 树；`inferred` = 读不到，以下全是推断。 */
   mode: 'observed' | 'inferred'
   /** `inferred` 时的原因（原样展示，让人知道为什么没能观测）。 */
   reason?: string
-  /** 一句话说明这次输出属于哪一类。 */
-  note: string
   /** 读到的 entry 总数（`observed` 时）。 */
   entryCount?: number
   /**
-   * 相位直方图 —— `{"active":162,"failed":2,"null":29}` 形态。
+   * 相位直方图 —— `active=162 failed=2 null=29` 形态。
    *
    * 为什么要它：单个包的相位可能因为「还没轮到挂载」而看起来正常或异常，
    * 一眼看到整棵树的分布，才能判断这次快照是不是**稳定态**。
    */
   phaseHistogram?: Record<string, number>
+}
+
+/** 这次调用实际用的是哪份配置（L2 用的投影：只留要模型决策的部分）。 */
+interface ResolvedKey {
+  dshHome: string
+  dshHomeSource: EffectiveConfigBlock['dshHomeSource']
+  profile: string
+  /** 实际探测的端口；`undefined` = 这次没用到端口。 */
+  port?: number
+  portSource?: EffectiveConfigBlock['portSource']
+  /**
+   * profile 目录的绝对路径。
+   *
+   * **只在「读不到 profile 的 package.json」那条失败路径上出现** —— 那时
+   * 「我到底去哪个目录找了」就是模型唯一能拿去做下一步的标识符；成功路径上它
+   * 由 `dshHome` + `profile` 完全决定，再印一次只是噪声（L2 规则：只放本次非默认的）。
+   */
+  profileDir?: string
+}
+
+/** 一个包在 `key` 里的投影（只留要模型决策的字段）。 */
+interface PackageKey {
+  packageName: string
+  /**
+   * 入口文件的三值判定。
+   *
+   * **不许压成布尔**：`unknown`（包解析不到 / 清单里没有可读的入口）与 `missing`
+   * （入口声明了、文件真的不在）对下一步的决定完全不同 —— 后者会让组合层**整条丢弃**
+   * 该插件，前者只是「这次没查到」。用 `entryExists === false` 冒充「不存在」正是
+   * 缺 A 那条假红的来源。
+   */
+  entryState: Presence
+  inBundles: boolean
+  artifactNewerThanProcess: boolean | null
+  /** `dsh.bundle` 的声明检查（B）。它解释「装了却没生效」的第三类原因。 */
+  bundle: BundleKey
+  /** 观测到的相位；`inferred` 时不出现。 */
+  phase?: FiberPhase
+  /** 命中的 entryId（可能为空数组 = 装了但树里没有这一行）。 */
+  matchedEntryIds?: string[]
+  error?: string
+}
+
+/**
+ * `dsh.bundle` 声明的检查结果（**三值，不许压成两值**）。
+ *
+ * 为什么必须进 `key`：`declared === false` 改变的是**「去哪找原因」**这一层 ——
+ * 这个包**根本不贡献组合层**，所以「查它有没有被后一层整行替换」这个方向是错的；
+ * `patchIssue` 非空则相反：宿主把**整条层**丢掉了（连它插的行、它覆盖的 config 一起没了），
+ * 而插件只是「好像没装」，正确动作是修那个文件而不是改配置。
+ *
+ * 三值的来源与 `EntryCheck` 一一对应：`undeclared` → `false`、`unknown` → `null`、
+ * 其余 → `true`。**「读不到那份 package.json」不等于「没声明」**（B0 的假红正是
+ * 从这里出去的：官方包只在安装锚点下存在，profile 本地没有目录）。
+ */
+interface BundleKey {
+  /** `true` = 声明了（字符串与数组两种形态都算）；`false` = 没声明；`null` = 读不到（未知）。 */
+  declared: boolean | null
+  /** 读了哪条锚点的那份 `package.json`（`unresolved` = 两条都没解析到）。 */
+  resolvedFrom: ResolutionSource
+  /** 声明的 patch 文件（**包相对**路径，按宿主应用顺序）。 */
+  patches: string[]
+  /** `patches` 里不存在的那些（`missing` 时非空）。 */
+  missing: string[]
+  /**
+   * 声明本身有问题时才有值（两种都会让宿主**丢掉整条层**）：
+   * - `missing`：声明了、文件不在（数组形态下**任何一个**不在都算）；
+   * - `malformed`：`dsh.bundle.patch` 既不是字符串也不是字符串数组。
+   */
+  patchIssue?: 'missing' | 'malformed'
+}
+
+/**
+ * 启动日志在 `key` 里的投影（**三值**，与 `listStartupLogs` 的三值一一对应）。
+ *
+ * 为什么必须有 `unknown`：日志目录读不到与「目录里没有日志」表面上都是「一条都没有」，
+ * 而只有后者是好消息。把「未知」说成「没有」是活跃坑 18 那种静默坏 —— 所以
+ * `unknown` 是一个**本次观测**，必须出现在 L2，而不是被压成恒定措辞。
+ */
+interface StartupLogsKey {
+  /** `present` = 真列到了；`none` = 确定没有；`unknown` = 目录读不到（**不等于没有**）。 */
+  state: 'present' | 'none' | 'unknown'
+  /** 日志路径（`state === 'present'` 时是全部）。 */
+  paths: string[]
+  /** `unknown` 时的原因。 */
+  readError?: string
+}
+
+/** `key`：下一个决定可能要用到的原料。 */
+interface DiagnoseKey {
+  resolved: ResolvedKey
+  observation?: ObservationBlock
+  packages: PackageKey[]
+  /**
+   * 启动日志的**路径**与三值状态；**早期失败**（没走到这一步）时整个字段不出现 ——
+   * 那时「没查」与「查了没有」必须可分开，所以不给一个 `none` 冒充。
+   */
+  startupLogs?: StartupLogsKey
+  /**
+   * 启动日志的**解析结论**（`startupLogs` 只回答「有几份、在哪」，这里回答
+   * 「里面说了什么、有没有解出来」）。
+   *
+   * 为什么必须进 `key` 而不是只进 `audit`：**解析失败**与**真的没有失败条目**
+   * 在 JSON 里必须可分（活跃坑 18），而 `audit` 模型根本读不到 —— 放进去等于没加。
+   * 没有日志（`none`）/ 目录读不到（`unknown`）时整个字段不出现。
+   */
+  startupEvidence?: StartupEvidenceKey
+}
+
+/**
+ * 一条「解析这件事本身出了问题」的记录。
+ *
+ * 三个地方共用这一个形状（解析失败 / 读不到 / 有缺口）—— 它们对下一步的决定不同，
+ * 但都只需要「哪份日志 + 一句话」。
+ */
+interface StartupLogNote {
+  /** 日志文件名。 */
+  name: string
+  /** 一句话（英文，可能进 L2）。 */
+  detail: string
+}
+
+/**
+ * 启动日志的解析结论（`key` 的投影）。
+ *
+ * 两个「不许压成两值」的地方：
+ * - `parseState` 的 `unparsed` 与「日志里没有失败条目」是两件事；
+ * - `parseState` 的 `unreadable`（读不到）是**未知**，同样不等于「没有失败」。
+ */
+interface StartupEvidenceKey {
+  /** 参与解析的日志份数。 */
+  logCount: number
+  /**
+   * 解析状态（四值，四件不同的事）：
+   * - `parsed`：每份都解出来了，且没有缺口；
+   * - `partial`：有的没解出来 / 有缺口 / 有的读不到 —— 证据不完整；
+   * - `unparsed`：日志读到了，但**一份都没解出来**（判红）；
+   * - `unreadable`：一份都**读不到**（未知，不是「没有失败」）。
+   */
+  parseState: 'parsed' | 'partial' | 'unparsed' | 'unreadable'
+  /** 读到了内容、但段没认出来的那些。 */
+  parseErrors?: StartupLogNote[]
+  /** 读不到的那些（未知）。 */
+  readErrors?: StartupLogNote[]
+  /** 部分解析的缺口（每条都由标记推出）。 */
+  gaps?: StartupLogNote[]
+  /** 拿来投影下面那些事实的日志文件名（最新那份**解析成功**的）。 */
+  from?: string
+  /** 那份日志自己的 profile 与本次是否一致（读不出 profile 时不出现）。 */
+  profileMatches?: boolean
+  /** 不一致时日志的 profile（模型要看到是哪个）。 */
+  logProfile?: string
+  /** headline 里的 required 未激活数（**不是**失败插件个数）。 */
+  requiredNotActivated?: number
+  /** 失败条目（有界：真机 1 条）。`error` 是唯一能导向「端口被占」那类根因的原料。 */
+  failed?: { id: string; required: boolean; module?: string; error?: string }[]
+  /** 那份日志看起来被截断（写盘中途被杀）。**不是**解析失败。 */
+  truncated?: boolean
+}
+
+/** 一份启动日志在 `audit` 里的完整记录（列表字段 + 解析结论 + 解析出的事实）。 */
+interface StartupLogRecord extends StartupLog {
+  parse: StartupLogParse
+  report: StartupLogReport
+}
+
+/** 读一份启动日志内容的上限（字节）；超限只解析前面这一段并标记截断。 */
+const MAX_STARTUP_LOG_BYTES = 262_144
+
+/**
+ * 本工具的描述（SHAPE §2.1 四段骨架）。
+ *
+ * 逐段理由：
+ * - `what`：动词 + 对象。
+ * - `useWhen`：模型的路由信号 —— 它是四个观察入口里唯一回答「加载没有」的那个。
+ * - `boundary`：**两行**，承载从输出里搬出来的恒定知识。它是本工具唯一的反直觉点所在：
+ *   ① 「三处前置条件都在」**不等于**「加载成功」（旧 `observation.note` / `loadProofCaveat`
+ *   的 inferred 分支）；② Loader 树的相位**不是公开 API**，而且没稳定时「还在挂载」的行
+ *   会被读成 import 失败（同一个 caveat 的 observed 分支）。观察类工具没有「代价段」，
+ *   所以两行边界 + 两行前置 = 合成后仍是四行。
+ */
+export const DIAGNOSE_PLUGIN_LOAD_DESCRIPTION: ToolDescription = {
+  what: 'Checks whether a plugin loaded.',
+  useWhen: 'Use when an installed plugin never shows up.',
+  boundary:
+    'Preconditions prove only that loading was possible; startup-*.log exists only on failure.\n' +
+    'A Loader-tree phase is host-internal, not a public API.',
+}
+
+/** 本工具的输出表：L1 就是 `data.verdict` 逐字，L2 由 `key` 投影成行。 */
+const TABLE: RenderTable<DiagnoseKey> = {
+  key: (data) => keyText(data.key),
+  // 默认 15 行不够：省略 `package` 参数时会一个包一行，本机 `web` profile 有 15 个 bundle，
+  // 加上模式/直方图/日志/生效配置几行就超了 —— 那会把**最要紧的包行**截掉。
+  maxKeyLines: 24,
 }
 
 /**
@@ -105,239 +323,341 @@ interface ObservationBlock {
 export function createDiagnosePluginLoadTool(deps: ToolDeps): ToolDefinition {
   return defineTool({
     name: DIAGNOSE_PLUGIN_LOAD_TOOL,
-    description:
-      'Checks whether a plugin actually loaded. ' +
-      'Use it when a plugin is installed but seems absent — its tools, page, or skill do not show up. ' +
-      'Read-only — and it keeps observed evidence (the host loader tree) separate from inferred ' +
-      'evidence (bundles membership, install form, entry files), which only prove the plugin could ' +
-      'load; treat output marked `mode=inferred` accordingly.',
+    description: composeDescription(DIAGNOSE_PLUGIN_LOAD_DESCRIPTION),
     parameters: {
       package: {
         type: 'string',
-        description:
-          'Package to check, e.g. `dsh-zhihu-search` or `@scope/name`; omit to check every bundle.',
+        description: 'Package name, e.g. dsh-zhihu-search; omit for all bundles.',
       },
       port: {
         type: 'integer',
-        description:
-          "Host port to probe; omit to use the plugin's configured port, falling back to `DSH_WEB_URL`.",
+        description: 'Host port; omit for the configured one.',
       },
     },
-    output: toolOutput(DIAGNOSE_PLUGIN_LOAD_TOOL),
+    output: toolOutput(DIAGNOSE_PLUGIN_LOAD_TOOL, TABLE),
 
     timeoutMs: deps.config.timeoutMs,
     isConcurrencySafe: () => true,
 
     async execute(rawArgs, exec) {
-      const args = rawArgs as DiagnoseArgs
-      const deadline = createDeadline(deps.config.timeoutMs, deps.now)
+      // 「绝不 throw」是契约的承载条件：一旦抛出去，宿主会把它包成 `toolErrorResult`，
+      // 模型看到的是一句裸 `Error: …`，`verdict` / `key` / `audit` 全部失效（SHAPE §4）。
+      // 兜底分支的判据（B24）是「返回的是**过了守卫**的合法结果」，不是「没报错」。
+      try {
+        const args = rawArgs as DiagnoseArgs
+        const deadline = createDeadline(deps.config.timeoutMs, deps.now)
 
-      const missing = assertResolvedDshHome(deps.config)
-      if (missing !== undefined) return toOutput(missing)
+        const missing = assertResolvedDshHome(deps.config)
+        if (missing !== undefined) return toOutput(missing)
 
-      // 预算在真正开工前就耗尽：文件层诊断虽然便宜，也不该在「已超时」的前提下继续跑 ——
-      // 那会让宿主先掐掉我们，模型拿到的是裸 TimeoutError 而不是结构化 timeout。
-      if (deadline.expired()) {
-        return toOutput(
-          fail(
-            {
-              kind: 'timeout',
-              message: 'the tool budget ran out before any work started',
-              hint: 'raise timeoutMs and retry; the port lookup is the slowest step here',
-            },
-            {
-              tool: DIAGNOSE_PLUGIN_LOAD_TOOL,
-              args: { package: args.package ?? '' },
-              why: 'retry once as-is',
-            },
-          ),
-        )
-      }
+        const { dshHome, profile } = deps.config
+        const dir = profileDir(dshHome, profile)
+        const resolvedPort = resolvePort(args.port, deps.config.port, deps.env)
+        const resolved = effectiveConfig(deps.config, resolvedPort)
+        const keyResolved = toResolvedKey(resolved)
 
-      const { dshHome, profile } = deps.config
-      const dir = profileDir(dshHome, profile)
-      const manifest = await readProfileManifest(dir)
-
-      if (manifest === undefined) {
-        return toOutput(
-          fail(
-            {
-              kind: 'not-found',
-              message: `cannot read the profile package.json: ${dir}`,
-              hint: 'check that dshHome and the profile name are correct; this profile may not exist yet',
-            },
-            {
-              tool: DIAGNOSE_PLUGIN_LOAD_TOOL,
-              args: { port: args.port ?? 0 },
-              why: 'try another profile name',
-            },
-          ),
-        )
-      }
-
-      const names = args.package === undefined ? manifest.bundles : [args.package]
-      const resolvedPort = resolvePort(args.port, deps.config.port, deps.env)
-      const portLookup: PortLookupResult | undefined =
-        resolvedPort === undefined
-          ? undefined
-          : await lookupPort(resolvedPort.port, {
-              spawn: deps.spawn,
-              timeoutMs: budgetFor(deps.config.timeoutMs, deadline),
-              signal: exec.signal,
-            })
-
-      // 端口查询只是**加分项**：它失败（超时 / 查不了）不该让整份文件层诊断作废。
-      // 但**调用方取消**是另一回事 —— 那是我们主动放弃，不能拿半份结果当结论。
-      if (exec.signal.aborted) {
-        return toOutput(
-          fail(
-            {
-              kind: 'cancelled',
-              message: 'the caller cancelled this execution',
-              hint: 'do not retry automatically; the caller gave up on purpose',
-            },
-            { why: 'cancellation is up to the caller; retrying the same call is pointless' },
-          ),
-        )
-      }
-
-      // ── 观测：试着直接读宿主 Loader 树（`fiber.state`） ──────────────────────
-      // 读不到就降级成推断；**降级不是错误** —— 那是宿主内部 primitive，见 lib/fiber.ts 文件头。
-      const loader = deps.loader()
-      const index = loader.ok ? indexByIdentifier(loader.entries) : undefined
-
-      const packages: PackageDiagnosis[] = []
-      for (const packageName of names) {
-        const install = await readInstallShape(dir, packageName)
-        const entry = await checkInstalledEntry(dir, packageName)
-        const startedAt = portLookup?.listeners[0]?.startedAt
-        const diagnosed: PackageDiagnosis = {
-          packageName,
-          inBundles: manifest.bundles.includes(packageName),
-          install,
-          entry,
-          artifactNewerThanProcess: compareArtifactWithProcess(entry, startedAt),
+        // 预算在真正开工前就耗尽：文件层诊断虽然便宜，也不该在「已超时」的前提下继续跑 ——
+        // 那会让宿主先掐掉我们，模型拿到的是裸 TimeoutError 而不是结构化 timeout。
+        if (deadline.expired()) {
+          return toOutput(
+            fail(
+              { kind: 'timeout', message: 'the tool budget ran out before any work started' },
+              {
+                verdict:
+                  'no work started: the tool budget was already spent, so nothing was read at all',
+                key: { resolved: keyResolved, packages: [] },
+                audit: {},
+              },
+              {
+                tool: DIAGNOSE_PLUGIN_LOAD_TOOL,
+                // 参数原样带回去。空对象是**有意**的（B17 的例外：没有标识符可指），
+                // 但不能传 `{ package: undefined }` —— 那不是 JSON。
+                args: args.package === undefined ? {} : { package: args.package },
+                why: 'retry once; raise timeoutMs if it keeps timing out, since the port lookup is the slowest step here',
+              },
+            ),
+          )
         }
-        const matched = index?.get(packageName)
-        // `worstOf` 返回 `undefined` 只对空数组 —— 上面的 `length > 0` 已经排除，
-        // 但类型上仍要收窄；收窄失败时走「一行都没匹配上」那条路更安全。
-        const worst = matched === undefined ? undefined : worstOf(matched)
-        if (matched !== undefined && worst !== undefined) {
-          // 一个包在树里可能不止一行（宿主自己有 `…/tools` 这种子路径行）。
-          // 取「最坏的那一档」：只要有一行崩了，这个包就没在正常工作。
-          // 严重级与 tie-break 都在 `lib/fiber.ts` 的 `worstOf` 里，这里不重排。
-          diagnosed.observed = {
-            matchedEntryIds: matched.map((row) => row.entry.entryId),
-            phase: worst.observation.phase,
-            ...(worst.observation.error === undefined ? {} : { error: worst.observation.error }),
-            ...(worst.observation.missingInject === undefined
-              ? {}
-              : { missingInject: worst.observation.missingInject }),
-            ...(worst.observation.fiberState === undefined
-              ? {}
-              : { fiberState: worst.observation.fiberState }),
-            basis: worst.observation.basis,
-          }
-        } else if (index !== undefined) {
-          // 读到了树、但这个包一行都没有 —— 本身就是硬证据：它没进树。
-          diagnosed.observed = {
-            matchedEntryIds: [],
-            phase: 'failed',
-            error: 'the package has no row in the Loader tree',
-            basis:
-              'the Loader tree was read, but no row matched this package or module name — the composition layer does not include it',
-          }
+
+        const manifest = await readProfileManifest(dir)
+
+        if (manifest === undefined) {
+          return toOutput(
+            fail(
+              {
+                kind: 'not-found',
+                message: `cannot read the profile package.json at ${dir}`,
+              },
+              {
+                verdict: `nothing could be checked: there is no readable profile package.json at ${dir}, so either the directory or the profile name is wrong`,
+                // 这条路径上目录就是唯一可判的标识符 —— L2 必须把它印出来。
+                key: {
+                  resolved: { ...keyResolved, profileDir: dir },
+                  packages: [],
+                },
+                audit: asAudit({ resolved, profileDir: dir }),
+              },
+              {
+                tool: 'dsh_dump_config',
+                args: { profile },
+                why: 'use it to check whether this profile composes at all; if it does, the directory above is the wrong one',
+              },
+            ),
+          )
         }
-        packages.push(diagnosed)
-      }
 
-      const observation: ObservationBlock = loader.ok
-        ? {
-            mode: 'observed',
-            note: 'the phases below were **directly observed** from the host Loader tree (the same primitive the host startup audit uses)',
-            entryCount: loader.entries.length,
-            phaseHistogram: histogram(loader.entries),
+        const names = args.package === undefined ? manifest.bundles : [args.package]
+        const portLookup: PortLookupResult | undefined =
+          resolvedPort === undefined
+            ? undefined
+            : await lookupPort(resolvedPort.port, {
+                spawn: deps.spawn,
+                timeoutMs: budgetFor(deps.config.timeoutMs, deadline),
+                signal: exec.signal,
+              })
+
+        // 端口查询只是**加分项**：它失败（超时 / 查不了）不该让整份文件层诊断作废。
+        // 但**调用方取消**是另一回事 —— 那是我们主动放弃，不能拿半份结果当结论。
+        if (exec.signal.aborted) {
+          return toOutput(
+            fail(
+              { kind: 'cancelled', message: 'the caller cancelled this execution' },
+              {
+                verdict: 'the diagnosis is incomplete: the caller cancelled this execution',
+                key: { resolved: keyResolved, packages: [] },
+                audit: asAudit({ resolved, profileDir: dir }),
+              },
+              {
+                manual: true,
+                why: 'cancellation is up to the caller; retrying the same call is pointless',
+              },
+            ),
+          )
+        }
+
+        // ── 启动日志：先**解析**，再把它当证据用 ─────────────────────────────────
+        // 读**全部**日志、不抽样（抽样 = 静默 skip，活跃坑 18）；每份按字节上限读。
+        // 解析器是纯函数（`lib/startup-log.ts`），读盘与上限判定留在这里。
+        const startup = await listStartupLogs(dshHome)
+        const startupReports = await readStartupReports(startup)
+        const startupEvidence = toStartupEvidence(startupReports, profile)
+
+        // ── 观测：试着直接读宿主 Loader 树（`fiber.state`） ──────────────────────
+        // 读不到就降级成推断；**降级不是错误** —— 那是宿主内部 primitive，见 lib/fiber.ts 文件头。
+        const loader = deps.loader()
+        const index = loader.ok ? indexByIdentifier(loader.entries) : undefined
+
+        const packages: PackageDiagnosis[] = []
+        for (const packageName of names) {
+          const install = await readInstallShape(dir, packageName)
+          const entry = await checkInstalledEntry(dir, packageName)
+          const startedAt = portLookup?.listeners[0]?.startedAt
+          const diagnosed: PackageDiagnosis = {
+            packageName,
+            inBundles: manifest.bundles.includes(packageName),
+            install,
+            entry,
+            artifactNewerThanProcess: compareArtifactWithProcess(entry, startedAt),
           }
-        : {
-            mode: 'inferred',
-            ...(loader.reason === undefined ? {} : { reason: loader.reason }),
-            note:
-              '**Could not observe directly; the following is inferred**: the host Loader tree could not be read, so whether a plugin crashed can only be inferred from' +
-              ' preconditions — bundles list / install shape / entry presence — and none of those prove that loading succeeded.',
+          const matched = index?.get(packageName)
+          // `worstOf` 返回 `undefined` 只对空数组 —— 上面的 `length > 0` 已经排除，
+          // 但类型上仍要收窄；收窄失败时走「一行都没匹配上」那条路更安全。
+          const worst = matched === undefined ? undefined : worstOf(matched)
+          if (matched !== undefined && worst !== undefined) {
+            // 一个包在树里可能不止一行（宿主自己有 `…/tools` 这种子路径行）。
+            // 取「最坏的那一档」：只要有一行崩了，这个包就没在正常工作。
+            // 严重级与 tie-break 都在 `lib/fiber.ts` 的 `worstOf` 里，这里不重排。
+            diagnosed.observed = {
+              matchedEntryIds: matched.map((row) => row.entry.entryId),
+              phase: worst.observation.phase,
+              ...(worst.observation.error === undefined ? {} : { error: worst.observation.error }),
+              ...(worst.observation.missingInject === undefined
+                ? {}
+                : { missingInject: worst.observation.missingInject }),
+              ...(worst.observation.fiberState === undefined
+                ? {}
+                : { fiberState: worst.observation.fiberState }),
+              basis: worst.observation.basis,
+            }
+          } else if (index !== undefined) {
+            // 读到了树、但这个包一行都没有 —— 本身就是硬证据：它没进树。
+            diagnosed.observed = {
+              matchedEntryIds: [],
+              phase: 'failed',
+              error: 'the package has no row in the Loader tree',
+              basis:
+                'the Loader tree was read, but no row matched this package or module name — the composition layer does not include it',
+            }
           }
+          packages.push(diagnosed)
+        }
 
-      const startupLogs: StartupLog[] = await listStartupLogs(dshHome)
+        const observation: ObservationBlock = loader.ok
+          ? {
+              mode: 'observed',
+              entryCount: loader.entries.length,
+              phaseHistogram: histogram(loader.entries),
+            }
+          : {
+              mode: 'inferred',
+              ...(loader.reason === undefined ? {} : { reason: loader.reason }),
+            }
 
-      const data = {
-        profile,
-        profileDir: dir,
-        /**
-         * 生效配置：这份诊断的**全部结论都建立在「读的是哪个目录」之上**，
-         * 所以 DSH_HOME 的来源（配置 / env / 宿主默认值）必须摊开 —— 读默认目录
-         * 而用户以为读的是另一个，正是这类工具最坏的一种失败。
-         */
-        resolved: effectiveConfig(deps.config, resolvedPort),
-        /**
-         * **本次输出是观测还是推断** —— 这个字段必须放在最显眼处。
-         * 观测与推断的置信度完全不同：前者能说「它 import 期就崩了」，
-         * 后者只能说「三处前置条件都在」。混在一起看会让人高估后者。
-         */
-        observation,
-        bundles: manifest.bundles,
-        bundleCount: manifest.bundles.length,
-        packages,
-        /** 端口查询的明细（端口值本身在 `resolved.port`，不在这里重复）。 */
-        port: { lookup: portLookup ?? null },
-        startupLogs,
-        startupLogsNote:
-          startupLogs.length === 0
-            ? 'no startup-*.log — that is good news: these are only written when **startup fails**, they are not a rolling log'
-            : `${String(startupLogs.length)} startup-failure log(s), newest first; the newest one is worth reading in full`,
-        loadProofCaveat: loader.ok
-          ? 'Phases are observed directly from the host Loader tree (`entry.fiber.state`, the same primitive the host startup audit uses). ' +
-            'It is **not a public API** and only holds once the tree has settled: rows from hot reload or a fresh patch may still be mounting, and ' +
-            'then `fiber` does not exist yet and is read as an import failure. Use phaseHistogram to judge whether the snapshot has settled.'
-          : 'The bundles list / install shape / entry presence only prove **preconditions**, not that loading succeeded: ' +
-            'The inactive state in Config mixes up "disabled / not imported / disposed" and never reports FAILED. ' +
-            'For hard evidence read startup-*.log, or check whether the registration surface this plugin should have (tools / slots / services) is present.',
-      }
+        const key: DiagnoseKey = {
+          resolved: keyResolved,
+          observation,
+          packages: packages.map(toPackageKey),
+          startupLogs: toStartupLogsKey(startup),
+          ...(startupEvidence === undefined ? {} : { startupEvidence }),
+        }
+        const audit = toAudit({
+          dir,
+          resolved,
+          manifest,
+          packages,
+          portLookup,
+          startup,
+          startupReports,
+        })
 
-      const missingEntries = packages.filter((item) => !item.entry.entryExists)
-      if (missingEntries.length > 0) {
+        // **只看 `entryState === 'missing'`**：`unknown` 是「这次没查到」，把它算成缺失
+        // 正是缺 A 那条假红的形状（默认参数时 7 个官方包只在安装锚点下存在）。
+        const missingEntries = packages.filter((item) => item.entry.entryState === 'missing')
+        if (missingEntries.length > 0) {
+          const names = missingEntries.map((item) => item.packageName).join(', ')
+          return toOutput(
+            fail(
+              {
+                kind: 'not-found',
+                message: `entry file missing for ${String(missingEntries.length)} package(s): ${names}`,
+              },
+              {
+                verdict: `entry file missing for ${String(missingEntries.length)} package(s) (${names}) — the composition layer drops those plugins entirely`,
+                key,
+                audit,
+              },
+              {
+                manual: true,
+                why: `rebuild the artifacts for ${names}: an entry that points to no file makes the composition layer drop that plugin entirely`,
+              },
+            ),
+          )
+        }
+
+        const stale = packages.filter((item) => item.artifactNewerThanProcess === true)
+        const failed = observedWith(packages, 'failed').filter(
+          (item) => item.observed?.matchedEntryIds.length !== 0,
+        )
+        const absent = packages.filter((item) => item.observed?.matchedEntryIds.length === 0)
+        const pending = observedWith(packages, 'pending')
+
+        const verdict = buildVerdict({
+          loaderOk: loader.ok,
+          failed,
+          absent,
+          pending,
+          stale,
+          startup: startupEvidence,
+          profile,
+        })
+
         return toOutput(
-          fail(
-            {
-              kind: 'not-found',
-              message: `entry file missing for ${String(missingEntries.length)} package(s): ${missingEntries
-                .map((item) => item.packageName)
-                .join(', ')}`,
-              hint: 'an entry that points to no file means the composition layer drops this plugin entirely; rebuild the artifacts first, or check whether the install shape is link or a copy snapshot',
-            },
-            {
-              tool: DIAGNOSE_PLUGIN_LOAD_TOOL,
-              args: { package: missingEntries[0]?.packageName },
-              why: 'look at this package alone',
-            },
+          ok(
+            { verdict, key, audit },
+            nextStepFor({ profile, failed, absent, pending, stale, startup: startupEvidence }),
           ),
         )
+      } catch (error) {
+        // 兜底分支（B24 的判据是「返回的是过守卫的合法结果」，不是「没报错」）。
+        return toOutput(
+          fail(toToolError(error, 'diagnosing whether the plugin loaded'), {
+            verdict:
+              'nothing was concluded: the diagnosis threw before it produced a result, so this says nothing about whether the plugin loaded',
+            key: {},
+            audit: {},
+          }),
+        )
       }
-
-      const stale = packages.filter((item) => item.artifactNewerThanProcess === true)
-
-      // 观测到的结论分成三类。**注意这里仍然返回 `ok: true`**：
-      // 工具**诊断成功**了 —— 否则按失败分支返回会把 observation / packages 这些
-      // 证据一起丢掉（失败分支没有 data 槽）。结论放进 verdict，并让 nextStep 领走。
-      const failed = observedWith(packages, 'failed').filter(
-        (item) => item.observed?.matchedEntryIds.length !== 0,
-      )
-      const absent = packages.filter((item) => item.observed?.matchedEntryIds.length === 0)
-      const pending = observedWith(packages, 'pending')
-
-      const verdict = buildVerdict({ loader, failed, absent, pending, stale })
-
-      return toOutput(ok({ ...data, verdict }, { why: verdict }))
     },
   })
+}
+
+/**
+ * 挑下一步。
+ *
+ * ## `args` 里只放两类值
+ *
+ * 红线 **B17** 要求 `nextStep.args` 的每个值都要出现在 **L1/L2 ∪ 目标工具自己的描述/参数文本**
+ * 里（第二半是 2026-10-13 Lead 裁决时扩的取值面）。于是：
+ * - **本次观测到的标识符**（包名、entryId、路径、端口）必须已经印在 L1/L2 里 —— 下面
+ *   每一条工具建议都按这条设计（`package`/`profile` 都在 L2 出现过）；
+ * - **目标工具自己的封闭枚举**（`change: 'host-code'`）不必出现在本次输出里：模型在
+ *   **那个工具的参数描述**里就读得到它。
+ *
+ * 反过来的纪律同样重要：**不许为了过 B17 而把该给的工具建议改成 `manual`**，也不许
+ * 把一个「本次观测到的标识符」塞进 args 去凑。`manual` 只留给**真的没有工具可派**的动作
+ * （下面 failed / cancelled / entry-missing 三支才是）。
+ *
+ * @param input 各档命中的包。
+ */
+function nextStepFor(input: {
+  profile: string
+  failed: readonly PackageDiagnosis[]
+  absent: readonly PackageDiagnosis[]
+  pending: readonly PackageDiagnosis[]
+  stale: readonly PackageDiagnosis[]
+  /** 启动日志的解析结论：解析不了 / 读不到时，唯一能派的就是「自己去读那份文件」。 */
+  startup: StartupEvidenceKey | undefined
+}): { tool: string; args?: JsonValue; why: string } | { manual: true; why: string } | undefined {
+  if (input.failed.length > 0) {
+    const names = input.failed.map((item) => item.packageName).join(', ')
+    // failed 这一支**确实没有工具可派**：要看日志、改被重载/被装的那份代码 —— 留 manual。
+    return {
+      manual: true,
+      why: `read the newest startup log for the failure stack of ${names}, then fix that plugin; no tool on this side can do it`,
+    }
+  }
+  // 解析不了 / 读不到的日志：本工具已经**明确说它没解出来**，但内容还在那个文件里。
+  // 没有工具能替模型读一份格式不认识的日志 —— 这正是 `manual` 的定义。
+  const blocked = startupBlockedLogs(input.startup)
+  if (blocked.length > 0) {
+    const one = blocked.length === 1
+    return {
+      manual: true,
+      why: `open ${blocked.join(', ')} and read it yourself: this tool could not interpret ${one ? 'that file' : 'those files'}, so nothing in ${one ? 'it' : 'them'} was used as evidence`,
+    }
+  }
+  const absentName = input.absent[0]?.packageName
+  if (absentName !== undefined) {
+    return {
+      tool: 'dsh_dump_config',
+      // `profile` 出现在 L2 的 `resolved:` 行里 —— B17 因此成立。
+      args: { profile: input.profile },
+      why: `check whether the composition layer really carries the row for ${absentName}, and whether a later layer replaced the whole patch`,
+    }
+  }
+  if (input.pending.length > 0) {
+    const pendingName = input.pending[0]?.packageName
+    if (pendingName !== undefined) {
+      return {
+        tool: DIAGNOSE_PLUGIN_LOAD_TOOL,
+        args: { package: pendingName },
+        why: `re-run once the injected services have mounted, to see whether ${pendingName} moves from pending to active`,
+      }
+    }
+  }
+  if (input.stale.length > 0 && input.failed.length === 0 && input.absent.length === 0) {
+    const names = input.stale.map((item) => item.packageName).join(', ')
+    return {
+      tool: 'dsh_check_effect_mode',
+      // `host-code` 是**目标工具自己的封闭枚举**：模型在它的 `change` 参数描述里读得到，
+      // 所以它不需要出现在本次输出里（B17 扩后的取值面）。**没有为了过检查改写它。**
+      args: { change: 'host-code' },
+      why: `the process is running artifacts older than the code on disk for ${names}; classify what it takes to make that change take effect before touching anything`,
+    }
+  }
+  // 「全都 active」= 没有动作可做 → 不出现（「没有动作就不出现」是 §3.1 的规则）。
+  return undefined
 }
 
 /**
@@ -354,36 +674,41 @@ function observedWith(
 }
 
 /**
- * 拼一句结论（也是 nextStep 的 why）。
+ * 拼一句结论（L1）。
  *
  * 优先级按「用户下一步要做什么」排：崩了最重要，其次没进树，再次 pending，
- * 最后才是「三处前置条件都在」这种弱结论。
+ * 最后才是「三处前置条件都在」这种弱结论。**启动日志的证据排在活的树证据之后**：
+ * 它是「上一次致命启动」的快照，而树是**现在**。
  *
- * @param input 各档命中的包。
+ * @param input 各档命中的包 + 启动日志的解析结论。
  */
 function buildVerdict(input: {
-  loader: { ok: boolean }
+  loaderOk: boolean
   failed: readonly PackageDiagnosis[]
   absent: readonly PackageDiagnosis[]
   pending: readonly PackageDiagnosis[]
   stale: readonly PackageDiagnosis[]
+  startup: StartupEvidenceKey | undefined
+  profile: string
 }): string {
-  if (!input.loader.ok) {
-    return (
-      'Could not observe the Loader tree directly; the following is **inferred**: ' +
-      'the three preconditions (bundles / install shape / entry file) only prove that loading is possible, not that it succeeded'
-    )
+  // 启动日志里那些「**别把它读成好消息**」的部分，两条分支都要带上。
+  const logParts = startupVerdictParts(input.startup, input.profile)
+  if (!input.loaderOk) {
+    return [
+      'Could not read the Loader tree, so nothing here is observed: bundles / install shape / entry file only prove that loading was possible, not that it succeeded',
+      ...logParts,
+    ].join('. ')
   }
   const parts: string[] = []
   if (input.failed.length > 0) {
     const detail = input.failed
       .map((item) => `${item.packageName} (${item.observed?.error ?? 'reason unavailable'})`)
       .join('; ')
-    parts.push(`**Observed load failure**: ${detail}`)
+    parts.push(`Observed load failure: ${detail}`)
   }
   if (input.absent.length > 0) {
     parts.push(
-      `**Installed but absent from the Loader tree**: ${input.absent.map((item) => item.packageName).join(', ')}` +
+      `Installed but absent from the Loader tree: ${input.absent.map((item) => item.packageName).join(', ')}` +
         ' (the composition layer does not include it — check whether it made it into bundles, and whether a later layer replaced the whole patch row)',
     )
   }
@@ -394,17 +719,327 @@ function buildVerdict(input: {
         return `${item.packageName} (waiting for ${missing.length === 0 ? 'mounting' : missing.join(', ')})`
       })
       .join('; ')
-    parts.push(`**Still pending**: ${detail}`)
-  }
-  if (input.stale.length > 0 && parts.length === 0) {
-    parts.push(
-      `artifacts are newer than the process: ${input.stale.map((item) => item.packageName).join(', ')} — the host is running stale artifacts, so code changed without a restart`,
-    )
+    parts.push(`Still pending: ${detail}`)
   }
   if (parts.length === 0) {
-    return 'all observed rows are active: the plugin really did load, so the problem is not at the "did it load" layer'
+    // 没有树上的发现时，才轮到这两句「弱结论」；它们必须**先于**日志证据出现，
+    // 否则「全都 active」这句话会被日志证据挤掉（那是本次观测的结论，不能丢）。
+    if (input.stale.length > 0) {
+      parts.push(
+        `artifacts are newer than the process: ${input.stale.map((item) => item.packageName).join(', ')} — the host is running stale artifacts, so code changed without a restart`,
+      )
+    } else {
+      parts.push(
+        'all observed rows are active: the plugin really did load, so the problem is not at the "did it load" layer',
+      )
+    }
   }
+  parts.push(...logParts)
   return parts.join('. ')
+}
+
+/**
+ * 把一份生效配置投影成 L2 用的 `key.resolved`。
+ *
+ * **非默认的部分**：`port` / `portSource` 只在这次真的用了端口时才有值
+ * （`not-used` / `none` 是「没用上」，不是结论）；`dshHome` 与它的来源、
+ * `profile` 则永远留着 —— 整份诊断的全部结论都建立在「读的是哪个目录、哪个 profile」上。
+ *
+ * @param resolved 生效配置块。
+ */
+function toResolvedKey(resolved: EffectiveConfigBlock): ResolvedKey {
+  const base: ResolvedKey = {
+    dshHome: resolved.dshHome,
+    dshHomeSource: resolved.dshHomeSource,
+    profile: resolved.profile,
+  }
+  if (resolved.port === null) return base
+  return { ...base, port: resolved.port, portSource: resolved.portSource }
+}
+
+/**
+ * 一个包在 `key` 里的投影。
+ *
+ * `basis` / `missingInject` / `fiberState` / 安装形态 / patch 细节**不进这里**：
+ * 前三个是解释性文字（`verdict` 已经把该说的说了），后两个只有复核时才要看 → `audit`。
+ *
+ * @param item 诊断条目。
+ */
+function toPackageKey(item: PackageDiagnosis): PackageKey {
+  const observed = item.observed
+  return {
+    packageName: item.packageName,
+    entryState: item.entry.entryState,
+    inBundles: item.inBundles,
+    artifactNewerThanProcess: item.artifactNewerThanProcess,
+    bundle: toBundleKey(item.entry),
+    ...(observed === undefined
+      ? {}
+      : {
+          phase: observed.phase,
+          matchedEntryIds: [...observed.matchedEntryIds],
+          ...(observed.error === undefined ? {} : { error: observed.error }),
+        }),
+  }
+}
+
+/**
+ * 造 `audit`（给人复核；不进模型文本，所以它可以大、可以有恒定文字）。
+ *
+ * @param input 这次诊断的全部原始记录。
+ */
+function toAudit(input: {
+  dir: string
+  resolved: EffectiveConfigBlock
+  manifest: { bundles: readonly string[] }
+  packages: readonly PackageDiagnosis[]
+  portLookup: PortLookupResult | undefined
+  startup: StartupLogsResult
+  startupReports: readonly StartupLogRecord[]
+}): JsonValue {
+  const audit = {
+    profileDir: input.dir,
+    resolved: input.resolved,
+    bundles: [...input.manifest.bundles],
+    bundleCount: input.manifest.bundles.length,
+    packages: input.packages.map((item) => ({
+      packageName: item.packageName,
+      inBundles: item.inBundles,
+      install: item.install,
+      entry: item.entry,
+      artifactNewerThanProcess: item.artifactNewerThanProcess,
+      ...(item.observed === undefined ? {} : { observed: item.observed }),
+    })),
+    /** 端口查询的明细（端口值本身在 `resolved`，不在这里重复）。 */
+    port: { lookup: input.portLookup ?? null },
+    /**
+     * 启动日志全字段 + 三值状态（`dirExisted` 与 `readError` 分开留痕），
+     * 以及**每份日志的完整解析记录**（全部段、等待表、entries 表、组合期消息）。
+     *
+     * 为什么解析细节在 `audit` 而不是 `key`：真机那份的等待表有 11 条、entries 有 12 条，
+     * 而其中与本插件无关的是绝大多数 —— 逐条问「模型看不到会不会换下一步」，答案是否；
+     * `key` 只留**有界**且**直接改变下一步**的部分（headline 的 required 数、失败条目）。
+     */
+    startupLogs: {
+      state: toStartupLogsKey(input.startup).state,
+      dirExisted: input.startup.dirExisted ?? null,
+      readError: input.startup.readError ?? null,
+      logs: [...input.startup.logs],
+      reports: input.startupReports.map((item) => ({
+        name: item.name,
+        path: item.path,
+        sizeBytes: item.sizeBytes,
+        mtimeMs: item.mtimeMs,
+        parse: item.parse,
+        report: item.report,
+      })),
+    },
+  }
+  return asAudit(audit)
+}
+
+/**
+ * 把一个只读记录转成 `audit` 的契约类型 `JsonValue`。
+ *
+ * 为什么要这个函数：`JsonValue` 是**带索引签名**的递归联合，而本仓的记录是 `interface`
+ * —— interface **不带隐式索引签名**，结构上合法的对象也通不过赋值检查（同一条 TS 规则，
+ * 见 `shared.ts` 的 `toOutput`）。与其为一个 TS 规则把冻结的契约层改成类型别名，
+ * 不如在**唯一一处**边界上显式转型；`audit` 必须是无损 JSON 这条要求由契约本身承担。
+ *
+ * @param value 任一可无损落 JSON 的只读记录。
+ */
+function asAudit(value: unknown): JsonValue {
+  return value as JsonValue
+}
+
+/**
+ * 把 `listStartupLogs` 的三值结果投影成 `key`。
+ *
+ * 顺序就是三值的判定顺序：**读不到 → `unknown`**（绝不等于「没有」）；
+ * 列到了且有日志 → `present`；其余（目录不存在 / 目录里没有）→ `none`。
+ *
+ * @param startup `listStartupLogs` 的结果。
+ */
+function toStartupLogsKey(startup: StartupLogsResult): StartupLogsKey {
+  const paths = startup.logs.map((log) => log.path)
+  if (startup.readError !== undefined) {
+    return { state: 'unknown', paths: [], readError: startup.readError }
+  }
+  return paths.length === 0 ? { state: 'none', paths: [] } : { state: 'present', paths }
+}
+
+/**
+ * 把 `key` 投影成 L2 的逐行文本。
+ *
+ * 排序即输出顺序：**先框架（读了哪份配置），再结论的原料（模式 / 直方图 / 每包一行），
+ * 最后是可继续读的路径（启动日志）**。
+ *
+ * @param key 本次的 `key`。
+ */
+function keyText(key: DiagnoseKey): string[] {
+  const lines: string[] = [resolvedLine(key.resolved)]
+  const observation = key.observation
+  if (observation !== undefined) {
+    lines.push(`mode: ${observation.mode}`)
+    if (observation.reason !== undefined) lines.push(`reason: ${observation.reason}`)
+    if (observation.entryCount !== undefined) {
+      lines.push(`entries: ${String(observation.entryCount)}`)
+    }
+    if (observation.phaseHistogram !== undefined) {
+      lines.push(`phases: ${histogramText(observation.phaseHistogram)}`)
+    }
+  }
+  for (const item of key.packages) lines.push(packageLine(item))
+  const startup = key.startupLogs
+  if (startup !== undefined) {
+    if (startup.state === 'unknown') {
+      // 「读不到目录」必须**原样**说出来：把它印成 `none` 就是活跃坑 18 的静默坏。
+      lines.push('startupLogs: unknown')
+      if (startup.readError !== undefined) lines.push(`logDirError: ${oneLine(startup.readError)}`)
+    } else if (startup.state === 'none') {
+      lines.push('startupLogs: none')
+    } else {
+      lines.push(`startupLogs: ${String(startup.paths.length)}`)
+      for (const path of startup.paths) lines.push(`log: ${path}`)
+    }
+  }
+  // 解析结论**必须**印出来：模型看不到 `parseState=unparsed` 就会把「没解出来」
+  // 读成「没有失败插件」（活跃坑 18 的头号形态）。
+  if (key.startupEvidence !== undefined) lines.push(...startupEvidenceLines(key.startupEvidence))
+  return lines
+}
+
+/**
+ * `resolved:` 那一行。
+ *
+ * @param resolved `key.resolved`。
+ */
+function resolvedLine(resolved: ResolvedKey): string {
+  const port =
+    resolved.port === undefined
+      ? ''
+      : ` port=${String(resolved.port)} (${String(resolved.portSource)})`
+  const dir = resolved.profileDir === undefined ? '' : ` dir=${resolved.profileDir}`
+  return `resolved: profile=${resolved.profile} dshHome=${resolved.dshHome} (${resolved.dshHomeSource})${port}${dir}`
+}
+
+/**
+ * 一个包一行。
+ *
+ * @param item 包的 `key` 投影。
+ */
+function packageLine(item: PackageKey): string {
+  const parts = [`${item.packageName}:`]
+  if (item.phase !== undefined) parts.push(`phase=${item.phase}`)
+  if (item.matchedEntryIds !== undefined) {
+    parts.push(`ids=${item.matchedEntryIds.length === 0 ? 'none' : item.matchedEntryIds.join(',')}`)
+  }
+  parts.push(`bundles=${item.inBundles ? 'yes' : 'no'}`)
+  parts.push(`entry=${entryText(item)}`)
+  const bundle = bundleText(item.bundle)
+  if (bundle !== undefined) parts.push(`bundle=${bundle}`)
+  parts.push(`stale=${staleText(item.artifactNewerThanProcess)}`)
+  if (item.error !== undefined) parts.push(`error=${oneLine(item.error)}`)
+  return parts.join(' ')
+}
+
+/**
+ * `entry=` 的取值。
+ *
+ * **C：`present` 必须带方向性措辞。** 独立验证者实测：本机 15 个 bundle 里有 5 个是
+ * `present` 但组合树里没有同名行 —— `present` 只回答「**能不能解析到 + 入口文件在**」，
+ * **不回答「进树 / 生效」**。当读不到树时，这一行是模型唯一原料，会被读成
+ * 「装了就是生效了」。
+ *
+ * 取法：**只在读不到树时**补方向 —— 树读到了的时候，同一行里的 `ids=`（含 `ids=none`）
+ * 已经**明确**回答了「在不在组合树里」，再补一句就是噪声（L2 规则：只放本次非默认的）。
+ * `present` 的语义**没有改**（它是对的），只是把误导面消掉。
+ *
+ * @param item 包的 `key` 投影。
+ */
+function entryText(item: PackageKey): string {
+  if (item.entryState !== 'present') return item.entryState
+  if (item.matchedEntryIds !== undefined) return 'present'
+  return 'present (resolvable; not proof of composition)'
+}
+
+/**
+ * 把 `EntryCheck` 的 patch 字段投影成 `key.bundle`（**B**）。
+ *
+ * 三值取法：`undeclared` → `false`、`unknown` → `null`、其余 → `true`。
+ * `patchIssue` 只在**声明本身有问题**时才有值 —— `present`（声明了且文件都在）是默认情形，
+ * 不在这里造一个 `'ok'` 出来。
+ *
+ * 导出它是为了让测试能直接钉住「字符串与数组两种形态都认」这条判据，
+ * 而不必绕一整套临时目录（那种写法会让「两种形态」的差别淹没在 fixture 里）。
+ *
+ * @param entry `checkInstalledEntry` 的结果。
+ */
+export function toBundleKey(entry: EntryCheck): BundleKey {
+  const missing = entry.patches.filter((item) => !item.exists).map((item) => item.file)
+  return {
+    declared:
+      entry.patchState === 'undeclared' ? false : entry.patchState === 'unknown' ? null : true,
+    resolvedFrom: entry.resolvedFrom,
+    patches: entry.patches.map((item) => item.file),
+    missing,
+    ...(entry.patchState === 'missing' ? { patchIssue: 'missing' as const } : {}),
+    ...(entry.patchState === 'malformed' ? { patchIssue: 'malformed' as const } : {}),
+  }
+}
+
+/**
+ * `bundle=` 的取值；**默认情形（声明了、文件都在）返回 `undefined`**。
+ *
+ * L2 的规则是「只放本次非默认、非恒定、且下一个决定可能要用到的」：
+ * 「声明了一个存在的 patch 文件」是本仓 32 个可读声明里 31 个的常态，印出来只是噪声。
+ * 反过来，「没声明」与「声明坏了 / 文件不在」各自对应**不同的修法**，必须印。
+ *
+ * @param bundle `key.bundle`。
+ */
+function bundleText(bundle: BundleKey): string | undefined {
+  if (bundle.declared === false) return 'none (contributes no layer)'
+  if (bundle.declared === null) return `unknown (resolvedFrom=${bundle.resolvedFrom})`
+  if (bundle.patchIssue === 'malformed') {
+    return 'malformed declaration (the host drops the whole layer)'
+  }
+  if (bundle.patchIssue === 'missing') {
+    return `missing ${bundle.missing.join(',')} (the host drops the whole layer)`
+  }
+  return undefined
+}
+
+/**
+ * 三值里的「未知」必须与「否」分开写（`null` = 判不了，不是「不新」）。
+ *
+ * @param value 比较结果。
+ */
+function staleText(value: boolean | null): string {
+  if (value === null) return 'unknown'
+  return value ? 'yes' : 'no'
+}
+
+/**
+ * 直方图文本。
+ *
+ * 键**排序**后输出：同一棵树两次读不许给出不同顺序的行（定序写死，避免看起来像随机故障）。
+ *
+ * @param histogram 相位计数。
+ */
+function histogramText(histogram: Record<string, number>): string {
+  return Object.entries(histogram)
+    .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+    .map(([phase, count]) => `${phase}=${String(count)}`)
+    .join(' ')
+}
+
+/**
+ * 压成一行（错误文本可能带换行，进 L2 会把「一行一条」破坏掉）。
+ *
+ * @param text 原始文本。
+ */
+function oneLine(text: string): string {
+  return text.replace(/\s+/gu, ' ').trim()
 }
 
 /**
@@ -440,4 +1075,212 @@ function compareArtifactWithProcess(
   const startedMs = Date.parse(startedAt)
   if (!Number.isFinite(startedMs)) return null
   return entry.entryMtimeMs > startedMs
+}
+
+/**
+ * 读并解析**每一份**启动日志（读全部，不抽样 —— 抽样就是静默 skip，活跃坑 18）。
+ *
+ * 两条边界：
+ * - 读不到（`readTextIfExists` 返回 `undefined`，它**绝不抛**）→ `parse.readError`：
+ *   那是**未知**，不是「这份日志里没有失败」；
+ * - 超过字节上限 → 只解析前面这一段并标记 `truncated`：那是**内容不全**，
+ *   不是「格式不认识」。
+ *
+ * @param startup `listStartupLogs` 的结果（已按 mtime 降序）。
+ */
+async function readStartupReports(startup: StartupLogsResult): Promise<StartupLogRecord[]> {
+  const records: StartupLogRecord[] = []
+  for (const log of startup.logs) {
+    const text = await readTextIfExists(log.path)
+    if (text === undefined) {
+      records.push({ ...log, ...unreadableStartupLog(`could not read ${log.path}`) })
+      continue
+    }
+    const overLimit = log.sizeBytes > MAX_STARTUP_LOG_BYTES
+    const content = overLimit ? text.slice(0, MAX_STARTUP_LOG_BYTES) : text
+    records.push({
+      ...log,
+      ...parseStartupLog(content, overLimit ? { truncatedBySize: true } : {}),
+    })
+  }
+  return records
+}
+
+/**
+ * 把每份日志的解析结果汇总成 `key` 的投影。
+ *
+ * **两个轴不许混**：
+ * - 「解析失败」（读到了内容、段没认出来）与「读不到」（IO）是两件不同的事；
+ * - 两者又都与「日志里真的没有失败条目」不同 —— 后者只有 `parseState === 'parsed'`
+ *   且 `failed` 为空时才成立。
+ *
+ * @param reports 每份日志的解析记录。
+ * @param profile 本次诊断的 profile（用来判日志是否属于它）。
+ */
+function toStartupEvidence(
+  reports: readonly StartupLogRecord[],
+  profile: string,
+): StartupEvidenceKey | undefined {
+  if (reports.length === 0) return undefined
+  const unreadable = reports.filter((item) => item.parse.readError !== undefined)
+  const readable = reports.filter((item) => item.parse.readError === undefined)
+  const parsed = readable.filter((item) => item.parse.ok)
+  const parseErrors = readable
+    .filter((item) => !item.parse.ok)
+    .map((item) => ({ name: item.name, detail: item.parse.reason ?? 'could not be parsed' }))
+  const readErrors = unreadable.map((item) => ({
+    name: item.name,
+    detail: item.parse.readError ?? 'could not be read',
+  }))
+  const gaps = parsed.flatMap((item) =>
+    item.parse.gaps.map((gap) => ({ name: item.name, detail: gap })),
+  )
+  const parseState: StartupEvidenceKey['parseState'] =
+    readable.length === 0
+      ? 'unreadable'
+      : parsed.length === 0
+        ? 'unparsed'
+        : parsed.length < readable.length || gaps.length > 0 || unreadable.length > 0
+          ? 'partial'
+          : 'parsed'
+
+  const evidence: StartupEvidenceKey = { logCount: reports.length, parseState }
+  if (parseErrors.length > 0) evidence.parseErrors = parseErrors
+  if (readErrors.length > 0) evidence.readErrors = readErrors
+  if (gaps.length > 0) evidence.gaps = gaps
+
+  // 事实只从**最新那份解析成功**的日志投影（`reports` 已按 mtime 降序）。
+  const newest = parsed[0]
+  if (newest === undefined) return evidence
+  evidence.from = newest.name
+  const logProfile = newest.report.profile
+  if (logProfile !== undefined) {
+    evidence.profileMatches = logProfile === profile
+    if (logProfile !== profile) evidence.logProfile = logProfile
+  }
+  if (newest.report.requiredNotActivated !== undefined) {
+    evidence.requiredNotActivated = newest.report.requiredNotActivated
+  }
+  if (newest.report.failed.length > 0) {
+    evidence.failed = newest.report.failed.map((item) => ({
+      id: item.id,
+      required: item.required,
+      ...(item.module === undefined ? {} : { module: item.module }),
+      ...(item.error === undefined ? {} : { error: item.error }),
+    }))
+  }
+  if (newest.parse.truncated === true) evidence.truncated = true
+  return evidence
+}
+
+/**
+ * 哪些日志**本工具没能解读**（解析不了，或读不到）。
+ *
+ * 只在这两档下返回（`partial` 时已经有别的证据可用，不必把模型赶去读文件）。
+ *
+ * @param evidence 解析汇总。
+ */
+function startupBlockedLogs(evidence: StartupEvidenceKey | undefined): string[] {
+  if (evidence === undefined) return []
+  if (evidence.parseState === 'unparsed')
+    return (evidence.parseErrors ?? []).map((item) => item.name)
+  if (evidence.parseState === 'unreadable')
+    return (evidence.readErrors ?? []).map((item) => item.name)
+  return []
+}
+
+/**
+ * 把解析汇总投影成 L2 的逐行文本。
+ *
+ * @param evidence 解析汇总。
+ */
+function startupEvidenceLines(evidence: StartupEvidenceKey): string[] {
+  const parts = [`parseState=${evidence.parseState}`, `logs=${String(evidence.logCount)}`]
+  if (evidence.from !== undefined) parts.push(`from=${evidence.from}`)
+  if (evidence.truncated === true) parts.push('truncated=yes')
+  if (evidence.profileMatches !== undefined) {
+    parts.push(`profileMatches=${evidence.profileMatches ? 'yes' : 'no'}`)
+  }
+  if (evidence.logProfile !== undefined) parts.push(`logProfile=${evidence.logProfile}`)
+  if (evidence.requiredNotActivated !== undefined) {
+    parts.push(`requiredNotActivated=${String(evidence.requiredNotActivated)}`)
+  }
+  const lines = [`startupEvidence: ${parts.join(' ')}`]
+  for (const item of evidence.parseErrors ?? []) {
+    lines.push(`logParseError: ${item.name}: ${oneLine(item.detail)}`)
+  }
+  for (const item of evidence.readErrors ?? []) {
+    lines.push(`logReadError: ${item.name}: ${oneLine(item.detail)}`)
+  }
+  for (const item of evidence.gaps ?? []) {
+    lines.push(`logGap: ${item.name}: ${oneLine(item.detail)}`)
+  }
+  for (const item of evidence.failed ?? []) {
+    const module = item.module === undefined ? '' : ` ${item.module}`
+    const error = item.error === undefined ? '' : ` — ${oneLine(item.error)}`
+    lines.push(`logFailed: ${item.id}${item.required ? ' (required)' : ''}${module}${error}`)
+  }
+  return lines
+}
+
+/**
+ * 启动日志里那些**会改变下一步**的句子（进 L1）。
+ *
+ * 三条最要紧的（都对应用户会做错的判断）：
+ * 1. 「解析失败 / 读不到」必须说出来 —— 否则模型把「没解出来」读成「没有失败」；
+ * 2. 失败条目的 `error`（真机那份是 `EADDRINUSE`）—— 没有它，模型只会建议「重启宿主」，
+ *    而重启解决不了（占用者还在）；
+ * 3. `profileMatches === false` —— 同一个 `$DSH_HOME` 下多 profile 是常态，拿别人的失败
+ *    日志解释当前 profile 是**无据**的。
+ *
+ * @param evidence 解析汇总。
+ * @param profile 本次诊断的 profile。
+ */
+function startupVerdictParts(evidence: StartupEvidenceKey | undefined, profile: string): string[] {
+  if (evidence === undefined) return []
+  const parts: string[] = []
+  const unparsed = evidence.parseErrors ?? []
+  const unreadable = evidence.readErrors ?? []
+  const gaps = evidence.gaps ?? []
+  if (unparsed.length > 0) {
+    const names = unparsed.map((item) => item.name).join(', ')
+    parts.push(
+      `could not parse ${String(unparsed.length)} startup log(s) (${names}); a startup log exists but its sections were not recognised, so do not read that as "no plugin failed"`,
+    )
+  }
+  if (unreadable.length > 0) {
+    const names = unreadable.map((item) => item.name).join(', ')
+    parts.push(
+      `could not read ${String(unreadable.length)} startup log(s) (${names}); that is unknown, not "no plugin failed"`,
+    )
+  }
+  if (gaps.length > 0) {
+    parts.push(
+      `the startup log was only partially parsed (${gaps.map((item) => item.detail).join('; ')}) — do not read the missing sections as "nothing there"`,
+    )
+  }
+  if (evidence.truncated === true) {
+    parts.push('the newest startup log looks truncated, so its later sections may be missing')
+  }
+  if (evidence.profileMatches === false) {
+    parts.push(
+      `that startup log is from profile ${evidence.logProfile ?? 'another profile'}, not ${profile}, so it does not explain the current profile`,
+    )
+  }
+  const failed = evidence.failed ?? []
+  if (failed.length > 0) {
+    const head =
+      evidence.requiredNotActivated === undefined
+        ? 'the startup log reports failed plugins'
+        : `the startup log reports ${String(evidence.requiredNotActivated)} required plugin(s) did not activate`
+    const detail = failed
+      .map((item) => {
+        const module = item.module === undefined ? '' : ` [${item.module}]`
+        const error = item.error === undefined ? '' : `: ${item.error}`
+        return `${item.id}${item.required ? ' (required)' : ''}${module}${error}`
+      })
+      .join('; ')
+    parts.push(`${head}, failed: ${detail}`)
+  }
+  return parts
 }

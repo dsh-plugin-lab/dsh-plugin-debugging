@@ -32,7 +32,8 @@
 #   package.json 的 patchReload → 还原 junction → 复核端口已释放。
 #
 # 独占资源纪律：只碰自己的 $BenchHome 与 $Port；绝不动正在跑的宿主
-#   （3080 / C:\Users\speak\.dsh / pid 34216 一律不碰，端口必须另选）。
+#   （3080 / C:\Users\speak\.dsh 一律不碰，端口必须另选）。
+#   宿主 pid **按 -HostPort 现查**、不写常数；**查不到就一个 pid 都不杀**（fail-safe）。
 #   真实 `~/.agents/skills` 只读 —— 本脚本**不碰**它。
 #
 # 用法（pwsh 7）：
@@ -47,8 +48,9 @@ param(
   [string]$BenchHome = 'D:\ProjectSomething\dsh-plugins\.local\bench-dsh-plugin-debugging',
   # 隔离 profile 名（变量名避开 PS 自动变量 $PROFILE）；不得用 acp/headless/sdk/sdk-minimal/web（shipped 名）
   [string]$ProfileName = 'bench',
-  # 本会话宿主的 pid：只用于前置自检，绝不发信号
-  [int]$HostPid = 34216
+  # 本会话宿主**监听的端口**：只用于收尾前**现查**宿主 pid 并把它排除在清扫之外，绝不发信号给它。
+  # （原先这里是写死的 -HostPid 34216 —— 宿主重启后该值指向别的进程或已不存在，保护**静默失效**。）
+  [int]$HostPort = 3080
 )
 
 $ErrorActionPreference = 'Stop'
@@ -79,10 +81,27 @@ function Test-PortListening([int]$P) {
   return [bool](netstat -ano | Select-String (':{0}\s.*LISTENING' -f $P))
 }
 
+# 监听 $P 的 pid 全集（纯查询，不做任何排除）
 function Get-ListenerPids([int]$P) {
   return @(netstat -ano | Select-String (':{0}\s.*LISTENING' -f $P) |
-    ForEach-Object { ($_.Line -split '\s+')[-1] } | Sort-Object -Unique |
-    Where-Object { $_ -match '^\d+$' -and [int]$_ -ne $HostPid })
+    ForEach-Object { ($_.Line -split '\s+')[-1] } |
+    Where-Object { $_ -match '^\d+$' } | ForEach-Object { [int]$_ } | Sort-Object -Unique)
+}
+
+# ── 宿主保护：按端口**现查**宿主 pid ──────────────────────────────────
+# 为什么不写常数：宿主重启后写死的 pid 会指向**别的进程**或不存在，保护于是**静默失效**
+#   （本轮修的就是这个 —— 旧默认值 34216 早已不是宿主）。
+# 为什么 fail-safe：查不到时**绝不退回猜一个数**。宁可不杀，也不误杀主实例。
+# 为什么要把 fail-safe 喊出来：静默的 fail-safe 与静默的保护失效一样危险（活跃坑 18），
+#   所以这里记 flag，前置与收尾都显式打印，收尾的「端口仍被占用」判定会接着报警。
+$script:HostPids = @(Get-ListenerPids $HostPort)
+$script:HostPidResolved = $script:HostPids.Count -gt 0
+
+# 收尾清扫谁：只杀**监听 $Port 且不在宿主 pid 集里**的进程。
+# 宿主 pid 查不到 → 返回空集 = **一个 pid 都不杀**（台子可能残留，端口判定会报红）。
+function Get-SweepPids([int]$P) {
+  if (-not $script:HostPidResolved) { return @() }
+  return @(Get-ListenerPids $P | Where-Object { $script:HostPids -notcontains $_ })
 }
 
 # 把 UTF-8 无 BOM 写回文件（profile 的 JSON / YAML 都是 UTF-8 无 BOM）
@@ -141,8 +160,16 @@ function Set-PluginEnabled([bool]$Enabled) {
 # ── 前置 ─────────────────────────────────────────────────────────────
 Step '前置检查'
 if ($Port -eq 3080) { throw '拒绝在 3080 上起台子：那是本会话宿主的端口' }
+if ($Port -eq $HostPort) { throw "拒绝在宿主端口 $HostPort 上起台子（-Port 与 -HostPort 必须不同）" }
 if (Test-PortListening $Port) { throw "端口 $Port 已被占用，换一个 -Port" }
 Ok "端口 $Port 空闲"
+if ($script:HostPidResolved) {
+  Ok "宿主保护：端口 $HostPort 上现查到 pid $($script:HostPids -join ',')（收尾按 pid 排除，绝不发信号）"
+}
+else {
+  Note "宿主保护：端口 $HostPort 现查为空 → 宿主 pid 未知"
+  Write-Warning "端口 $HostPort 上查不到监听进程 → 宿主 pid 未知。本轮 fail-safe：收尾**不按 pid 杀任何进程**；自己的台子若没释放，末尾的端口判定会报红。"
+}
 if (-not (Test-Path $MarkerSkill)) {
   throw "缺少同名 MARKER 技能：$MarkerSkill（没有它就没有「争」的对手，L-b 无从判定）"
 }
@@ -281,14 +308,20 @@ catch {
 finally {
   # ── 自还原（失败路径也走）──────────────────────────────────────────
   Step '收尾：还原 bench 三处 + 释放端口'
+  if ($script:HostPidResolved) {
+    Note "宿主 pid（端口 $HostPort 现查）= $($script:HostPids -join ',')；只杀监听 $Port 且不等于它的进程"
+  }
+  else {
+    Note "宿主 pid 未知（端口 $HostPort 现查为空）→ fail-safe：不按 pid 杀任何进程"
+  }
   if ($null -ne $BootProcess) {
-    foreach ($p in (Get-ListenerPids $Port)) {
+    foreach ($p in (Get-SweepPids $Port)) {
       Stop-Process -Id $p -Force -ErrorAction SilentlyContinue
       Note "已终止实例 pid $p"
     }
     Stop-Process -Id $BootProcess.Id -Force -ErrorAction SilentlyContinue
   }
-  foreach ($p in (Get-ListenerPids $Port)) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue }
+  foreach ($p in (Get-SweepPids $Port)) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue }
   Start-Sleep -Seconds 2
 
   if ($null -ne $OrigPatch) { Write-Utf8NoBom $ProfilePatch $OrigPatch; Note 'cordis.patch.yml 已还原为原件' }
