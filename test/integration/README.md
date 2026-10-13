@@ -104,7 +104,8 @@ dsh: warning: 1 entry did not activate / <name> (<name>): failed to import      
 - 判定**不硬编码行下标**：脚本从 `x-cordis.entries` 里按 `id=dsh-plugin-debugging` 取该行的 `path` 再比对 error，preset 数量漂移不会让它假绿/假红。
 - `pluginInventory/list` 的 payload **必须是 `{args:{}}`**（否则报 `Remote payload must contain exactly one plain-object args field`）；token 在启动打印的 URL 里，用它换一次页面即可拿到 `dsh-auth-*` cookie。
 - 台子目录在工作区 `.gitignore` 的 `/.local/` 之下，**不进任何仓库历史**；脚本从不删目录，原始输出留在 `<bench>\logs\`。
-- **别碰宿主**：宿主监听 **3080**。跑之前**按端口现查**它的 pid
-  （`netstat -ano | Select-String ':3080\s.*LISTENING'`），杀进程前确认目标不是它。
-  ⚠️ **两个脚本里还写着旧的宿主 pid 常数**（`leak-fix.ps1` 的 `-HostPid` 默认值、`bench-s1.ps1` 的内联判断）——
-  **那个数会漂，别信它**（宿主重启过多次），按上面现查；这处待修见 [AGENTS.md](../../AGENTS.md) 的「待办」。
+- **别碰宿主**：宿主监听 **3080**。两个脚本都**按 `-HostPort`（默认 3080）现查**它的 pid
+  （`netstat -ano | Select-String ':3080\s.*LISTENING'`），收尾清扫时把它排除在外。
+  **绝不写常数**：宿主重启过多次，写死的 pid 会指向别的进程，保护就会**静默失效**。
+  **查不到宿主 pid 时是 fail-safe**：`Get-SweepPids` 返回空集 = **一个 pid 都不杀**（宁可留下自己的台子，
+  也不误杀主实例；代价是末尾的「端口仍被占用」会报红，不会静默过去）。
