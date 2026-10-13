@@ -25,6 +25,7 @@ import {
   packageRootOf,
   parseReloadTarget,
   restoreCache,
+  reloadHostFrom,
   kindForReason,
   outcomeToToolResult,
   type ClosurePort,
@@ -77,22 +78,35 @@ function makeEntry(overrides: Partial<ReloadEntryPort> = {}): {
   return { entry, calls }
 }
 
-/** 造一个可控的缓存端口。 */
+/**
+ * 造一个可控的缓存端口。
+ *
+ * `failWrite` 为真时 `write` 返回 `false` —— 用来钉住「放回缓存失败也要如实说」
+ * 并且**不许**把 import 的真原因盖掉。
+ */
 function makeCache(
   children: Record<string, string[]> = { [ENTRY_URL]: [DEP_URL] },
   seeded: string[] = [ENTRY_URL, DEP_URL],
+  options: { failWrite?: boolean } = {},
 ): { port: ClosurePort; calls: string[]; has: (url: string) => boolean } {
+  // 槽的形状照真机：`{ javascript: job }`（不是裸 job）。
   const store = new Map<string, unknown>()
-  for (const url of seeded) store.set(url, { slot: url })
+  for (const url of seeded) store.set(url, { javascript: `job:${url}` })
   const calls: string[] = []
   const port: ClosurePort = {
-    get: (url) => store.get(url),
-    set: (url, value) => {
-      calls.push(`set:${url}`)
-      store.set(url, value)
+    read: (url) => {
+      const slot = store.get(url)
+      if (slot === undefined || slot === null || typeof slot !== 'object') return []
+      return Object.values(slot as Record<string, unknown>)
     },
-    delete: (url) => {
-      calls.push(`delete:${url}`)
+    write: (url, job) => {
+      calls.push(`write:${url}`)
+      if (options.failWrite === true) return false
+      store.set(url, { javascript: job })
+      return true
+    },
+    clear: (url) => {
+      calls.push(`clear:${url}`)
       store.delete(url)
     },
     children: async (url) => children[url] ?? [],
@@ -254,10 +268,72 @@ describe('lib/hot-reload · 闭包与缓存', () => {
     const backup = backupAndClear(cache.port, [ENTRY_URL, DEP_URL])
     expect(backup.entries).toHaveLength(1)
     expect(cache.has(ENTRY_URL)).toBe(false)
-    restoreCache(cache.port, backup)
+    expect(restoreCache(cache.port, backup)).toBe(true)
     expect(cache.has(ENTRY_URL)).toBe(true)
   })
+
+  it('放回缓存失败时返回 false（不谎报成功，也不抛）', () => {
+    const cache = makeCache({}, [ENTRY_URL], { failWrite: true })
+    const backup = backupAndClear(cache.port, [ENTRY_URL])
+    expect(restoreCache(cache.port, backup)).toBe(false)
+  })
 })
+
+/**
+ * 真机 `LoadCache` 的替身 —— **本轮真机红的回归位**。
+ *
+ * 逐字照 node 24.18.0 `internal/modules/esm/loader` → `LoadCache` 的实测行为：
+ * `get(url, type)` / `set(url, type, job)` / `delete(url, type)` 的**第二个参数都是 `type`，
+ * 且必须是字符串**（非字符串 → 抛 `The "type" argument must be of type string`）。
+ *
+ * 有了它，「把 job 当成 type 传进去」这种错法在本机单测里**当场红**，
+ * 而不是等到真机上表现为一条 `internal`。
+ */
+function makeRealisticLoadCache(seeded: string[] = [ENTRY_URL]): {
+  loadCache: Record<string, unknown>
+  has: (url: string) => boolean
+} {
+  const slots = new Map<string, Record<string, unknown>>()
+  for (const url of seeded) slots.set(url, { __proto__: null, javascript: { job: url } })
+
+  const validateString = (value: unknown, name: string): void => {
+    if (typeof value !== 'string') {
+      throw new TypeError(
+        `The "${name}" argument must be of type string. Received an instance of ${
+          (value as { constructor?: { name?: string } })?.constructor?.name ?? typeof value
+        }`,
+      )
+    }
+  }
+
+  return {
+    has: (url) => slots.get(url)?.['javascript'] !== undefined,
+    loadCache: {
+      get(url: string, type = 'javascript') {
+        validateString(url, 'url')
+        validateString(type, 'type')
+        return slots.get(url)?.[type]
+      },
+      set(url: string, type = 'javascript', job?: unknown) {
+        validateString(url, 'url')
+        validateString(type, 'type')
+        slots.set(url, { ...(slots.get(url) ?? {}), [type]: job })
+        return this
+      },
+      delete(url: string, type = 'javascript') {
+        validateString(url, 'url')
+        validateString(type, 'type')
+        const slot = slots.get(url)
+        if (slot !== undefined) slot[type] = undefined
+      },
+      has(url: string, type = 'javascript') {
+        validateString(url, 'url')
+        validateString(type, 'type')
+        return slots.get(url)?.[type] !== undefined
+      },
+    },
+  }
+}
 
 describe('lib/hot-reload · 8 步算法', () => {
   it('成功：清缓存 → import → dispose 旧 → 挂新的（顺序即判据）', async () => {
@@ -313,7 +389,9 @@ describe('lib/hot-reload · 8 步算法', () => {
     expect(outcome.ok).toBe(false)
     if (!outcome.ok) {
       expect(outcome.failure.reason).toBe('import-failed')
-      expect(outcome.failure.message).toContain('never touched')
+      // message 带**真实原因**（那个 import 抛的错），不是 Node 内部文案。
+      expect(outcome.failure.message).toContain('boom at import time')
+      expect(outcome.failure.hint).toContain('never touched')
       expect(outcome.data?.oldFiberTouched).toBe(false)
       expect(outcome.data?.rolledBack).toBe(false)
     }
@@ -323,6 +401,31 @@ describe('lib/hot-reload · 8 步算法', () => {
     expect(clearedDuringImport).toBe(true)
     expect(cache.has(ENTRY_URL)).toBe(true)
     expect(cache.has(DEP_URL)).toBe(true)
+  })
+
+  it('放回缓存失败也不许盖掉 import 的真原因，且 hint 点明缓存没放回', async () => {
+    const { entry, calls } = makeEntry()
+    const cache = makeCache({}, [ENTRY_URL, DEP_URL], { failWrite: true })
+    const host = makeHost({
+      entries: [entry],
+      cache: cache.port,
+      importFresh: async () => {
+        throw new Error('SyntaxError: unexpected token on disk')
+      },
+    })
+
+    const outcome = await runReload(host)
+
+    expect(outcome.ok).toBe(false)
+    if (!outcome.ok) {
+      // 原因仍然是 import 那个错（真机上就是它被 Node 内部文案顶掉了）。
+      expect(outcome.failure.reason).toBe('import-failed')
+      expect(outcome.failure.message).toContain('unexpected token on disk')
+      expect(outcome.failure.hint).toContain('never touched')
+      // 但缓存没放回这件事也要说出来。
+      expect(outcome.failure.hint).toContain('cache')
+    }
+    expect(calls).toEqual([])
   })
 
   it('apply 期失败：回滚被调用，旧版本被**重新实例化**', async () => {
@@ -635,7 +738,9 @@ describe('dsh_hot_reload · 工具层', () => {
 
     const error = expectFail(await run(tool, { entryId: 'pkg-a' }))
     expect(error.kind).toBe('reload-failed')
-    expect(error.message).toContain('never touched')
+    // message 带**真实原因**；「旧 fiber 从未被碰」在 hint 里（契约的 ToolFail 没有 data）。
+    expect(error.message).toContain('syntax error on disk')
+    expect(error.hint).toContain('never touched')
     expect(calls).toEqual([])
   })
 
@@ -724,5 +829,136 @@ describe('lib/hot-reload · 纯助手', () => {
   it('bareId 去掉第一个冒号前的分组前缀', () => {
     expect(bareId('include:x')).toBe('x')
     expect(bareId('plain')).toBe('plain')
+  })
+})
+
+/**
+ * **本轮真机红的回归位。**
+ *
+ * 这里跑的是**真适配层**（`reloadHostFrom`）对着**真形状的 `LoadCache`**（`makeRealisticLoadCache`），
+ * 不是注入替身。它复现真机那条路径：import 期失败 → 放回缓存 → 旧实现把 job 当 `type` 传 → 抛
+ * `The "type" argument must be of type string` → 整个失败被顶成 `internal`。
+ */
+describe('lib/hot-reload · 真机 LoadCache 形状（回归）', () => {
+  /** 造一个最小的宿主 ctx：loader 服务 + 一条 entry。 */
+  function makeCtx(
+    cache: Record<string, unknown>,
+    options: { importThrows?: Error } = {},
+  ): Record<string, unknown> {
+    const loader = {
+      internal: { import: () => undefined, loadCache: cache },
+      entries: () => [
+        {
+          options: { id: 'reloadable-bench', name: ENTRY_URL },
+          disabled: false,
+          fiber: {
+            state: 2,
+            inject: {},
+            ctx: { get: () => undefined },
+            runtime: { callback: () => undefined, fibers: [] },
+          },
+        },
+      ],
+      async import() {
+        if (options.importThrows !== undefined) throw options.importThrows
+        return { plugin: 'fresh' }
+      },
+      unwrapExports: (value: unknown) => value,
+    }
+    return { get: (name: string) => (name === 'loader' ? loader : undefined) }
+  }
+
+  it('import 期失败：kind 是 **reload-failed**（不是 internal），message 带真原因，hint 含 never touched', async () => {
+    const { loadCache } = makeRealisticLoadCache()
+    const ctx = makeCtx(loadCache, {
+      importThrows: new Error('SyntaxError: Unexpected token on disk'),
+    })
+
+    const outcome = await hotReload(
+      reloadHostFrom(ctx),
+      { kind: 'entryId', value: 'reloadable-bench' },
+      { dryRun: false, expired: () => false },
+    )
+
+    expect(outcome.ok).toBe(false)
+    if (!outcome.ok) {
+      expect(outcome.failure.reason).toBe('import-failed')
+      expect(outcome.failure.message).toContain('Unexpected token on disk')
+      expect(outcome.failure.hint).toContain('never touched')
+      // **这一条正是真机红的核心**：绝不能再把 Node 内部文案当原因。
+      expect(outcome.failure.message).not.toContain('must be of type string')
+    }
+    const result = outcomeToToolResult(outcome)
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.error.kind).toBe('reload-failed')
+      expect(result.error.kind).not.toBe('internal')
+    }
+  })
+
+  it('工具层同样：真机失败签名不再出现 internal', async () => {
+    const dshHome = await tempDshHome()
+    const { loadCache } = makeRealisticLoadCache()
+    const ctx = makeCtx(loadCache, { importThrows: new Error('boom from disk') })
+    const tool = createHotReloadTool({
+      ...depsFor(configFor(dshHome)),
+      reload: reloadHostFrom(ctx),
+    })
+
+    const error = expectFail(await run(tool, { entryId: 'reloadable-bench' }))
+    expect(error.kind).toBe('reload-failed')
+    expect(error.message).toContain('boom from disk')
+    expect(error.hint).toContain('never touched')
+    expect(error.message).not.toContain('must be of type string')
+    expect(TOOL_ERROR_KINDS).toContain(error.kind)
+  })
+
+  it('`include:<id>` 能匹配（诊断的输出必须能直接喂回重载）', async () => {
+    const { loadCache } = makeRealisticLoadCache()
+    const ctx = makeCtx(loadCache, { importThrows: new Error('boom from disk') })
+
+    const outcome = await hotReload(
+      reloadHostFrom(ctx),
+      // 逐字用 dsh_diagnose_plugin_load 报出来的那种形态。
+      { kind: 'entryId', value: 'include:reloadable-bench' },
+      { dryRun: false, expired: () => false },
+    )
+
+    // 匹配**成功**了（否则会是 no-match），只是 import 失败。
+    expect(outcome.ok).toBe(false)
+    if (!outcome.ok) {
+      expect(outcome.failure.reason).toBe('import-failed')
+      expect(outcome.failure.reason).not.toBe('no-match')
+    }
+    expect(outcome.data?.entry?.entryId).toBe('reloadable-bench')
+  })
+
+  it('解析层：include: 前缀被剥掉，而 URL 形态不被误剥', () => {
+    expect(parseReloadTarget({ entryId: 'include:reloadable-bench' }).target).toEqual({
+      kind: 'entryId',
+      value: 'reloadable-bench',
+    })
+    // URL 的第一个冒号在 scheme 里 —— 剥了就成了垃圾。
+    expect(parseReloadTarget({ entryId: ENTRY_URL }).target).toEqual({
+      kind: 'entryId',
+      value: ENTRY_URL,
+    })
+    // module / serverName 不剥（它们本来就不带分组前缀）。
+    expect(parseReloadTarget({ module: 'include:x' }).target?.value).toBe('include:x')
+  })
+
+  it('成功路径：缓存能真的放回（write 用对了 type），不抛', async () => {
+    const { loadCache, has } = makeRealisticLoadCache()
+    const ctx = makeCtx(loadCache)
+
+    const outcome = await hotReload(
+      reloadHostFrom(ctx),
+      { kind: 'entryId', value: 'reloadable-bench' },
+      { dryRun: true, expired: () => false },
+    )
+
+    // dryRun 不该动缓存。
+    expect(has(ENTRY_URL)).toBe(true)
+    expect(outcome.ok).toBe(true)
   })
 })
