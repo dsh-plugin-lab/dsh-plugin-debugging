@@ -164,7 +164,7 @@ src/
 | `dsh_check_effect_mode` | 「热生效」的前提是 profile 里真的挂了 `hmr`。**关键机制：loader 重读配置的能力一直都在，缺的是触发者 —— watch patch 文件的正是 hmr**（`…\dsh-hmr\lib\index.js:718` 的 `watchConfig` 遍历的就是 patch 文件）。无 hmr 时改 config 文件**没有任何东西去重读它**（实测：同一进程 70 秒 / 21 个采样点一直读到旧值、实例 stderr 为空；重启后立刻生效），所以一切「热生效」都降级成 `restart-required`。工具把这件事作为**契约字段**直接给出（`hmr` 取 `present` / `absent`），不让模型从 `why` 反推 |
 | `dsh_diagnose_plugin_load` | 三处外部证据（`bundles` / 安装形态 / 进程）**只证前置条件，不证加载成功**；Fiber 级状态没有查询入口；`Config.listConfigs` 的 `inactive` 混合「禁用 / 未导入 / 已销毁」三义，**从不报 FAILED**。启动失败的硬证据只在 `$DSH_HOME/logs/startup-*.log`，且**只在启动失败时生成** |
 | `dsh_check_auth` | `401` = 服务活着、认证没过；连接被拒 = 没启动。cookie 绑定 authority（`host:port`，`localhost` 与 `127.0.0.1` 不通用），签名密钥落盘、launch token 不落盘 —— 所以「同端口重启旧标签页照常可用、换端口才 401」 |
-| `dsh_dump_config` | `--dump-config` 退出码**恒 0**，不能当门禁；`--dump-config-schema` 退出码 **1 = 有 error**；`preset-*` 行的 `unrecognized Loader tree carrier` 是已知误报，判定看 error 的 `path` 是否指向你改过的行 |
+| `dsh_dump_config` | `--dump-config` 退出码**恒 0**，不能当门禁；`--dump-config-schema` 退出码 **1 = 有 error**；`preset-*` 行的 `unrecognized Loader tree carrier` 是已知误报，判定看 error 的 `path` 是否指向你改过的行。**`actionable` 里的字段是宿主按需带的**（真机实测：patch `name` 不匹配时条目**只有 `path`**；`insert` 一个不存在的包时 **`entryId` 与 `path` 都有**）—— 工具**原样透传、不自己造**，hint 里那句「check entryId / path」对两种形状都成立 |
 | `dsh_hot_reload`（v1.1，**写侧**） | 就地换一个 entry 的代码，不重启。**顺序是判据**：定位 entry → 备份本地模块闭包 → 只清那批缓存 → **先 `import` 成功** → **再** dispose 旧 fiber → 挂载新的。import 期失败时**旧 fiber 从未被碰**（实测：步骤里根本没有 `dispose-old`）；apply 期失败则从备份回滚（旧版本被真的重新实例化）。匹配 entry 要**两个字段都试 + URL 归一**（`entry.id` 实际是 `include:<id>`、`options.name` 是 `file://` URL，只比 id 会得到假阴性）。**它测不到的**：插件在 cordis 之外开的资源（定时器 / socket / `process.on` / 文件句柄 / worker）不会被追踪，会**静默泄漏** |
 
 ## 6. 配置
