@@ -415,6 +415,10 @@ function asAudit(value: unknown): JsonValue {
  * @param key 本次的 `key`。
  */
 function keyText(key: CheckAuthKey): string[] {
+  // 渲染层**绝不抛**（`render.ts` §3.1）：`ensureToolResult` 合成的兜底里 `data.key` 是 `{}`
+  // （`lib/errors.ts` 的 `malformedResult`），字段可能整块缺席。`key` 本身不是对象时
+  // 也要有输出 —— **不许静默返回空数组**：那会把「结果被守卫换掉了」这件事藏起来。
+  if (!key || typeof key !== 'object') return [GUARD_FALLBACK_LINE]
   const lines: string[] = [resolvedLine(key.resolved)]
   if (key.authority !== undefined) lines.push(`authority: ${key.authority}`)
   if (key.probe !== undefined) lines.push(probeLine(key.probe))
@@ -423,14 +427,32 @@ function keyText(key: CheckAuthKey): string[] {
 }
 
 /**
+ * 兜底行：`ensureToolResult` 合成的结果里 `key` 是 `{}`。
+ *
+ * 为什么**必须**印出来而不是省略整行：这条路径只在「工具自己返回了坏形状」时才走到 ——
+ * 那一刻模型最该知道的事实正是「这个结果是守卫合成的，里面的字段都不可信」。
+ * 省略这一行会让兜底**静默**（看起来像一次正常的空结果）。
+ */
+const GUARD_FALLBACK_LINE = 'resolved: unknown (the guard synthesized this result)'
+
+/**
  * `resolved:` 那一行（与 `dsh_diagnose_plugin_load` 同格式：模型在两个工具之间读的是同一张脸）。
  *
- * @param resolved 生效配置块。
+ * 字段一律按 `typeof` 防御取值：兜底合成的 `key` 里整块 `resolved` 都不在，
+ * 直接取字段会当场抛（这正是本工具过去在兜底路径上崩掉的原因）。
+ *
+ * @param resolved 生效配置块（可能是兜底合成的 `undefined`）。
  */
-function resolvedLine(resolved: EffectiveConfigBlock): string {
+function resolvedLine(resolved: EffectiveConfigBlock | undefined): string {
+  if (!resolved || typeof resolved !== 'object') return GUARD_FALLBACK_LINE
+  const profile = typeof resolved.profile === 'string' ? resolved.profile : 'unknown'
+  const dshHome = typeof resolved.dshHome === 'string' ? resolved.dshHome : 'unknown'
+  const source = typeof resolved.dshHomeSource === 'string' ? resolved.dshHomeSource : 'unknown'
   const port =
-    resolved.port === null ? '' : ` port=${String(resolved.port)} (${String(resolved.portSource)})`
-  return `resolved: profile=${resolved.profile} dshHome=${resolved.dshHome} (${resolved.dshHomeSource})${port}`
+    typeof resolved.port !== 'number'
+      ? ''
+      : ` port=${String(resolved.port)} (${typeof resolved.portSource === 'string' ? resolved.portSource : 'unknown'})`
+  return `resolved: profile=${profile} dshHome=${dshHome} (${source})${port}`
 }
 
 /**

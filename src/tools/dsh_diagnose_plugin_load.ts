@@ -877,6 +877,10 @@ function toStartupLogsKey(startup: StartupLogsResult): StartupLogsKey {
  * @param key 本次的 `key`。
  */
 function keyText(key: DiagnoseKey): string[] {
+  // 渲染层**绝不抛**（`render.ts` §3.1）：`ensureToolResult` 合成的兜底里 `data.key` 是 `{}`
+  // （`lib/errors.ts` 的 `malformedResult`），数组字段可能整块缺席 —— `for…of undefined`
+  // 会当场抛。`key` 本身不是对象时也要有输出，**不许静默返回空数组**。
+  if (!key || typeof key !== 'object') return [GUARD_FALLBACK_LINE]
   const lines: string[] = [resolvedLine(key.resolved)]
   const observation = key.observation
   if (observation !== undefined) {
@@ -889,7 +893,12 @@ function keyText(key: DiagnoseKey): string[] {
       lines.push(`phases: ${histogramText(observation.phaseHistogram)}`)
     }
   }
-  for (const item of key.packages) lines.push(packageLine(item))
+  // 「缺席」与「空列表」不是一回事：兜底路径上不许把「不知道」印成「一个包都没有」。
+  if (!Array.isArray(key.packages)) {
+    lines.push('packages: unknown (the guard synthesized this result)')
+  } else {
+    for (const item of key.packages) lines.push(packageLine(item))
+  }
   const startup = key.startupLogs
   if (startup !== undefined) {
     if (startup.state === 'unknown') {
@@ -910,17 +919,33 @@ function keyText(key: DiagnoseKey): string[] {
 }
 
 /**
+ * 兜底行：`ensureToolResult` 合成的结果里 `key` 是 `{}`。
+ *
+ * 为什么**必须**印出来而不是省略整行：这条路径只在「工具自己返回了坏形状」时才走到 ——
+ * 那一刻模型最该知道的事实正是「这个结果是守卫合成的，里面的字段都不可信」。
+ * 省略这一行会让兜底**静默**（看起来像一次正常的空结果）。
+ */
+const GUARD_FALLBACK_LINE = 'resolved: unknown (the guard synthesized this result)'
+
+/**
  * `resolved:` 那一行。
  *
- * @param resolved `key.resolved`。
+ * 字段按 `typeof` 防御取值：兜底合成的 `key` 里整块 `resolved` 都不在，
+ * 直接取字段会当场抛（这正是本工具过去在兜底路径上崩掉的原因）。
+ *
+ * @param resolved `key.resolved`（可能是兜底合成的 `undefined`）。
  */
-function resolvedLine(resolved: ResolvedKey): string {
+function resolvedLine(resolved: ResolvedKey | undefined): string {
+  if (!resolved || typeof resolved !== 'object') return GUARD_FALLBACK_LINE
+  const profile = typeof resolved.profile === 'string' ? resolved.profile : 'unknown'
+  const dshHome = typeof resolved.dshHome === 'string' ? resolved.dshHome : 'unknown'
+  const source = typeof resolved.dshHomeSource === 'string' ? resolved.dshHomeSource : 'unknown'
   const port =
-    resolved.port === undefined
+    typeof resolved.port !== 'number'
       ? ''
-      : ` port=${String(resolved.port)} (${String(resolved.portSource)})`
-  const dir = resolved.profileDir === undefined ? '' : ` dir=${resolved.profileDir}`
-  return `resolved: profile=${resolved.profile} dshHome=${resolved.dshHome} (${resolved.dshHomeSource})${port}${dir}`
+      : ` port=${String(resolved.port)} (${typeof resolved.portSource === 'string' ? resolved.portSource : 'unknown'})`
+  const dir = typeof resolved.profileDir === 'string' ? ` dir=${resolved.profileDir}` : ''
+  return `resolved: profile=${profile} dshHome=${dshHome} (${source})${port}${dir}`
 }
 
 /**

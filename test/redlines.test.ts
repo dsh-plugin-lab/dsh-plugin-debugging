@@ -3538,6 +3538,114 @@ describe('B24 execute 全路径不抛（契约的承载条件）', () => {
   })
 })
 
+// ── B25 守卫合成的兜底必须可渲染 ───────────────────────────────────────────
+
+/**
+ * 一个**形状非法**的候选返回值 —— 守卫必须把它换成自己合成的兜底。
+ *
+ * 为什么用「`data.verdict` 是空串」这一种：`toolResultProblem` 的判据里它最直接
+ * （`"data.verdict" must be a non-empty string`），不必构造复杂对象就能确定**会**被换掉。
+ * 换一种坏法（缺 `data` / `ok` 不是布尔）同样会被换掉，但判据只需要一条能自证的入口。
+ */
+const MALFORMED_CANDIDATE = { ok: true, data: { verdict: '', key: {}, audit: {} } }
+
+/**
+ * B25：**守卫合成的兜底必须可渲染**。
+ *
+ * ## 为什么这条值得单独存在（不是 B24 的重复）
+ *
+ * B24 管的是「`execute` 不抛」，判据落在**工具自己**的返回路径上。契约还有**最后一段**：
+ * 工具自己返回了坏形状时，`ensureToolResult` 会合成一个兜底 —— 那个兜底里 `key` 是 `{}`。
+ * 实测（2026-10-13 探针）：`dsh_check_auth` / `dsh_diagnose_plugin_load` / `dsh_dump_config`
+ * 的 `keyText` 直接取 `key.resolved.*`，**喂 `{}` 当场抛** —— 于是「任何一次形状非法 →
+ * 守卫兜底 → 渲染当场抛」，而 `render.ts` 的纪律是**渲染绝不抛**（§3.1）。
+ * 这条路径的崩溃**永远发生在「本来就已经出错」的时刻**：那一刻模型最需要的是结构化的失败，
+ * 而不是一句 `Cannot read properties of undefined`。
+ *
+ * ## 判据与下界
+ *
+ * 判据是**行为可判**的：拿守卫真合成的兜底，对五个工具各渲染一次，**不抛且走正常渲染路径**。
+ * ⚠️ 下界（§10.0 + 活跃坑 37）：必须先自证那个值**真的是兜底** ——
+ * ① 兜底 `!==` 输入（输入被换掉了）；② `ensureToolResult(兜底) === 兜底`（幂等 = 它自己过了守卫）；
+ * ③ `兜底.data.key` 真的是 `{}`。少了这三条，「渲染一个正常值当然不抛」是**恒真**的。
+ *
+ * ⚠️ **空转判红、不许 skip**：五个工具一个都不能漏，按 `EXPECTED_TOOLS` 逐个点名。
+ *
+ * ## 这条**不**断言什么（写清楚，防下一个人误读）
+ *
+ * - **不断言「守卫必须生效」**：那是断言实现结构（脆）。这里断言的是「兜底可渲染」——
+ *   它正是真实会崩的那条路，且行为可判。
+ * - **不断言五个工具的降级措辞一致**：`effect_mode` / `hot_reload` 的 `keyText` 本来就是
+ *   防御式的，兜底时一个印 `resolved: profile=unknown …`、一个干脆不印 L2 行 —— 两种都
+ *   **不抛**。三个被修的工具印 `resolved: unknown (the guard synthesized this result)`，
+ *   那句逐字断言住在**它们各自的测试**里（B25 只要求「不抛 + 走正常渲染路径」）。
+ */
+describe('B25 守卫合成的兜底必须可渲染', () => {
+  it('五个工具各渲染一次兜底：不抛、走正常渲染路径、一个都不许漏', () => {
+    const fallback = ensureToolResult(MALFORMED_CANDIDATE)
+
+    // ── 下界：自证这**真的是**兜底（§10.0 + 活跃坑 37）────────────────────────
+    expect(fallback, '守卫没换掉这个值 —— 下面渲染的不是兜底，判据会恒真').not.toBe(
+      MALFORMED_CANDIDATE,
+    )
+    expect(ensureToolResult(fallback), '兜底自己没过守卫 —— 渲染的可能是个坏形状').toBe(fallback)
+    expect((fallback as { ok: unknown }).ok, '兜底应当是结构化失败').toBe(false)
+    const fallbackKey = (fallback as { data: { key: unknown } }).data.key
+    expect(fallbackKey, '兜底的 key 不是 {} —— 夹具没打到守卫合成的那条路').toEqual({})
+
+    const offenders: string[] = []
+    const trace: string[] = []
+    const shapes = toolShapes()
+
+    // 空转判红：五个工具一个都不能漏（漏一个 = 漏一条真实会崩的路）。
+    const expected = [...EXPECTED_TOOLS].sort()
+    const actual = shapes.map((shape) => shape.name).sort()
+    if (actual.join(',') !== expected.join(',')) {
+      offenders.push(
+        `夹具覆盖的工具是 ${actual.join(', ')}，期望闭集 ${expected.join(', ')} —— 这条红线在空转`,
+      )
+    }
+
+    for (const shape of shapes) {
+      let text: string | undefined
+      let threw: string | undefined
+      try {
+        text = renderViaTool(shape.tool, {}, fallback)
+      } catch (error) {
+        threw = error instanceof Error ? error.message : String(error)
+      }
+      trace.push(
+        `${shape.name}: ${
+          threw === undefined ? `ok (${String(text?.length ?? 0)} chars)` : `THREW ${threw}`
+        }`,
+      )
+      if (threw !== undefined) {
+        offenders.push(
+          `${shape.name}: 渲染守卫合成的兜底时**抛了**（${threw}）—— 「渲染绝不抛」失效`,
+        )
+        continue
+      }
+      if (text === undefined || text.trim() === '') {
+        offenders.push(`${shape.name}: 兜底渲染出空文本 —— 兜底被静默吞掉了`)
+        continue
+      }
+      // 「走正常渲染路径」的下界：形状不合法时 `renderToolResultText` 会退化成**一行**原始 JSON
+      // （§3.1 规则 4），那一行里没有 `verdict: `。所以它在不在，正好区分
+      // 「兜底被当成合法结果渲染」与「兜底其实也没过渲染层的形状判据」。
+      if (!text.includes('verdict: ')) {
+        offenders.push(
+          `${shape.name}: 兜底走的是退化成一行 JSON 的那条路（没有 \`verdict:\` 行）—— 它没被当成合法结果`,
+        )
+      }
+    }
+
+    expect(
+      offenders,
+      `B25 违规：\n${offenders.join('\n')}\n实测轨迹：\n${trace.join('\n')}`,
+    ).toEqual([])
+  })
+})
+
 /**
  * # 本文件的已知限度
  *
@@ -3578,7 +3686,9 @@ describe('B24 execute 全路径不抛（契约的承载条件）', () => {
  * | 28 | B24 的六个注入组 | 每组自带 `calls()` 计数；`diagnose × spawn` **显式钉 `win32`** | 替身调用 0 次 → **判红**（不是 skip）；`diagnose × spawn` 在别的平台本来就不起子进程，所以必须钉平台（否则 CI 上空转） |
  * | 29 | 本文件的 `withPlatformRedline` 与 `test/tools/helpers.ts` 的 `withPlatform` **重复** | 那是本仓已知的测试助手重复（见 AGENTS「技术债：收敛重复的测试助手」） | 收敛那笔债时**连它一起收**；两份实现的语义必须一致（`finally` 里按属性描述符还原） |
  * | 30 | B18a 的**可观测前提**：`toOutput()` 里的 `ensureToolResult` 守卫**在渲染之前**就把「没有动作的 nextStep」换掉了 | 这是 `src/tools/shared.ts` 的现行实现；判据能红，正是因为**红线读的是 `execute` 的返回值、不是渲染文本** | 守卫一旦被挪到渲染之后（或 `toOutput` 被绕过），**B18a 会假绿**：`ensureToolResult` 合成的兜底 `nextStep` 是 `undefined`（缺省 = 合法），坏形状在到达本红线前就消失了。**已用变异实测**：只改工具写法 → 85 全绿（假绿）；**同时旁路守卫 → B18a 红**（另一条 M4 证据） |
- * | 31 | 上一条的连带：`ensureToolResult` 合成的兜底 `key` 是 `{}`，而 `dsh_check_auth` / `dsh_diagnose_plugin_load` / `dsh_dump_config` 的 `keyText` **会崩**在它上面（`resolvedLine(undefined)`） | 三条 `keyText` 都假定 `key.resolved` 在；`effect_mode` / `hot_reload` 的写法是防御式的（`typeof … === 'string' ? … : 'unknown'`） | **这是已实测的工具侧缺陷**（探针：`ensureToolResult({ok:true})` 的 `key={}` 喂五个 render 表 → 3 抛 / 2 过）。**本文件不断言它**（它属 B21/B24 的邻域，修不修由维护者定）；**只报不改** |
+ * | 31 | B25 的「兜底可渲染」：`ensureToolResult` 合成的兜底 `key` 是 `{}`，而 `dsh_check_auth` / `dsh_diagnose_plugin_load` / `dsh_dump_config` 的 `keyText` 曾**会崩**在它上面（`resolvedLine(undefined)`） | 三条 `keyText` 现在都按 `typeof … === 'string' ? … : 'unknown'` 防御取值；`effect_mode` / `hot_reload` 的写法本来就是防御式的 | **这是已实测的工具侧缺陷**（2026-10-13 探针：`ensureToolResult({ok:true})` 的 `key={}` 喂五个 render 表 → 3 抛 / 2 过）。**已修，由 B25 守着**：变异（把三处防御改回直接取值）→ B25 **红**；还原 → 绿 |
+ * | 32 | B25 只断言「**不抛** + 走正常渲染路径（有 `verdict: ` 行）+ 输出非空」，**不断言降级措辞** | 三个被修工具的降级句 `resolved: unknown (the guard synthesized this result)` 的逐字断言住在**它们各自的测试**里 | 有人把降级句改成别的诚实措辞（仍不抛）→ B25 **仍绿**（**有意**：那条措辞是各工具自己的契约，不是全局契约）；反之，谁把某个 `keyText` 改回直接取值 → **B25 红**（响亮，不是假绿） |
+ * | 33 | B25 的兜底夹具只有**一种**坏法（`data.verdict` 是空串） | `ensureToolResult` 对任何 `toolResultProblem` 非 `undefined` 的值都走**同一个** `malformedResult` | 换一种坏法（缺 `data` / `ok` 不是布尔）走的是同一条合成路径 → 判据等价；但若将来给不同坏法**分叉**出不同的兜底形状，这条只覆盖其中一支 |
  *
  * **B10 已知未覆盖的写入通道**（明确列出，不静默排除）：
  * `process.binding`、原生 addon、`require()`（本仓纯 ESM）、把 fs 方法先赋给别的变量再调用
