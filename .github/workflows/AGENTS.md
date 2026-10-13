@@ -11,4 +11,5 @@ workflows/ 特有约束：
 - 发布走 npm 信任发布（现签代币、用完即废），仓库里不存任何长期凭据；改认证方式要先想清楚要不要引回一把长期密钥。
 - 权限取最小集；runner 的选择有时是**正确性**要求而不是偏好（路径分隔符会让某些动作在 Windows runner 上静默产出空结果）。
 - 唯一 required check 是日常 CI 的结论；发布态检查在 publish 之前跑。
-- 不写「有哪些 workflow / 各自跑什么」，那是 [README.md](README.md) 的职责。
+- **发版流程、发之前要核什么、出错了怎么办** → [../../docs/PUBLISHING.md](../../docs/PUBLISHING.md)（那是它的 home，别在这里复述）。
+- 不写「有哪些 workflow / 各自跑什么」—— 那是配置文件自述的事，改配置时读配置本身。

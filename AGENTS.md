@@ -6,7 +6,8 @@
 
 - 版本以 [package.json](package.json) 的 `version` 为准
 - **已发布到 npm**（当前版本见 [package.json](package.json)；`latest` 与 dist-tags 以 registry 为准）。**`0.2.0` 是第一个由 `release.yml` 发出的版本**（带 provenance）；`0.1.0` 是手动发的、**没有** provenance。SLSA 徽章的真实性判据写在 [README.md](README.md) 的徽章注释里（对**具体版本**查 attestations 端点）。版本线与判例见 [docs/PUBLISHING.md](docs/PUBLISHING.md)
-- **能力面 = 1 个技能 + 5 个工具**：4 个只读（`dsh_check_effect_mode` / `dsh_diagnose_plugin_load` / `dsh_check_auth` / `dsh_dump_config`）+ **1 个写侧** `dsh_hot_reload`（已实现、已真机验证；算法与关键语义见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §5）。**目标形态与后续工具的归属见 [docs/SHAPE.md](docs/SHAPE.md)**（`dsh_restart` 有意推迟，排在最后）
+- **能力面 = 1 个技能 + 6 个工具**：4 个只读（`dsh_check_effect_mode` / `dsh_diagnose_plugin_load` / `dsh_check_auth` / `dsh_dump_config`）、**1 个写侧** `dsh_hot_reload`（已实现、已真机验证；算法与关键语义见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §5）、**1 个派生** `dsh_sign_cookie`（唯一会经手秘密的工具，**cookie 值刻意不进返回值**）。**目标形态与后续工具的归属见 [docs/SHAPE.md](docs/SHAPE.md)**（`dsh_restart` 有意推迟，排在最后）
+  —— 工具清单以 [src/tools/index.ts](src/tools/index.ts) 的注册处为真源，红线 B9 钉住名字闭集。
 - **本仓是两个半边**：工具半边（`src/tools/`，都是代码）与技能半边（正文 + [src/skills/](src/skills/README.md) 的注册代码）。
   技能正文在 [skills/](skills/README.md)，它**是运行时载荷而不是文档** —— 同一目录下那两份双件才是文档，区别见那条目录的说明。
 - **「只读」纪律只覆盖诊断半边**：写侧改动必须先落决策 —— 见 [.agents/notes/2026-10-13-write-side-tool-boundaries.md](.agents/notes/2026-10-13-write-side-tool-boundaries.md)；**边界由 `test/redlines.test.ts` 的 B10（诊断半边）与 B15（写侧只许碰进程内树）守着**
@@ -86,7 +87,10 @@ git diff --check
   ⚠️ **技能正文是运行时载荷，不是文档**：它由 [src/skills/register.ts](src/skills/register.ts) 在启动时读走交给宿主技能服务，**没有「源文件 vs 产物」的关系，不需要跟谁同步，改了也不必重新编译**。删掉它不会让插件崩溃，只会让技能静默消失 —— [scripts/check-release.mjs](scripts/check-release.mjs) 才拦得住。
 - 判据 → [test/](test/README.md) · 本机红线（不进 CI）见 [test/integration/README.md](test/integration/README.md)
 - 决策与依据 → [.agents/notes/](.agents/notes/README.md)（不建索引，去哪查规则见它的双件）
-- 托管侧配置 → [.github/](.github/README.md) · 发布态检查脚本 → [scripts/](scripts/README.md)
+- 托管侧配置（工作流与依赖升级）→ `.github/` 的配置本身；**这里刻意没有 `README.md`** ——
+  GitHub 会把 `.github/README.md` 渲染到**仓库首页**，那份版面属于访客，不属于 CI 内部约定。
+  工作流改动的约束见 [.github/AGENTS.md](.github/AGENTS.md) 与 [workflows/AGENTS.md](.github/workflows/AGENTS.md)。
+- 发布态检查脚本 → [scripts/](scripts/README.md)
 - 目录级规则与手册的分工见根 [AGENTS.md](AGENTS.md) 的「上下文注入」那一节；门面与子目录双件**不是**同一套设计，理由同样在里面。
 
 ## 待办
@@ -327,11 +331,11 @@ git diff --check
     处置：用 `[IO.File]::WriteAllText($p, $txt, (New-Object Text.UTF8Encoding($true)))` 写回并复核头三字节。
     **谁再改这两个 `.ps1`，改完必须重补 BOM。**
 39. **`tool.parameters` 是编译后的 JSON schema，不是作者写的那个字面量** —— 参数描述的判据**必须点进
-    `.properties`**。实测（2026-10-13，本仓五个工具）：`Object.values(tool.parameters)` 拿到的是
+    `.properties`**。实测（2026-10-13，本仓当时的五个工具）：`Object.values(tool.parameters)` 拿到的是
     `'object'` **字符串**与 properties 对象本身（rawKeys = `["type","properties","required"]`），
     于是每条 `description` 都是 `undefined` → **合计恒为 0**。当时那条「合计 ≤100」的上界因此
     **恒真**（`0 ≤ 100`）—— **上界已于 2026-10-13 删除（SHAPE §2），现在接住它的正是那两条下界**，
-    这反过来证明「下界才是防空转的那一半」。**本仓五个工具的测试里曾有四份是这种写法**
+    这反过来证明「下界才是防空转的那一半」。**本仓当时的五个工具测试里曾有四份是这种写法**
     （`hot-reload.test.ts` 是唯一写对的），改前实测 `total = 0`、改后才是真值（88 / 86 / 55）。
     同族于第 11 条（`defineTool` 编译 schema）与第 18 条（假绿）。**取法**：读 `parameters.properties`，
     并配**两条下界** —— 「参数个数 > 0」「每个参数描述非空」「合计 > 0」，否则换个写法照样空转。
