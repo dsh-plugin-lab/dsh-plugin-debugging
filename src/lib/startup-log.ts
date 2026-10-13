@@ -684,13 +684,17 @@ function readStartupSection(
       }
       const inline = /^args: \[ (.*) \]$/u.exec(content)
       if (inline !== null) {
-        current.text = firstArgText(inline[1] ?? '')
+        const text = firstArgText(inline[1] ?? '')
+        // 赋不到就不赋：挂一个值为 `undefined` 的自有属性会让整个工具返回值
+        // 不是 lossless JSON，宿主直接拒收（见 HOST-CONTRACTS「tool 输出的 JSON 边界」）。
+        if (text !== undefined) current.text = text
         inArgs = false
         index += 1
         continue
       }
       if (inArgs && current.text === undefined) {
-        current.text = firstArgText(content)
+        const text = firstArgText(content)
+        if (text !== undefined) current.text = text
         index += 1
         continue
       }
@@ -703,17 +707,25 @@ function readStartupSection(
 /**
  * 取一个 `args` 元素的文本。
  *
- * 两种形态都出现过（真机那份里都有）：字符串，与 `Error` 对象。Error 取
+ * 三种形态都出现过（真机那份里都有）：字符串，与 `Error` 对象。Error 取
  * `Error: ` 之后的第一行（`Error: HMR is disposed` → `HMR is disposed`）。
+ *
+ * **两种引号都必须认**：`util.inspect` 在字符串**含单引号但不含双引号**时改用双引号
+ * （真机里 `workspace 'w' filtered session 's' …` 就是这一支）。只认单引号的那版会让
+ * 这条消息**取不到文本** —— 而它在 `audit` 里，于是不是「少一条消息」，是整条挂着一个
+ * 值为 `undefined` 的自有属性 ⇒ 宿主以「value is not lossless JSON」**拒收整个返回值**，
+ * 工具直接不可用。
  *
  * @param content 已 trim 的行内容。
  */
 function firstArgText(content: string): string | undefined {
   const text = content.replace(/,$/u, '').replace(/ \+$/u, '').trim()
   if (text.startsWith('Error: ')) return text.slice('Error: '.length).split('\n')[0]
-  const quoted = /^'((?:[^'\\]|\\.)*)'/u.exec(text)
-  if (quoted === null) return undefined
-  return unescapeInspect(quoted[1] ?? '').split('\n')[0]
+  const single = /^'((?:[^'\\]|\\.)*)'/u.exec(text)
+  if (single !== null) return unescapeInspect(single[1] ?? '').split('\n')[0]
+  const double = /^"((?:[^"\\]|\\.)*)"/u.exec(text)
+  if (double !== null) return unescapeInspect(double[1] ?? '').split('\n')[0]
+  return undefined
 }
 
 /**
