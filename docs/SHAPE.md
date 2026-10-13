@@ -17,7 +17,7 @@
 | **观察** | `dsh_check_effect_mode` · `dsh_diagnose_plugin_load` · `dsh_check_auth` · `dsh_dump_config` | 这是四个**问题**，不是一个工具的四个参数：何时生效 / 加载没有 / 是 401 还是没起 / 组合成什么。**加工具不改这一层** |
 | **派生** | `dsh_sign_cookie`（未做） | 唯一会**产出凭证**的工具：不同权限（要读密钥）、不同参数（authority / ttl）。**绝不能并进 `check_auth`** —— 那会把秘密带进一个判定型输出 |
 | **行动** | `dsh_hot_reload`（有）· `dsh_restart`（未做） | 可逆与不可逆是两种权限面：前者失败放回旧版；后者不可逆。判据是**要不要审批闸门** |
-| **实例** | 建 / 列 / 销毁 → **另起插件** | 它起长期进程、写另一个 `DSH_HOME`、分配端口 —— 与本仓「诊断只读」纪律正面冲突；且它管的是**另一个**进程 |
+| **实例** | 建 / 列 / 销毁 → **另起插件** | 它起长期进程、写另一个 `DSH_HOME`、分配端口 —— **越出本仓两条边界**（B10 诊断半边只读 / B15 写侧只碰进程内树），且它管的是**另一个**进程 |
 
 **两条纪律**：
 
@@ -206,7 +206,7 @@ nextStep: <why>                         ← manual 支：**不印 `—`**，也�
 （`args` 缺省 → `()`；这与现状 `render.ts:98-105` 一致）；`manual: true` 支恒为 ``nextStep: <why>``
 （现状那行 `nextStep: — <why>` 的空指代按规则 2 消失）。**B18b 比对的是这两支里 `<why>` 的正文**。
 
-**六条冻结规则**：
+**七条冻结规则**：
 
 1. **`audit` 不进这段文本**（B22 用哨兵断言）。渲染只读 `verdict` 与 `key`。
 2. **L3 只在 `nextStep` 存在时出现**；两支都要能印出来，`manual` 支不印空括号（现状 `nextStep: — <why>` 那种空指代必须消失）。
@@ -215,7 +215,10 @@ nextStep: <why>                         ← manual 支：**不印 `—`**，也�
 4. **不再输出整块 JSON**。形状不合法的值 → 退化成一行 `[dsh_x] <stable JSON>`（保持「永远有输出」）。
 5. **B16 的判定范围 = 只看 `verdict:` 与 L2 这些行**，**排除** `[dsh_x] …` 头行与 `nextStep:` 行 ——
    否则两个 fixture 里相同的 `nextStep` 会造成**假红**。这条必须写进红线实现。
-6. **B18b 的判定对象 = `verdict:` 行的正文与 `nextStep:` 行的正文**，两者字符串不相等。
+6. **B16 的两份 fixture 必须同时改变「输入」与「环境」**（2026-10-13 补，W1 实测踩到）：`resolved:` 这类行按**环境**恒定、不按输入恒定（`dshHome` / `profile` 由配置来）。两份 fixture 若**共用同一个临时 home**，这行必然逐字相同 → **假红**。
+   → B16 要抓的是「**输入与环境都变了、这一行还是逐字不变**」= 真恒定块。**做法：两份 fixture 各用一份临时 home**（这是判据要求，不是随便挑两份）。W1 的样板自检正是双 home 才通过。
+
+7. **B18b 的判定对象 = `verdict:` 行的正文与 `nextStep:` 行的正文**，两者字符串不相等。
 
 ---
 
@@ -278,7 +281,24 @@ interface ToolData<T> { verdict: string; key: T; audit: JsonValue }
    **`audit` 可以为 `{}`**，`verdict` 必须非空字符串。
 2. **`data` 顶层只有 `verdict` / `key` / `audit`**，工具特有的字段一律塞进 `key`（要模型决策的）或 `audit`（给人复核的）。
    判据来自 §5：**模型看不到它，会不会做出不同的下一步？** 会 → `key`，不会 → `audit`。
-3. **`fail()` 的第三参从 `evidence` 改名为 `data`**，语义不变（失败路径上观测到的事实）。
+3. **`fail()` 的第二个参数是 `data`（必填），`nextStep` 在最后**（2026-10-13 定稿，W1 实现后返工过一次）：
+   ```ts
+   function ok<T>(data: ToolData<T>, nextStep?: NextStep): ToolOk<T>
+   function fail<T>(error: ToolError, data: ToolData<T>, nextStep?: NextStep): ToolFail<T>
+   ```
+   与 `ok` **同构**（可选参数在最后）。W1 初版写成 `fail(error, nextStep, data)` —— 必填在最后 ⇒ 每个没有下一步的失败都要写 `fail(err, undefined, data)`，全仓 31 个调用点都得带那个 `undefined` 占位符。**必填的 `data` 保留**：可选的话漏传只能被守卫在运行期转成 `internal`，那是「晚且绕」的报错。
+
+**`error.message` 不进模型文本 —— 但它不是漏渲染（2026-10-13 补，防下一个人当 bug 修）**：
+
+| 字段 | 角色 |
+|---|---|
+| `error.message` | **这次操作为什么没做成**（操作视角）。由守卫或 `toToolError` 产生 |
+| `data.verdict` | **结论**（世界视角，L1）。每支都必填 |
+
+两者角色不同，**不是同一句的两个副本**，所以删哪个都不对。`§3.1` 的冻结格式里没有 message 行是有意的。
+→ **代价如实记**：`error.message` 目前**没有模型可见的消费者**（渲染不打印它）。若将来确认它连结构化消费者也没有，按「冗余是负担」**应当删掉它** —— 这是本条的重开条件。
+→ **连带风险（已写进 W2 卡）**：既然失败分支的「所以呢」只能由 `data.verdict` 承载，**W2 每个失败分支都必须写实质 verdict**，不许只写 `failed`。否则模型只看到 `failed (kind)`。
+
 
 **`ensureToolResult` 的校验规则（**绝不抛**，任何不合规都合成 internal 失败）**：
 
@@ -329,7 +349,7 @@ data
 | 真机可达 | **可达**：apply 期 `undefined` → **+3s** 变 `object`、ctor `LocalSpillStore` | bench 实测 |
 | 负对照（证明判据不恒真） | `ctx.spillStore`（属性直取、无 inject）**抛** `cannot get property "spillStore" without inject` | bench 实测 |
 | 真落盘 | `bytes=29` 与落盘文件 29 字节**逐字相符** | bench 实测 |
-| 重复注册 | 第二个 `provide` 会抛（本插件只读，无风险） | bench 实测 |
+| 重复注册 | 第二个 `provide` 会抛（本插件不 `provide` 任何服务，无风险） | bench 实测 |
 
 **三条实现规则（由实测直接推出，写代码时照此）**：
 
@@ -600,8 +620,8 @@ interface ToolResult { content: ContentBlock[]; isError: boolean; meta?: JsonVal
 
 | # | 红线 | 怎么断言（机械判据） |
 |---|---|---|
-| **B16** | **输出里不许有恒定块** | 同一工具用**两份不同 fixture** 各渲染一次，取所有 ≥40 字符的行；**两份都出现的行 → 判红**。**判定范围只看 `verdict:` 行与 L2 行**，**必须排除**：`[tool] …` 头行、`nextStep:` 行（两份 fixture 的 nextStep 合法地相同）、**截断模板行**（`<n> more line(s) not shown …` 是恒定模板，同 n 时误红）。不排除就是假红（§3.1 规则 5） |
-| **B17** | **下一个工具的参数标识符必须出现** | 对含 `nextStep.args` 的 fixture，断言 **`verdict:` 行与 L2 行**里逐个出现 `args` 的每个值。⚠️ **范围必须排除 `nextStep:` 行** —— 那一行按格式**本来就会**把 `args` 印出来，不排除则本条**恒真**（redline-verifier 实测确认）。三个例外：`0`/`1`/空串这类到处都在的值不算数；`args` 为空对象时**不适用**（**跳过并计数，不许静默 skip** —— 活跃坑 18） |
+| **B16** | **输出里不许有恒定块** | 同一工具用**两份不同 fixture** 各渲染一次，取所有 ≥40 字符的行；**两份都出现的行 → 判红**。**判定范围只看 `verdict:` 行与 L2 行**，**必须排除**：`[tool] …` 头行、`nextStep:` 行（两份 fixture 的 nextStep 合法地相同）、**截断模板行**（`<n> more line(s) not shown …` 是恒定模板，同 n 时误红）。不排除就是假红（§3.1 规则 5）<br>⚠️ **两份 fixture 还必须换环境（各一份临时 home）**：`resolved:` 这类行按环境恒定 ⇒ 共用同一个 home 时必然逐字相同 → **假红**（W1 实测踩到，§3.1 规则 6） |
+| **B17** | **下一个工具的参数标识符必须出现** | 对含 `nextStep.args` 的 fixture，断言每个值能在**模型看得到的地方**找到：**`verdict:` 行 / L2 行 ∪ 目标工具自己的描述与参数文本**。⚠️ **范围必须排除 `nextStep:` 行** —— 那一行按格式**本来就会**把 `args` 印出来，不排除则本条**恒真**（redline-verifier 实测确认）。<br>⚠️ **取值面是「看过没有」，不是「这次输出里有没有」**（2026-10-13 修正）：本条的**本意**是「别让模型去用一个它从没见过的**标识符**」（entryId / port / authority / 路径 / 包名）。而 `change:'host-code'` 这种**目标工具自己的封闭枚举**，模型在**那个工具的参数描述里**就读得到 —— 逼它出现在本次输出里是**错的红线**（W1 因此把可派发的工具建议降级成了 `manual`，那是真损失）。所以要扩成上面那条并集。<br>三个例外：`0`/`1`/空串这类到处都在的值不算数；`args` 为空对象时**不适用**（**跳过并计数，不许静默 skip** —— 活跃坑 18） |
 | **B18a** | **`nextStep` 出现时必须带动作** | 断言它属于 §4 的两支之一：`{tool, why}`（`tool` 非空字符串）或 `{manual: true, why}`。**这条是根因**：没有动作的 `nextStep` 在类型上写不出来 |
 | **B18b** | **L3 的 `why` 不许逐字等于 L1** | 断言两者字符串**不相等**。**这条是防御性症状监控**，不是根因判据 —— 与 B18a 拆开正因为「结论恰好等于动作描述」是合法的，而「结论被当下一步复述」是坏的：前者由 B18a 排除，后者由本条报警 |
 | **B19** | **观察层四个工具不许间接 import 到取值路径** | 从 4 个观察工具文件出发走完整 import 图（含 `lib/**`），断言**不出现** `lib/cookie.ts` 的导出名与 `lib/credentials.ts` 的取值函数；只有存在性扫描可达 |
@@ -644,6 +664,7 @@ interface ToolResult { content: ContentBlock[]; isError: boolean; meta?: JsonVal
 | **B19** / **B23** | import 闭包解析失效 → 闭包为空 → 「不含越界写法」恒真 | **闭包非空** |
 | **B20a**（口 1） | 把参数描述全删光 → 合计 0 → 通过 | **每个参数描述非空** |
 | **B20a**（口 2，本轮补） | `boundary` / `cost` 留空却**不滤空段** → 空行被算进行数 → 两段齐全也数出 4 行 → **`行数 ≥ 段数` 与 `行数 ≤ 4` 同时通过**，而描述里躺着两条空行 | **`composeDescription` 先滤空段再 `join`**（§2.1）+ 断言**不存在纯空白行** |
+| **B20a**（口 3，**实测确认，已咬到 4 个文件**） | **参数描述读错层级**：`defineTool` 把参数**编译**成 JSON schema（`{ type, properties }`，见活跃坑 11），而 `Object.values(tool.parameters)` 拿到的是 `'object'` **字符串**与 properties 对象本身 → 每条 `description` 都是 `undefined` → **合计恒为 0** → `≤100` **恒真**。**实测：本仓 5 个工具的测试里 4 个是这种写法**（`hot-reload.test.ts` 是唯一写对的） | **点进 `.properties`**（照 `test/tools/hot-reload.test.ts` 的写法）+ **参数个数 > 0** + **每个参数描述非空** + **合计 > 0** |
 
 **统一硬要求：空转必须判红，不许 skip**（与活跃坑 18 同族；GitHub 把 skipped 当 Success）。
 **推论（可直接抄）**：写红线时，每条都要自问一句「**我怎么把它弄成空转**」；能空转的，就把「非空」写成断言的一部分。redline-verifier 的第一版 B24 探针就是栽在这上面（deps 接错 → 六组全「通过」 → 差点得出「B24 今天已经是绿的」这个**反结论**）。

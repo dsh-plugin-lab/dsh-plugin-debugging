@@ -8,6 +8,14 @@
 - **已发布到 npm**（当前版本见 [package.json](package.json)；`latest` 与 dist-tags 以 registry 为准）。**`0.2.0` 是第一个由 `release.yml` 发出的版本**（带 provenance）；`0.1.0` 是手动发的、**没有** provenance。SLSA 徽章的真实性判据写在 [README.md](README.md) 的徽章注释里（对**具体版本**查 attestations 端点）。版本线与判例见 [docs/PUBLISHING.md](docs/PUBLISHING.md)
 - **能力面 = 1 个技能 + 5 个工具**：4 个只读（`dsh_check_effect_mode` / `dsh_diagnose_plugin_load` / `dsh_check_auth` / `dsh_dump_config`）+ **1 个写侧** `dsh_hot_reload`（已实现、已真机验证；算法与关键语义见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §5）。**目标形态与后续工具的归属见 [docs/SHAPE.md](docs/SHAPE.md)**（`dsh_restart` 有意推迟，排在最后）
 - **「只读」纪律只覆盖诊断半边**：写侧改动必须先落决策 —— 见 [.agents/notes/2026-10-13-write-side-tool-boundaries.md](.agents/notes/2026-10-13-write-side-tool-boundaries.md)；**边界由 `test/redlines.test.ts` 的 B10（诊断半边）与 B15（写侧只许碰进程内树）守着**
+- **输出契约 = `{ verdict, key, audit }`**（顶层恰好三键，成功失败同形）。冻结签名见 [docs/SHAPE.md](docs/SHAPE.md) §4.1；`hint` 已删、`evidence` 已并入 `data`；**`error.message` 不进模型文本**（它的角色与 `verdict` 不同，见 SHAPE §4.1 的字段角色表）
+
+## 验证快照
+
+- **本机**：`npm run check` 全绿 = **14 files / 437 tests passed**；`tsc` 两个配置各 **0 error**；`lint` / `format:check` / `check:release`（14 条）全过
+- **红线**：`test/redlines.test.ts` **79 条**（B7–B15 / B19 / B23 / **B16 / B18b / B22**）
+- **CI**：见 [.github/workflows/ci.yml](.github/workflows/ci.yml) 的 `CI Success`（唯一 required check）
+- 数字会漂 → **以本机实跑为准**，这里只记「跑法 + 上次实测值」
 
 ## 全局规则
 
@@ -20,7 +28,7 @@
   与 [README_zh.md](README_zh.md)）与两份 `locale/*.json` 是典型的成对件。
 - **不抄会漂的值**：宿主版本号、计数、行号一律现查；写「形状」，不写「值」。
 - **代码注释写中文；可能到达模型/用户眼里的字符串写英文**（工具 `data` 文本字段、`message` /
-  `hint` / `nextStep.why` / render 文本）。只被实现内部 catch、进不了返回值的字符串不受此限
+  `nextStep.why` / render 文本）。只被实现内部 catch、进不了返回值的字符串不受此限
   （例如测试替身自己的中文 Error）。**这条由 `test/redlines.test.ts` 的 B14 守着。**
 - **改动走 PR，不直推 `main`**（维护者 2026-10-13 指定）。ruleset 里那条 `RepositoryRole` bypass 让直推
   **技术上能过** —— 但那是逃生门，不是常规路径。流程：开分支 → 推 → `gh pr create` → 等 `CI Success` → 合并。
@@ -96,6 +104,17 @@ HOST-CONTRACTS 答「宿主实际上是什么样」，PUBLISHING 答「怎么发
 - [ ] **CI 与本地平台不同**：本机是 Windows，CI 是 ubuntu。**任何写死平台行为的断言都会在 CI 上红**
       （首次推送就踩过：`probed === true` 那一条）。新增与平台相关的判据时，
       要么按平台分支断言，要么让两种平台的行为都被钉住。
+- [ ] **红线批 2b：`B17 / B20a / B20b / B18a / B21 / B24`**（五个工具已齐，条件已满足）。
+      **`B24` 最要紧** —— 它是 SHAPE §4 说的「契约的承载条件」（`execute` 全路径不抛），
+      而五个工具的顶层 `try/catch` **已加、但还没有红线守着**：下一个人摘掉它不会有任何东西报警。
+      规则见 [docs/SHAPE.md](docs/SHAPE.md) §10 与 §10.0（三个空转口）；**B17 的取值面已改**（L1/L2 ∪ 目标工具自己的描述）。
+- [ ] **技术债：收敛重复的测试助手**（契约改造期 `test/tools/helpers.ts` 被冻结，
+      四名成员各自内联了一份）。实测：`renderText` 在 **5 个文件**（其中 4 个逐字节相同）、
+      `splitRender` 5 个、`sharedSubstrings` 3 个 —— 预计可减 **800–1000 行**。
+      **必须串行**（那 6 个文件分属不同 owner，得等写者全停手）。
+- [ ] **两条独立复验留下的残余**（都不影响模型决策，方向安全，故未阻塞发布）：
+      ① `resolvedDir` 对 `link:` 包报 realpath，偏离宿主的 `packageDirFromAnchor`（只进 `audit`，不进 `key`）；
+      ② 凭据存在性扫描对 `records` 段内**更深层**的同名键会判 true（需 `grant` + 同名键同时出现才触发）。
 
 ## 活跃坑
 
@@ -290,3 +309,11 @@ HOST-CONTRACTS 答「宿主实际上是什么样」，PUBLISHING 答「怎么发
     （无 BOM 时实测报 `PARSE-FAIL x14 :: Unexpected token '}'`）。
     处置：用 `[IO.File]::WriteAllText($p, $txt, (New-Object Text.UTF8Encoding($true)))` 写回并复核头三字节。
     **谁再改这两个 `.ps1`，改完必须重补 BOM。**
+39. **`tool.parameters` 是编译后的 JSON schema，不是作者写的那个字面量** —— 参数描述的判据**必须点进
+    `.properties`**。实测（2026-10-13，本仓五个工具）：`Object.values(tool.parameters)` 拿到的是
+    `'object'` **字符串**与 properties 对象本身（rawKeys = `["type","properties","required"]`），
+    于是每条 `description` 都是 `undefined` → **合计恒为 0** → `≤100` 这条上界**恒真**。
+    **本仓五个工具的测试里曾有四份是这种写法**（`hot-reload.test.ts` 是唯一写对的），
+    改前实测 `total = 0`、改后才是真值（88 / 86 / 55）。同族于第 11 条（`defineTool` 编译 schema）
+    与第 18 条（假绿）。**取法**：读 `parameters.properties`，并配**两条下界** ——
+    「参数个数 > 0」与「每个参数描述非空」「合计 > 0」，否则换个写法照样空转。
