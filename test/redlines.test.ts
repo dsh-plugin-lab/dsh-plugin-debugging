@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process'
+import { randomBytes } from 'node:crypto'
 import {
   cpSync,
   existsSync,
@@ -55,6 +56,12 @@ import {
   HOT_RELOAD_DESCRIPTION,
   HOT_RELOAD_TOOL,
 } from '../src/tools/dsh_hot_reload.ts'
+import {
+  createSignCookieTool,
+  SIGN_COOKIE_DESCRIPTION,
+  SIGN_COOKIE_TOOL,
+} from '../src/tools/dsh_sign_cookie.ts'
+import { encodeBase64Url } from '../src/lib/cookie-sign.ts'
 import { createToolDeps, type ToolDeps } from '../src/tools/shared.ts'
 
 /**
@@ -545,6 +552,7 @@ const EXPECTED_TOOLS = [
   'dsh_check_auth',
   'dsh_dump_config',
   'dsh_hot_reload',
+  'dsh_sign_cookie',
 ] as const
 
 /**
@@ -634,14 +642,17 @@ if (!toolHalfImplemented) {
 describe('B9 工具名是闭集', () => {
   it('提取器本身有效：三种引号 + 内联 name 五种形态都认得', () => {
     // 每种形态各喂一个：认得几种就自检几种（自检与 TOOL_NAME_SHAPES 必须同批）。
-    // ⚠️ 必须写**字面量**名字，不能写 `EXPECTED_TOOLS[i]` —— 追加第 5 个工具后，
-    // 这里只喂前四个形态，而末尾拿 `[...EXPECTED_TOOLS]` 断言，就会自己判自己红。
+    // ⚠️ 必须写**字面量**名字，不能写 `EXPECTED_TOOLS[i]` —— 追加工具时
+    // 这里只喂前几种形态，而末尾拿 `[...EXPECTED_TOOLS]` 断言，就会自己判自己红。
     const synthetic = [
       `export const A_TOOL = 'dsh_check_effect_mode'`,
       `export const B_TOOL = "dsh_diagnose_plugin_load"`,
       `export const C_TOOL = \`dsh_check_auth\``,
       `export const lowercaseName = "dsh_dump_config"`,
       `export function make() { return defineTool({ name: 'dsh_hot_reload' }) }`,
+      // 第 6 个工具（W4 `dsh_sign_cookie`）走的是「常量 + defineTool 内联 name」两处，
+      // 与上面五种形态同批 —— 所以这里也必须是**字面量**，不能用索引取。
+      `export const SIGN_COOKIE_TOOL = 'dsh_sign_cookie'`,
     ].join('\n')
     const found = [
       ...new Set(collectDeclaredToolNames([{ path: 'synthetic.ts', text: synthetic }])),
@@ -2747,6 +2758,40 @@ function dumpConfigWith(kind: 'clean' | 'exit-code'): ToolDefinition {
   return createDumpConfigTool(redlineDeps(redlineConfig(home), { spawn }))
 }
 
+/**
+ * `sign_cookie`：成功 = 真有一份带 browser-session 密钥的凭证文件；
+ * 失败 = 文件在但没有那一条 grant。
+ *
+ * ⚠️ **夹具里的密钥是真造的 32 字节 base64url**（`randomBytes(32)`），不是常量 ——
+ * 常量会让「它到底有没有真的签出东西」这件事在这个语料里不可判。
+ * 它只活在临时目录里，跑完即删。
+ *
+ * @param kind 成功那条还是缺 grant 那条。
+ */
+function signCookieWith(kind: 'granted' | 'no-grant'): ToolDefinition {
+  const home = makeTempRoot('dsh-redline-signcookie-')
+  const secret = encodeBase64Url(randomBytes(32))
+  const body =
+    kind === 'granted'
+      ? [
+          'version: 1',
+          'refs:',
+          'records:',
+          '  client-connection/browser-session:',
+          '    kind: grant',
+          '    payload:',
+          '      version: 1',
+          `      secret: ${secret}`,
+          '',
+        ].join('\n')
+      : ['version: 1', 'refs:', 'records:', '  other-thing/other-id:', '    kind: grant', ''].join(
+          '\n',
+        )
+  writeTextFile(join(home, '.credentials.yaml'), body)
+  // 端口用配置里的（`env: {}` 保证不走 `DSH_WEB_URL`），这样夹具与平台无关。
+  return createSignCookieTool(redlineDeps(redlineConfig(home, { port: 3080 }), { env: {} }))
+}
+
 /** 造一个可控的 entry 端口。 */
 function reloadEntryFixture(): ReloadEntryPort {
   return {
@@ -2875,6 +2920,18 @@ async function buildRedlineCorpus(): Promise<RedlineRun[]> {
     await runFixture(hotReloadWith('throwing'), HOT_RELOAD_TOOL, 'hot_reload · reload 端口抛异常', {
       entryId: 'pkg-a',
     }),
+    await runFixture(
+      signCookieWith('granted'),
+      SIGN_COOKIE_TOOL,
+      'sign_cookie · 凭证文件里有 browser-session 密钥',
+      { port: 3080, host: '127.0.0.1' },
+    ),
+    await runFixture(
+      signCookieWith('no-grant'),
+      SIGN_COOKIE_TOOL,
+      'sign_cookie · 凭证文件里没有那一条 grant',
+      { port: 3080, host: '127.0.0.1' },
+    ),
   ]
 }
 
@@ -2903,7 +2960,7 @@ function shapeOf(
 
 let shapesCache: RedlineToolShape[] | undefined
 
-/** 取五个工具的形状（构造它们不需要真的 IO）。 */
+/** 取全部工具的形状（构造它们不需要真的 IO）。 */
 function toolShapes(): RedlineToolShape[] {
   if (shapesCache !== undefined) return shapesCache
   const deps = redlineDeps(redlineConfig('redline-shape-home'))
@@ -2924,6 +2981,7 @@ function toolShapes(): RedlineToolShape[] {
     ),
     shapeOf(DUMP_CONFIG_TOOL, DUMP_CONFIG_DESCRIPTION, createDumpConfigTool(deps)),
     shapeOf(HOT_RELOAD_TOOL, HOT_RELOAD_DESCRIPTION, createHotReloadTool({ ...deps, reload })),
+    shapeOf(SIGN_COOKIE_TOOL, SIGN_COOKIE_DESCRIPTION, createSignCookieTool(deps)),
   ]
   return shapesCache
 }
@@ -3082,11 +3140,17 @@ describe('B20a 描述四段骨架 + 参数描述下界', () => {
       )
     }
 
-    // 五个工具一个都不能少 —— 否则「描述层合规」只在一个子集上成立。
-    expect(shapes).toHaveLength(5)
+    // 一个工具都不能少 —— 否则「描述层合规」只在一个子集上成立。
+    //
+    // ⚠️ 这里比的是**闭集长度**而不是字面的 `5`：写死数字就得每加一个工具回来改这里，
+    // 而漏改的那次会**静默放过**一个新工具（形状对不上但数量恰好还过）。
+    // `toolShapes()` 与 `EXPECTED_TOOLS` 同一个闭集，加工具时由 B9 那条逼着改，
+    // 不靠这里的手工同步。
+    expect(shapes.length).toBe(EXPECTED_TOOLS.length)
+    expect(shapes.map((shape) => shape.name).sort()).toEqual([...EXPECTED_TOOLS].sort())
     expect(offenders, `B20a 违规：\n${offenders.join('\n')}`).toEqual([])
     // 实测值随断言带出去：红了能一眼看出是哪一项顶到上限。
-    expect(measured, `B20a 实测：\n${measured.join('\n')}`).toHaveLength(5)
+    expect(measured.length).toBe(shapes.length)
   })
 })
 

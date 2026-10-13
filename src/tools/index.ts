@@ -1,5 +1,5 @@
 /**
- * 工具半边 —— 注册 v1 的四个**只读**诊断工具。
+ * 工具半边 —— 注册四个**只读**诊断工具、一个写侧工具、一个派生工具。
  *
  * **契约（G2 冻结，改它要同时改 `src/contracts.ts` 与技能半边）**
  * - 只导出 `registerTools(ctx, state)`；
@@ -10,15 +10,17 @@
  *   `{ ok: false, error: { kind, message, hint } }`，`kind` 是闭枚举（决定模型该不该重试）；
  * - `exec.signal` 必须透传给底层 fetch / spawn。
  *
- * **v1 工具清单**（决策 D4；命名取 03 那套，副作用工具留 v1.1 —— 决策 D5）
- * | 工具 | 对应 SKILL.md |
- * |---|---|
- * | `dsh_check_effect_mode` | §一 生效三档 |
- * | `dsh_diagnose_plugin_load` | §3.1 / §3.2 / §3.8 |
- * | `dsh_check_auth` | §3.3 / §3.4 |
- * | `dsh_dump_config` | §3.8 |
+ * **工具清单**（决策 D4/D5；命名取 03 那套）
+ * | 工具 | 半边 | 对应 SKILL.md |
+ * |---|---|---|
+ * | `dsh_check_effect_mode` | 只读 | §一 生效三档 |
+ * | `dsh_diagnose_plugin_load` | 只读 | §3.1 / §3.2 / §3.8 |
+ * | `dsh_check_auth` | 只读 | §3.3 / §3.4 |
+ * | `dsh_dump_config` | 只读 | §3.8 |
+ * | `dsh_hot_reload` | **写侧** | 生效三档（换模块） |
+ * | `dsh_sign_cookie` | **派生**（唯一经手秘密） | §3.4 |
  *
- * **只读纪律（v1）**：不杀进程、不改 profile、不写 `$DSH_HOME`。
+ * **只读纪律**：不杀进程、不改 profile、不写 `$DSH_HOME`。
  * 进程与端口一律**按端口**查（`lib/ports.ts`），不用命令行子串 —— 子串会误匹配派生 shell。
  */
 import type { Context } from '@deepseek-ai/cordis'
@@ -31,6 +33,7 @@ import { createDiagnosePluginLoadTool } from './dsh_diagnose_plugin_load.js'
 import { createDumpConfigTool } from './dsh_dump_config.js'
 import { createEffectModeTool } from './dsh_check_effect_mode.js'
 import { createHotReloadTool } from './dsh_hot_reload.js'
+import { createSignCookieTool } from './dsh_sign_cookie.js'
 import { createToolDeps } from './shared.js'
 
 /**
@@ -63,4 +66,12 @@ export function registerTools(ctx: Context, state: PluginState): void {
   // 它比只读工具多要一个宿主端口（`reload`），所以单独构造 —— `deps` 那份
   // 是四个只读工具共享的冻结形状，不为写侧破例。
   ctx.tools.register(createHotReloadTool({ ...deps, reload: reloadHostFrom(ctx) }))
+
+  // 派生类工具（`dsh_sign_cookie`）：**唯一**一个会经手秘密的工具。
+  //
+  // 它仍然**不写**任何东西（只读一份文件 + 内存里算 HMAC），所以共用 `deps` 那份冻结形状；
+  // 它与「派生」的区分不是「会不会改状态」，而是「返回值里有没有秘密」—— 见
+  // `dsh_sign_cookie.ts` 文件头第 2 条：cookie 本体刻意不进 `data` 也不进 `audit`
+  // （`audit` 会被 spill 落盘）。
+  ctx.tools.register(createSignCookieTool(deps))
 }
