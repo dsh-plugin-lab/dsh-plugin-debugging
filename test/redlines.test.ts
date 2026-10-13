@@ -10,7 +10,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, posix } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { afterAll, describe, expect, it } from 'vitest'
@@ -1379,6 +1379,584 @@ describe('B15 写侧工具只许碰进程内树', () => {
 })
 
 /**
+ * # B19 / B23：观察层的 import 闭包
+ *
+ * 两条红线共用同一个底座：从**观察层四个工具文件**出发，递归解析**相对 import**，
+ * 得到完整依赖闭包（含 `src/lib/**`），再在闭包上判两件事：
+ *
+ * | 红线 | 判什么 | 为什么要有 |
+ * |---|---|---|
+ * | **B19** | 不许触到**取值路径**（`lib/cookie.ts` 整体；`lib/credentials.ts` 只许存在性扫描） | 观察层必须停在「存在性」这一档，不许把密钥读出来带进输出 |
+ * | **B23** | 不许**自己写文件** | `audit` 落盘只能经宿主服务，不许本仓写（§5） |
+ *
+ * ## ⚠️ B23 相对 B10 的关系（**必须先读，否则会以为它提供了 B10 没有的 fs 覆盖**）
+ *
+ * `[已核]` **B10 已经在扫整个 `src/**`**，且 `FS_WRITE_APIS` 里**已含** `writeFile` / `mkdir` 等。
+ * 所以「fs 写入族」那一部分**是 B10 的子集**，B23 在这里**没有增量**。
+ * B23 的**真实增量只有两条**：
+ *
+ * 1. **项目内写 helper 的名字**（`writeText(…)` 这类）—— 它们是**本仓自己的函数**、不是 `node:fs` API，
+ *    而 B10 的判据是「**须有 `node:fs` 来源**」⇒ **照不到它们**；
+ * 2. 把判据**钉在观察层闭包**上，而不是「整个 `src/**`」—— 将来写侧若合法获得写入能力，
+ *    B10（全局）会误伤，而 B23（只管观察层）不会。
+ *
+ * **不要**为了「让 B23 看起来更值钱」去放宽 B10 或删掉它 —— B10 才是那层保护。
+ *
+ * ## ⚠️ 下界（SHAPE §10.0）：空转必须判红，不许 skip
+ *
+ * 两条红线都是「闭包里**不得**出现 X」的形状 —— 而**空集不含 X**。
+ * 所以 import 解析一旦失效（正则过时、路径拼装改错、入口文件被改名），闭包缩成空集，
+ * 两条红线都会**恒真**，且看起来完全正常（活跃坑 18 的教科书形状）。
+ * 因此 {@link judgeClosureUsable} 是**两条红线共同的前置断言**，它自己也可被否证（见各自的用例）。
+ */
+
+/** 观察层四个工具 —— **逐个列出，不用 glob**。glob 会在文件被删/改名时静默缩水。 */
+const OBSERVATION_TOOL_FILES = [
+  'src/tools/dsh_check_auth.ts',
+  'src/tools/dsh_check_effect_mode.ts',
+  'src/tools/dsh_diagnose_plugin_load.ts',
+  'src/tools/dsh_dump_config.ts',
+] as const
+
+/** 读一份仓内源码；文件不在就返回 `undefined`（合成用例靠它注入）。 */
+type SourceReader = (relPath: string) => string | undefined
+
+/** 默认的读取器：真的读磁盘。 */
+function repoSourceReader(relPath: string): string | undefined {
+  return existsRepo(relPath) ? readRepo(relPath) : undefined
+}
+
+/** 一条 import 语句（已剥注释、带**真实文件行号**）。 */
+interface ImportStatement {
+  /** `import type …`（整条语句都是类型）。 */
+  typeOnly: boolean
+  /** `from` 之前的子句；副作用 import 是空串。 */
+  clause: string
+  /** 模块说明符的字面量。 */
+  spec: string
+  /** 1 起的**真实**行号（`stripComments` 保留换行，所以与文件对齐）。 */
+  line: number
+}
+
+/**
+ * 拆出一份源码里的 import 语句。
+ *
+ * 先 `stripComments` —— 本仓会在文档注释里写 import 例子（例如 `shared.ts` 的契约说明），
+ * 不剥注释就会把**解释规则的文字**当成真依赖。
+ */
+function importStatementsOf(source: string): ImportStatement[] {
+  const text = stripComments(source)
+  const lineOf = (index: number): number => text.slice(0, index).split('\n').length
+  const out: ImportStatement[] = []
+  // 常规形态：import [type] <clause> from '<spec>'
+  for (const match of text.matchAll(/import\s+(type\s+)?([\s\S]*?)\s+from\s+['"]([^'"]+)['"]/g)) {
+    out.push({
+      typeOnly: (match[1] ?? '') !== '',
+      clause: match[2] ?? '',
+      spec: match[3] ?? '',
+      line: lineOf(match.index ?? 0),
+    })
+  }
+  // 副作用形态：import '<spec>'（没有 from，所以与上面那条不重叠）
+  for (const match of text.matchAll(/import\s+['"]([^'"]+)['"]/g)) {
+    out.push({ typeOnly: false, clause: '', spec: match[1] ?? '', line: lineOf(match.index ?? 0) })
+  }
+  return out
+}
+
+/** 从 import 子句里拆出的绑定。 */
+interface ImportBindings {
+  /** **值**绑定（`*` 表示命名空间导入）。 */
+  values: string[]
+  /** 纯**类型**绑定（`type X` 或 `import type`）—— 取不到值，不算越界。 */
+  types: string[]
+  /** 命名空间 / 默认导入：拿到的是「整个模块」，任何导出都变得可达。 */
+  namespaceOrDefault: boolean
+}
+
+/**
+ * 拆一条 import 子句。
+ *
+ * **为什么必须区分值与类型**：`check_auth` 今天写的是
+ * `import { readCredentialsPresence, type CredentialsPresence } from '../lib/credentials.js'` ——
+ * 值那半是**允许**的存在性扫描，类型那半是**无害**的（类型不取运行时值）。
+ * 不区分就会把这条**合规**的 import 判红（假红），而假红会逼人去放宽判据。
+ */
+function parseImportClause(clause: string, typeOnlyStatement: boolean): ImportBindings {
+  const values: string[] = []
+  const types: string[] = []
+  let namespaceOrDefault = false
+  const trimmed = clause.trim()
+
+  if (trimmed.startsWith('*')) {
+    if (typeOnlyStatement) types.push('*')
+    else {
+      namespaceOrDefault = true
+      values.push('*')
+    }
+    return { values, types, namespaceOrDefault }
+  }
+
+  if (trimmed.startsWith('{')) {
+    for (const part of (trimmed.slice(1, trimmed.lastIndexOf('}')) ?? '').split(',')) {
+      const piece = part.trim()
+      if (piece === '') continue
+      const isType = typeOnlyStatement || /^type\s/.test(piece)
+      const name =
+        piece
+          .replace(/^type\s+/, '')
+          .split(/\s+as\s+/)[0]
+          ?.trim() ?? ''
+      if (name === '') continue
+      if (isType) types.push(name)
+      else values.push(name)
+    }
+    return { values, types, namespaceOrDefault }
+  }
+
+  if (trimmed !== '') {
+    // 默认导入（`import x from`）。`import type x from` 是纯类型，不算可达值。
+    const name = trimmed.split(',')[0]?.trim() ?? ''
+    if (!typeOnlyStatement) namespaceOrDefault = true
+    if (name !== '') (typeOnlyStatement ? types : values).push(name)
+  }
+  return { values, types, namespaceOrDefault }
+}
+
+/** 把相对说明符解析成仓内相对路径（`.js` → `.ts`，本仓是 ESM + TS 源码）。 */
+function resolveRelativeImport(fromRelPath: string, spec: string): string {
+  const joined = posix.join(posix.dirname(fromRelPath), spec)
+  return joined.endsWith('.js') ? `${joined.slice(0, -3)}.ts` : joined
+}
+
+/** 闭包里的一个文件（连内容一起带着，判据不必再读一次盘）。 */
+interface ClosureFile {
+  path: string
+  text: string
+}
+
+/** 一条已解析的相对 import 边。 */
+interface ImportEdge {
+  from: string
+  line: number
+  spec: string
+  to: string
+  values: string[]
+  types: string[]
+  namespaceOrDefault: boolean
+}
+
+/** import 闭包的构建结果（**连诊断信息一起给**，好让「解析坏了」变成红）。 */
+interface ImportClosure {
+  files: ClosureFile[]
+  edges: ImportEdge[]
+  /** 相对 import 解析不到文件 —— 非空 = 解析器或路径拼装坏了。 */
+  unresolved: string[]
+  /** 入口文件本身不在磁盘上。 */
+  entryMissing: string[]
+  /** 包名 import（`@deepseek-ai/…`）：不遍历，只记下来（见「已知限度」）。 */
+  packageImports: string[]
+}
+
+/**
+ * 从入口出发递归解析相对 import，建出完整闭包。
+ *
+ * @param entries 入口文件的仓内相对路径。
+ * @param read 读取器；合成用例靠它注入内存源码，真判据用 {@link repoSourceReader}。
+ */
+function buildImportClosure(
+  entries: readonly string[],
+  read: SourceReader = repoSourceReader,
+): ImportClosure {
+  const files: ClosureFile[] = []
+  const edges: ImportEdge[] = []
+  const unresolved: string[] = []
+  const entryMissing: string[] = []
+  const packageImports: string[] = []
+  const seen = new Set<string>()
+  const queue = [...entries]
+
+  for (const entry of entries) {
+    if (read(entry) === undefined) entryMissing.push(entry)
+  }
+
+  while (queue.length > 0) {
+    const rel = queue.shift()
+    if (rel === undefined || seen.has(rel)) continue
+    seen.add(rel)
+    const text = read(rel)
+    if (text === undefined) continue
+    files.push({ path: rel, text })
+
+    for (const statement of importStatementsOf(text)) {
+      if (!statement.spec.startsWith('.')) {
+        packageImports.push(`${rel}:${String(statement.line)} → ${statement.spec}`)
+        continue
+      }
+      const to = resolveRelativeImport(rel, statement.spec)
+      if (read(to) === undefined) {
+        unresolved.push(
+          `${rel}:${String(statement.line)} → ${statement.spec}（解析成 ${to}，文件不在）`,
+        )
+        continue
+      }
+      edges.push({
+        from: rel,
+        line: statement.line,
+        spec: statement.spec,
+        to,
+        ...parseImportClause(statement.clause, statement.typeOnly),
+      })
+      queue.push(to)
+    }
+  }
+
+  return { files, edges, unresolved, entryMissing, packageImports }
+}
+
+/**
+ * 闭包下界（B19 与 B23 共同的前置）：**空转必须判红，不许 skip**。
+ *
+ * 逐条对着「解析失效会怎么静默坏」来：
+ * - **入口缺失** → 后面的判据在一个不含该文件的集合上成立；
+ * - **有相对 import 解析不到** → 路径拼装或扩展名规则坏了；
+ * - **闭包比入口还少** → 入口自己都没进来；
+ * - **某个入口一条相对 import 都没解析出来** → import 正则过时了（`edges` 会整体归零，而「不含 X」恒真）；
+ * - **闭包里没有 `src/lib/**`** → 没走深，「不得包含 X」是在一个小得可疑的集合上成立。
+ *
+ * @param closure 闭包。
+ * @param entries 入口清单（用来判「每个入口都真的解析出了东西」）。
+ */
+function judgeClosureUsable(closure: ImportClosure, entries: readonly string[]): string[] {
+  const offenders: string[] = []
+  if (closure.entryMissing.length > 0) {
+    offenders.push(`入口文件不在磁盘上：${closure.entryMissing.join(', ')}`)
+  }
+  if (closure.unresolved.length > 0) {
+    offenders.push(
+      `相对 import 解析不到文件（解析器 / 路径拼装坏了）：\n${closure.unresolved.join('\n')}`,
+    )
+  }
+  if (closure.files.length < entries.length) {
+    offenders.push(
+      `闭包只有 ${String(closure.files.length)} 个文件，比入口数 ${String(entries.length)} 还少`,
+    )
+  }
+  const resolvedFrom = new Set(closure.edges.map((edge) => edge.from))
+  const silent = entries.filter((entry) => !resolvedFrom.has(entry))
+  if (silent.length > 0) {
+    offenders.push(
+      `这些入口一条相对 import 都没解析出来（import 正则该升级了，否则本判据恒真）：${silent.join(', ')}`,
+    )
+  }
+  if (!closure.files.some((file) => file.path.startsWith('src/lib/'))) {
+    offenders.push('闭包里一个 src/lib/** 文件都没有 —— 闭包没走深，判据形同空转')
+  }
+  return offenders
+}
+
+/** 从 `lib/credentials.ts` 允许的**值**绑定：只有存在性扫描这一支。 */
+const ALLOWED_CREDENTIALS_VALUES: ReadonlySet<string> = new Set(['readCredentialsPresence'])
+
+/** B19 判据：观察层闭包不许触到取值路径。 */
+function judgeObservationValuePath(closure: ImportClosure): string[] {
+  const offenders: string[] = []
+  const at = (edge: ImportEdge): string => `${edge.from}:${String(edge.line)}`
+  for (const edge of closure.edges) {
+    // ① 取值路径整个禁止：`lib/cookie.ts` 的唯一职责就是签发凭证。
+    if (edge.to.endsWith('/lib/cookie.ts')) {
+      offenders.push(`${at(edge)} → 观察层 import 了取值路径 ${edge.to}（spec: ${edge.spec}）`)
+      continue
+    }
+    if (!edge.to.endsWith('/lib/credentials.ts')) continue
+    // ② 命名空间 / 默认导入 = 任何导出都可达 → 与「直接 import 取值函数」等价，必须一起禁。
+    if (edge.namespaceOrDefault) {
+      offenders.push(`${at(edge)} → 命名空间/默认导入 credentials.ts（此后任何导出都可达）`)
+    }
+    for (const name of edge.values) {
+      if (!ALLOWED_CREDENTIALS_VALUES.has(name)) {
+        offenders.push(`${at(edge)} → 从 credentials.ts 导入取值函数 ${name}`)
+      }
+    }
+  }
+  return offenders
+}
+
+/**
+ * 项目内**写 helper** 的名字（显式、窄的拒绝名单）。
+ *
+ * 这是 B23 相对 B10 的**真实增量之一**：这些是**本仓自己的函数**，不是 `node:fs` API，
+ * 而 B10 判据的前提是「确有 `node:fs` 来源」⇒ 照不到它们。
+ *
+ * ⚠️ **已知限度**：这是**开放名单**，改写个名字（`persist()`）就绕过去了。见文末「已知限度」。
+ */
+const LOCAL_WRITE_HELPER_NAMES = [
+  'writeText',
+  'writeJson',
+  'writeTextFile',
+  'writeJsonFile',
+  'saveToFile',
+  'dumpToFile',
+] as const
+
+/** B23 判据：观察层闭包不许自己写文件。 */
+function judgeObservationWrites(closure: ImportClosure): string[] {
+  // fs 写入族直接复用 B10/B15 那套**按来源判定**的扫描器 —— 不另写一份，否则语义会漂。
+  const offenders = judgeFsWriteUsage(closure.files)
+  for (const file of closure.files) {
+    const lines = stripComments(file.text).split('\n')
+    lines.forEach((line, index) => {
+      for (const name of LOCAL_WRITE_HELPER_NAMES) {
+        if (new RegExp(`\\b${name}\\s*\\(`).test(line)) {
+          offenders.push(`${file.path}:${String(index + 1)} → 项目内写 helper ${name}(…)`)
+        }
+      }
+    })
+  }
+  return offenders
+}
+
+/** 用内存里的源码造一个闭包（只验判据本身，不碰真文件）。 */
+function closureOf(sources: Record<string, string>, entries: readonly string[]): ImportClosure {
+  return buildImportClosure(entries, (rel) => sources[rel])
+}
+
+describe('B19 观察层四个工具不许间接 import 到取值路径', () => {
+  it('真实闭包：解析得动（下界），且没有碰取值路径', () => {
+    const closure = buildImportClosure(OBSERVATION_TOOL_FILES)
+
+    // 先立下界：这几条一旦红，下面的「不含取值路径」就是**恒真的空转**。
+    const unusable = judgeClosureUsable(closure, OBSERVATION_TOOL_FILES)
+    expect(
+      unusable,
+      `闭包不可用 —— 下面的断言会退化成恒真（空集不含任何东西）：\n${unusable.join('\n')}`,
+    ).toEqual([])
+
+    // 非空自证②：真的走深了（18 个文件是实测值；这里只钉「比入口多」，不钉死数字 —— 会漂）。
+    expect(
+      closure.files.length,
+      `闭包只有 ${String(closure.files.length)} 个文件，没走深到这个判据有意义`,
+    ).toBeGreaterThan(OBSERVATION_TOOL_FILES.length)
+
+    const offenders = judgeObservationValuePath(closure)
+    expect(
+      offenders,
+      describeOffenders('观察层触到了取值路径', offenders) +
+        '\n观察层必须停在「存在性扫描」这一档：可以 `readCredentialsPresence`，' +
+        '但绝不能把密钥读出来（那会把秘密带进一个判定型输出）。',
+    ).toEqual([])
+  })
+
+  it('判据可被否证：import `lib/cookie.ts` → 红', () => {
+    const closure = closureOf(
+      {
+        'src/tools/dsh_check_auth.ts': "import { signCookie } from '../lib/cookie.js'\n",
+        'src/lib/cookie.ts': 'export function signCookie() {}\n',
+        'src/lib/errors.ts': 'export const x = 1\n',
+      },
+      ['src/tools/dsh_check_auth.ts'],
+    )
+    expect(judgeClosureUsable(closure, ['src/tools/dsh_check_auth.ts'])).toEqual([])
+    expect(judgeObservationValuePath(closure).length).toBeGreaterThan(0)
+  })
+
+  it('判据可被否证：从 `credentials.ts` import 一个取值函数 → 红', () => {
+    const closure = closureOf(
+      {
+        'src/tools/dsh_check_auth.ts':
+          "import { readCredentialsSecret } from '../lib/credentials.js'\n",
+        'src/lib/credentials.ts':
+          'export function readCredentialsSecret() {}\nexport const x = 1\n',
+      },
+      ['src/tools/dsh_check_auth.ts'],
+    )
+    expect(judgeObservationValuePath(closure)).toEqual([
+      'src/tools/dsh_check_auth.ts:1 → 从 credentials.ts 导入取值函数 readCredentialsSecret',
+    ])
+  })
+
+  it('判据可被否证：命名空间/默认导入 `credentials.ts` 也算越界（否则一切导出都可达）', () => {
+    // 这是判据里最容易被绕过的一条：`import * as c` 之后 `c.任何取值函数()` 都合法，
+    // 而且**名字一个都不出现在 import 子句里** —— 只查具名绑定必然漏。
+    for (const source of [
+      "import * as credentials from '../lib/credentials.js'\n",
+      "import credentials from '../lib/credentials.js'\n",
+    ]) {
+      const closure = closureOf(
+        { 'src/tools/dsh_check_auth.ts': source, 'src/lib/credentials.ts': 'export const x = 1\n' },
+        ['src/tools/dsh_check_auth.ts'],
+      )
+      expect(judgeObservationValuePath(closure), `漏了命名空间形态：${source.trim()}`).not.toEqual(
+        [],
+      )
+    }
+  })
+
+  it('别误伤：今天真的写法（具名值 + 内联 `type` 限定）必须是绿的', () => {
+    // 实测这就是 `dsh_check_auth.ts` 的现行写法。区分值与类型是必须的 ——
+    // 不区分就会把这条**合规** import 判红，而假红会逼人放宽整条判据。
+    const closure = closureOf(
+      {
+        'src/tools/dsh_check_auth.ts':
+          "import { readCredentialsPresence, type CredentialsPresence } from '../lib/credentials.js'\n",
+        'src/lib/credentials.ts':
+          'export interface CredentialsPresence { exists: boolean }\nexport function readCredentialsPresence() {}\n',
+      },
+      ['src/tools/dsh_check_auth.ts'],
+    )
+    expect(judgeObservationValuePath(closure)).toEqual([])
+  })
+
+  it('别误伤：整条 `import type` 也不该算越界（类型取不到运行时值）', () => {
+    const closure = closureOf(
+      {
+        'src/tools/dsh_check_auth.ts':
+          "import type { CredentialsPresence } from '../lib/credentials.js'\n",
+        'src/lib/credentials.ts': 'export interface CredentialsPresence { exists: boolean }\n',
+      },
+      ['src/tools/dsh_check_auth.ts'],
+    )
+    expect(judgeObservationValuePath(closure)).toEqual([])
+  })
+
+  it('下界本身可被否证：解析失效（入口缺失 / 解析不到 / 一条 import 都没有）必须红', () => {
+    // 这一条守的是「另外那条红线不要变成恒真」。三种静默坏法各来一个。
+    const missingEntry = closureOf({}, ['src/tools/dsh_check_auth.ts'])
+    expect(judgeClosureUsable(missingEntry, ['src/tools/dsh_check_auth.ts'])).not.toEqual([])
+
+    const brokenPath = closureOf(
+      { 'src/tools/dsh_check_auth.ts': "import { ok } from '../lib/errs.js'\n" },
+      ['src/tools/dsh_check_auth.ts'],
+    )
+    expect(judgeClosureUsable(brokenPath, ['src/tools/dsh_check_auth.ts'])).not.toEqual([])
+
+    const noImports = closureOf(
+      {
+        'src/tools/dsh_check_auth.ts': 'export const nothing = 1\n',
+        'src/lib/errors.ts': 'export const x = 1\n',
+      },
+      ['src/tools/dsh_check_auth.ts'],
+    )
+    expect(
+      judgeClosureUsable(noImports, ['src/tools/dsh_check_auth.ts']),
+      '一个入口一条相对 import 都没有 → 应当判红（否则 import 正则失效时本判据恒真）',
+    ).not.toEqual([])
+  })
+
+  it('下界本身可被否证：闭包没走深到 src/lib（regex 只吃到入口层）也要红', () => {
+    // 让「入口有 import」但都指向非 lib 文件：edges 非空、unresolved 为空，
+    // 只有「必须含 src/lib/**」这一条能把它挡下来。
+    const shallow = closureOf(
+      {
+        'src/tools/dsh_check_auth.ts': "import { helper } from './util.js'\n",
+        'src/tools/util.ts': 'export const helper = 1\n',
+      },
+      ['src/tools/dsh_check_auth.ts'],
+    )
+    const offenders = judgeClosureUsable(shallow, ['src/tools/dsh_check_auth.ts'])
+    expect(offenders.join('\n')).toContain('src/lib')
+  })
+})
+
+describe('B23 观察层不许自己写文件', () => {
+  it('真实闭包：解析得动（下界），且闭包里没有写入', () => {
+    const closure = buildImportClosure(OBSERVATION_TOOL_FILES)
+    const unusable = judgeClosureUsable(closure, OBSERVATION_TOOL_FILES)
+    expect(unusable, `闭包不可用 —— 下面的断言会退化成恒真：\n${unusable.join('\n')}`).toEqual([])
+    expect(closure.files.length).toBeGreaterThan(OBSERVATION_TOOL_FILES.length)
+
+    const offenders = judgeObservationWrites(closure)
+    expect(
+      offenders,
+      describeOffenders('观察层在自己写文件', offenders) +
+        '\n观察层只读：`audit` 落盘只能经宿主服务（`spillStore`），不许本仓自己写文件。' +
+        '\n（注意 B23 的 fs 判据与 B10 共用同一个扫描器 —— fs 那部分是 B10 的子集，别把 B10 放宽。）',
+    ).toEqual([])
+  })
+
+  it('判据可被否证：闭包里出现 fs 写入 → 红', () => {
+    const closure = closureOf(
+      {
+        'src/tools/dsh_check_auth.ts':
+          "import { writeFileSync } from 'node:fs'\nwriteFileSync(p, 'x')\n",
+      },
+      ['src/tools/dsh_check_auth.ts'],
+    )
+    expect(judgeObservationWrites(closure).length).toBeGreaterThan(0)
+  })
+
+  it('判据可被否证：项目内写 helper（B23 相对 B10 的真实增量）→ 红', () => {
+    // `writeText` 是本仓自己的函数、**不是** node:fs API —— B10 的「须有 fs 来源」规则照不到它。
+    // 这条用例就是 B23 存在的理由本身。
+    // 定义放在闭包**外**的 writer.ts，好让入口里只剩**调用点**，从而能钉住真实行号。
+    const entry = [
+      '/**',
+      ' * 一段多行注释：把后面的行号顶下去，用来证明报的是**真实文件行号**',
+      ' * （块注释整体删掉会让行号整体前移，本仓为这个踩过坑）',
+      ' */',
+      "import { writeText } from '../lib/writer.js'",
+      'const a = 1',
+      "writeText('/tmp/x', 'y')",
+    ].join('\n')
+    const closure = closureOf(
+      {
+        'src/tools/dsh_check_auth.ts': entry,
+        'src/lib/writer.ts': 'export function writeText(p: string, t: string) { void p; void t }\n',
+      },
+      ['src/tools/dsh_check_auth.ts'],
+    )
+    // 前提自证：B10 那套扫描器确实照不到它（没有 node:fs 来源）——
+    // 否则这条用例证明不了「B23 有增量」，而只是把 B10 又说了一遍。
+    expect(judgeFsWriteUsage([{ path: 'src/tools/dsh_check_auth.ts', text: entry }])).toEqual([])
+
+    const offenders = judgeObservationWrites(closure)
+    expect(offenders).not.toEqual([])
+    // 真实行号：调用点在第 7 行（前面 4 行块注释 + import，注释不能被吃掉）。
+    expect(offenders[0]).toContain(':7 →')
+    expect(offenders[0]).toContain('writeText')
+  })
+
+  it('别误伤：只读 fs API 不算写入', () => {
+    const closure = closureOf(
+      {
+        'src/tools/dsh_check_auth.ts':
+          "import { readFileSync } from 'node:fs'\nexport const t = readFileSync(p, 'utf8')\n",
+      },
+      ['src/tools/dsh_check_auth.ts'],
+    )
+    expect(judgeObservationWrites(closure)).toEqual([])
+  })
+
+  it('别误伤：本仓那个同名的本地 `truncate` 不算写入（按来源判定）', () => {
+    // `src/lib/render.ts` 里就有一个本地 truncate —— B10 已经有同样的防误报用例，这里在闭包口径上再钉一次。
+    const closure = closureOf(
+      {
+        'src/tools/dsh_check_auth.ts': "import { truncate } from '../lib/render.js'\n",
+        'src/lib/render.ts': 'export function truncate(text: string) { return text }\n',
+      },
+      ['src/tools/dsh_check_auth.ts'],
+    )
+    expect(judgeObservationWrites(closure)).toEqual([])
+  })
+
+  it('别误伤：注释里提到 `writeText(` 不算违规（否则解释规则的文字会把判据变成噪声）', () => {
+    const closure = closureOf(
+      {
+        'src/tools/dsh_check_auth.ts':
+          '// 绝不能调 writeText(…) —— 观察层只读\nexport const a = 1\n',
+      },
+      ['src/tools/dsh_check_auth.ts'],
+    )
+    expect(judgeObservationWrites(closure)).toEqual([])
+  })
+
+  it('下界本身可被否证：闭包空转（解析失效）必须红', () => {
+    const empty = closureOf({}, ['src/tools/dsh_check_auth.ts'])
+    expect(judgeClosureUsable(empty, ['src/tools/dsh_check_auth.ts'])).not.toEqual([])
+  })
+})
+
+/**
  * # 本文件的已知限度
  *
  * 这一节本身是判据的一部分：它让下一个改实现的人知道**哪些红线会跟着失效**。
@@ -1403,11 +1981,24 @@ describe('B15 写侧工具只许碰进程内树', () => {
  * | 13 | A5 的反例控制 | 守卫的报错文案、以及注入锚点 `'          npm publish'` 的确切缩进 | 两者都已在文件里做成**响亮失败**（含「变异真的落地」自检），但都与实现细节耦合。【已探明】 |
  * | 14 | B14 的 CJK 扫描 | 自写状态机（注释 / 三种引号 / 转义 / 未闭合）；**引号未闭合时当普通字符** | 极端写法（跨行未闭合的引号）会**漏** —— TS 本就不允许裸换行，代价可忽略；模板串里 `${}` 表达式的文本会并入同一段 body，其中的 CJK 也照出（属真命中，不是误报）。【已探明】 |
  * | 15 | B15 的作用域 | **按文件清单限定**（`WRITE_SIDE_FILES` 两个文件），且**要求它们存在**（不在即红，不给 skip） | 写侧新增文件而没加进清单 → 那个文件**不被 B15 覆盖**（假绿）；清单里的文件被删/改名 → **判红**（响亮，要求显式改这条红线）。**B15 只管写侧，不覆盖诊断半边** —— 诊断那边是 B10 |
+ * | 16 | B19 / B23 的 import 闭包 | 自写解析器：正则认 `import … from '<spec>'` 与副作用 `import '<spec>'`；只跟**相对**说明符；`.js` → `.ts` | **动态 `import()` 不跟**（写法 `await import('./x.js')` 会**漏**，属已知未覆盖）；**包名 import 不跟**（本仓零运行时依赖，且观察层不 import 官方包的值路径）；解析器靠文本，不用 TS 的模块图 —— 语法写法一换（`export … from`、重导出）可能漏。【已探明：闭包 18 文件 / 0 未解析】 |
+ * | 17 | B19 的「允许清单」`ALLOWED_CREDENTIALS_VALUES` | 手写的**单一名字** `readCredentialsPresence` | `credentials.ts` 改名/新增别的**存在性**扫描函数会**误报**（红，需同步改这张表）；反过来，把一个取值函数**改名成** `readCredentialsPresence` 会绕过（那是刻意伪装，红线本来也防不住） |
+ * | 18 | B23 的项目内写 helper 名单 `LOCAL_WRITE_HELPER_NAMES` | 手抄的 6 个名字 | **开放名单，必然漏**：换个名字（`persist()` / `emit()`）就绕过去了。它只挡「顺手抄了测试里的 `writeText`」这一种真实失误。**fs 那部分不是这条的功劳**（那是 B10） |
  *
  * **B10 已知未覆盖的写入通道**（明确列出，不静默排除）：
  * `process.binding`、原生 addon、`require()`（本仓纯 ESM）、把 fs 方法先赋给别的变量再调用
  * （`const w = writeFileSync`）、以及经 `ctx.subprocess`/`ctx.shell` 发起的写命令。
  * 这些在本仓目前不出现；真出现时要靠人看出来，或把判据扩成 AST 级。
+ *
+ * **B23 的定位（别读错）**：`[已核]` **B10 已经在扫整个 `src/**`**，且 `FS_WRITE_APIS` 里已含
+ * `writeFile` / `mkdir`。所以 B23 的 **fs 部分是 B10 的子集**，它**不提供 B10 没有的 fs 覆盖**。
+ * B23 的真实增量只有两条：① 项目内写 helper 名（`writeText(…)`，B10 的「须有 `node:fs` 来源」照不到）；
+ * ② 把判据钉在**观察层闭包**而非整个 `src/**`（将来写侧合法获得写入能力时，B10 全局会误伤，B23 不会）。
+ * **要加严应从 B10 加**，不要在 B23 里重复实现一遍 fs 判据。
+ *
+ * **B19 / B23 的下界（SHAPE §10.0）**：两条都是「闭包里不得出现 X」，而**空集不含 X**。
+ * `judgeClosureUsable` 是它们共同的前置断言，**空转判红、不给 skip**；它自己有两条否证用例
+ * （解析失效 / 没走深到 `src/lib`）。改闭包解析器时**必须先看这两条用例**，否则整族判据会静默变恒真。
  *
  * **B9 第二个出口（提取器之外的）**：`src/tools/` 里**别处**出现的 `dsh_*` 字面量
  * （例如 `nextStep` 文案里的 `tool: 'dsh_dump_config'`）**不被提取器看见** ——
