@@ -19,8 +19,13 @@ export interface TextBlockLike {
 /** 渲染文本的长度上限（字符）。 */
 export const RENDER_MAX_CHARS = 6_000
 
-/** 可选的「一句话结论」：由各工具提供，把最重要的判定提到首行。 */
-export type ResultSummary = (data: unknown) => string | undefined
+/**
+ * 可选的「一句话结论」：由各工具提供，把最重要的判定提到首行。
+ *
+ * 参数是**该分支的载荷** —— 成功时是 `data`，失败时是 `evidence`（可能没有）。
+ * 也就是同一个 hook 会在两种结果上各跑一次；形状拿不准时返回 `undefined` 即可。
+ */
+export type ResultSummary = (payload: unknown) => string | undefined
 
 /**
  * 渲染一个工具结果。
@@ -68,11 +73,16 @@ export function renderToolResultText(
         .join('\n'),
     )
   }
+  // 失败也要跑「一句话结论」：写侧工具最要紧的信息（旧 fiber 有没有被碰、有没有回滚）
+  // 住在 evidence 里 —— 不在这里跑 summarize，工具作者写在 hook 里的那行判定就永远到不了模型。
+  const summary = summarize?.(result.evidence)
   return truncate(
     [
       `[${toolName}] failed (${result.error.kind})`,
+      summary ?? '',
       result.error.message,
       `hint: ${result.error.hint}`,
+      result.evidence === undefined ? '' : `evidence: ${stableJson(result.evidence)}`,
       nextStepLine(result.nextStep),
     ]
       .filter((part) => part !== '')

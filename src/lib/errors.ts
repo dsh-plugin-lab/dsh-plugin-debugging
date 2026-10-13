@@ -73,10 +73,21 @@ export interface ToolOk<T> {
   nextStep?: NextStep
 }
 
-/** 失败结果（**预期内**失败；意外由兜底分支转成 `internal`）。 */
+/**
+ * 失败结果（**预期内**失败；意外由兜底分支转成 `internal`）。
+ *
+ * `evidence` 是**失败时观测到的事实**（例如「旧 fiber 从未被碰」「回滚成立」），
+ * 而**不是**成功 payload 的替代品 —— 名字与 `data` 分开，就是为了防止有人把成功形状
+ * 塞进失败分支、把 `ok` 的语义搅浑。
+ *
+ * 什么时候用它有一条规则：**`ok` 只描述「工具这次操作有没有完成」，不描述系统健不健康**。
+ * 「诊断成功、只是结论是坏消息」应当走 `ok: true` + `data`（`verdict` 承载结论）；
+ * 只有「操作没完成、但看到了值得留下的事实」才走 `ok: false` + `evidence`。
+ */
 export interface ToolFail {
   ok: false
   error: ToolError
+  evidence?: JsonValue
   nextStep?: NextStep
 }
 
@@ -164,9 +175,16 @@ export function ok<T>(data: T, nextStep?: NextStep): ToolOk<T> {
  *
  * @param error 结构化错误。
  * @param nextStep 可选的下一步建议。
+ * @param evidence 可选的**观测事实**（失败路径上看到的东西，不是成功 payload 的替代品）。
  */
-export function fail(error: ToolError, nextStep?: NextStep): ToolFail {
-  return nextStep === undefined ? { ok: false, error } : { ok: false, error, nextStep }
+export function fail(error: ToolError, nextStep?: NextStep, evidence?: JsonValue): ToolFail {
+  // 没有证据时**不写这个字段**：给个空对象，模型就分不清「没有证据」与「证据是空的」。
+  return {
+    ok: false,
+    error,
+    ...(evidence === undefined ? {} : { evidence }),
+    ...(nextStep === undefined ? {} : { nextStep }),
+  }
 }
 
 /**
