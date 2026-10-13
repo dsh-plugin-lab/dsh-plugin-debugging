@@ -24,7 +24,6 @@ import {
   composeDescription,
   DESCRIPTION_MAX_CHARS,
   DESCRIPTION_MAX_LINES,
-  PARAMETER_DESCRIPTIONS_MAX_CHARS,
 } from '../../src/tools/describe.ts'
 import { TOOL_ERROR_KINDS, toolResultProblem, type JsonValue } from '../../src/lib/errors.ts'
 import {
@@ -158,7 +157,7 @@ describe('dsh_dump_config', () => {
   })
 
   describe('形状：描述层（SHAPE §2.1 冻结）', () => {
-    it('四段骨架：合成器与声明一致、行数 ≤4、字符 ≤240、参数描述合计 ≤100', () => {
+    it('四段骨架：合成器与声明一致、行数 ≤4、字符 ≤240', () => {
       const tool = createDumpConfigTool(depsFor(configFor('/tmp/nowhere')))
       const description = DUMP_CONFIG_DESCRIPTION
 
@@ -196,9 +195,8 @@ describe('dsh_dump_config', () => {
         (sum, item) => sum + (item.description?.length ?? 0),
         0,
       )
-      // 下界：`total > 0` —— 否则「≤100」这条上界在空集上恒真（SHAPE §10.0）。
+      // 下界：`total > 0` —— 上界已删（SHAPE §2），这两条下界是唯一的机械守卫。
       expect(total).toBeGreaterThan(0)
-      expect(total).toBeLessThanOrEqual(PARAMETER_DESCRIPTIONS_MAX_CHARS)
     })
 
     it('恒定知识只在描述层边界段写一次：退出码语义 + 已知误报的判据', () => {

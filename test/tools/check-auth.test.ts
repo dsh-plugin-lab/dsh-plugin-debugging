@@ -32,7 +32,6 @@ import {
   composeDescription,
   DESCRIPTION_MAX_CHARS,
   DESCRIPTION_MAX_LINES,
-  PARAMETER_DESCRIPTIONS_MAX_CHARS,
 } from '../../src/tools/describe.ts'
 import {
   ensureToolResult,
@@ -173,7 +172,7 @@ describe('dsh_check_auth', () => {
   })
 
   describe('形状：描述层（SHAPE §2.1 冻结）', () => {
-    it('四段骨架：合成器与声明一致、行数 ≤4、字符 ≤240、参数描述合计 ≤100', () => {
+    it('四段骨架：合成器与声明一致、行数 ≤4、字符 ≤240', () => {
       const tool = createCheckAuthTool(depsFor(configFor('/tmp/nowhere')))
 
       // 合成器与声明必须一致 —— 防止有人手写字符串绕过骨架。
@@ -195,7 +194,7 @@ describe('dsh_check_auth', () => {
       // ⚠️ `defineTool` 把参数编译成了 JSON schema（`{ type, properties }`），所以要点进
       // `properties` 才看得到每个参数的描述。直接 `Object.values(tool.parameters)` 会拿到
       // `'object'` 与 properties 对象本身 → 每条 `description` 都是 `undefined` → 合计恒为 0
-      // → `≤100` **恒真**（判据空转，活跃坑 18 的形状）。实测过：rawKeys=["type","properties"]、
+      // → 合计恒为 0，**两条下界都会判红**（判据空转，活跃坑 18 的形状）。实测过：rawKeys=["type","properties"]、
       // rawTotal=0。所以下面**必须有下界**（参数个数 > 0 且 total > 0），光有上界等于没判。
       // 形状照 `test/tools/hot-reload.test.ts`（仓里唯一先写对的那份）。
       const parameters = tool.parameters as {
@@ -212,7 +211,6 @@ describe('dsh_check_auth', () => {
         0,
       )
       expect(total, '参数描述合计为 0 —— 判据空转').toBeGreaterThan(0)
-      expect(total).toBeLessThanOrEqual(PARAMETER_DESCRIPTIONS_MAX_CHARS)
     })
 
     it('搬走的恒定知识**只能**在描述层出现一次（旧的凭证 note 不再进输出）', () => {

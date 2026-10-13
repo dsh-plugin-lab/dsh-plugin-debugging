@@ -54,7 +54,6 @@ import {
   composeDescription,
   DESCRIPTION_MAX_CHARS,
   DESCRIPTION_MAX_LINES,
-  PARAMETER_DESCRIPTIONS_MAX_CHARS,
 } from '../../src/tools/describe.ts'
 import {
   TOOL_ERROR_KINDS,
@@ -1101,7 +1100,7 @@ describe('dsh_hot_reload · 形状（SHAPE §2.1 / §3.1 / §4.1）', () => {
     )
   }
 
-  it('描述四段：合成器与声明一致、行数 ≤4、字符 ≤240、参数描述合计 ≤100（B20a）', () => {
+  it('描述四段：合成器与声明一致、行数 ≤4、字符 ≤240（B20a）', () => {
     const tool = createHotReloadTool({
       ...depsFor(configFor('/tmp/nowhere')),
       reload: makeHost({}),
@@ -1145,7 +1144,6 @@ describe('dsh_hot_reload · 形状（SHAPE §2.1 / §3.1 / §4.1）', () => {
       0,
     )
     expect(total).toBeGreaterThan(0)
-    expect(total).toBeLessThanOrEqual(PARAMETER_DESCRIPTIONS_MAX_CHARS)
   })
 
   it('`data` 顶层**恰好**三键：成功与失败同形（B21）', async () => {

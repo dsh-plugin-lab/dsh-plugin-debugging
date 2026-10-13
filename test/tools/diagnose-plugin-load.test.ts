@@ -26,7 +26,6 @@ import {
   composeDescription,
   DESCRIPTION_MAX_CHARS,
   DESCRIPTION_MAX_LINES,
-  PARAMETER_DESCRIPTIONS_MAX_CHARS,
 } from '../../src/tools/describe.ts'
 import { FIBER_STATE } from '../../src/lib/fiber.ts'
 import { PORT_LOOKUP_SHELL } from '../../src/lib/ports.ts'
@@ -125,7 +124,7 @@ describe('dsh_diagnose_plugin_load', () => {
   })
 
   describe('形状：描述层（SHAPE §2.1 冻结）', () => {
-    it('四段骨架：合成器与声明一致、行数 ≤4、字符 ≤240、参数描述合计 ≤100', () => {
+    it('四段骨架：合成器与声明一致、行数 ≤4、字符 ≤240', () => {
       const tool = createDiagnosePluginLoadTool(depsFor(configFor('/tmp/nowhere')))
       const description = DIAGNOSE_PLUGIN_LOAD_DESCRIPTION
 
@@ -165,7 +164,6 @@ describe('dsh_diagnose_plugin_load', () => {
         0,
       )
       expect(total).toBeGreaterThan(0)
-      expect(total).toBeLessThanOrEqual(PARAMETER_DESCRIPTIONS_MAX_CHARS)
     })
 
     it('搬走的恒定知识**只能**在描述层出现一次（旧的两种 caveat 逐字不在输出里）', () => {

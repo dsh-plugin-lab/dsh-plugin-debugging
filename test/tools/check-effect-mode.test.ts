@@ -25,7 +25,6 @@ import {
   composeDescription,
   DESCRIPTION_MAX_CHARS,
   DESCRIPTION_MAX_LINES,
-  PARAMETER_DESCRIPTIONS_MAX_CHARS,
 } from '../../src/tools/describe.ts'
 import {
   ensureToolResult,
@@ -166,7 +165,7 @@ describe('dsh_check_effect_mode', () => {
   })
 
   describe('形状：描述层（SHAPE §2.1 冻结）', () => {
-    it('四段骨架：合成器与声明一致、行数 ≤4、字符 ≤240、参数描述合计 ≤100', async () => {
+    it('四段骨架：合成器与声明一致、行数 ≤4、字符 ≤240', async () => {
       const dshHome = await tempDshHome()
       const tool = createEffectModeTool(depsFor(configFor(dshHome)))
       const description = CHECK_EFFECT_MODE_DESCRIPTION
@@ -191,7 +190,7 @@ describe('dsh_check_effect_mode', () => {
       // ⚠️ `defineTool` 把参数**编译成了 JSON schema**（`{ type, properties, required }`，
       // 见 AGENTS 活跃坑 11）—— 直接 `Object.values(tool.parameters)` 拿到的是 `'object'`
       // 字符串与 properties 对象本身，每条 `description` 都是 `undefined` ⇒ 合计恒为 0
-      // ⇒「≤100」**恒真**（SHAPE §10.0 的「只有上界、没有下界」那一类假绿）。
+      // ⇒ 合计恒为 0，**两条下界判红**（SHAPE §10.0：下界才是防空转的那一半）。
       const parameters = tool.parameters as {
         properties?: Record<string, { description?: string }>
       }
@@ -205,7 +204,6 @@ describe('dsh_check_effect_mode', () => {
         total += text.length
       }
       expect(total).toBeGreaterThan(0)
-      expect(total).toBeLessThanOrEqual(PARAMETER_DESCRIPTIONS_MAX_CHARS)
     })
 
     it('恒定知识只在描述层出现一次（旧输出里那两句机制说明逐字不在输出里）', async () => {
