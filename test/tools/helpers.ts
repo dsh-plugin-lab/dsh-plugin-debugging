@@ -300,3 +300,13 @@ export function expectFail(result: ToolResult<unknown>): {
   if (result.ok) throw new Error(`期望失败，实际成功：${JSON.stringify(result.data)}`)
   return result.error
 }
+
+/**
+ * 断言失败并取出 `evidence`（没有就是 `undefined`）。
+ *
+ * 与 `expectFail` 分开：绝大多数失败**不该**带证据，所以「有没有」本身要能被断言。
+ */
+export function expectFailEvidence(result: ToolResult<unknown>): unknown {
+  if (result.ok) throw new Error(`期望失败，实际成功：${JSON.stringify(result.data)}`)
+  return result.evidence
+}

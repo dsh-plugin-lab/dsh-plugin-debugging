@@ -194,15 +194,17 @@ export function createCheckAuthTool(deps: ToolDeps): ToolDefinition {
             {
               kind: 'auth',
               message: `${authority} returned 401 — the service is up but authentication failed (not "not running")`,
-              hint:
-                'cookies are bound to host:port: changing the port always yields 401, while a restart on the same port keeps old cookies valid (30 days, non-sliding). ' +
-                `the browser-session entry in the credentials file is ${credentials.browserSessionPresent ? 'present' : 'absent'}`,
+              hint: 'cookies are bound to host:port: changing the port always yields 401, while a restart on the same port keeps old cookies valid (30 days, non-sliding).',
             },
             {
               tool: CHECK_AUTH_TOOL,
               args: { port: resolvedPort.port, host },
               why: 'make authority match the browser address bar exactly, then retry; if it still returns 401, fall back to v1.1 cookie signing',
             },
+            // 证据：凭据文件那一块。此前只把 `browserSessionPresent` 内联进 hint ——
+            // 「文件在不在、哪一行、client-connection 有没有」全丢了，而 401 的排查恰恰要这些。
+            // 事实现在有唯一的家（evidence），hint 只留 cookie/authority 那段解释。
+            { credentials: data.credentials },
           ),
         )
       }

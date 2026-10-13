@@ -39,7 +39,17 @@ import {
   summarizeHotReload as summarizeReloadForTest,
 } from '../../src/tools/dsh_hot_reload.ts'
 import { TOOL_ERROR_KINDS } from '../../src/lib/errors.ts'
-import { configFor, depsFor, execWith, expectFail, expectOk, run, tempDshHome } from './helpers.ts'
+import { renderToolResultText } from '../../src/lib/render.ts'
+import {
+  configFor,
+  depsFor,
+  execWith,
+  expectFail,
+  expectFailEvidence,
+  expectOk,
+  run,
+  tempDshHome,
+} from './helpers.ts'
 
 const ENTRY_URL = 'file:///repo/pkg-a/lib/index.js'
 const DEP_URL = 'file:///repo/pkg-a/lib/dep.js'
@@ -736,12 +746,35 @@ describe('dsh_hot_reload · 工具层', () => {
       }),
     )
 
-    const error = expectFail(await run(tool, { entryId: 'pkg-a' }))
+    const result = await run(tool, { entryId: 'pkg-a' })
+    const error = expectFail(result)
     expect(error.kind).toBe('reload-failed')
-    // message 带**真实原因**；「旧 fiber 从未被碰」在 hint 里（契约的 ToolFail 没有 data）。
+    // message 带**真实原因**；「旧 fiber 从未被碰」既在 hint 里、也在**结构化证据**里
+    // （v1.1 起失败分支有 evidence 槽 —— 此前只能靠散文，模型得读英文句子去判「要不要收拾」）。
     expect(error.message).toContain('syntax error on disk')
     expect(error.hint).toContain('never touched')
+    expect(expectFailEvidence(result)).toMatchObject({ oldFiberTouched: false, rolledBack: false })
     expect(calls).toEqual([])
+  })
+
+  it('import 期失败：渲染出来的首行结论里必须能看见「旧 fiber 未被碰」', async () => {
+    // 这条钉住的是**渲染层**：`summarize` 原先只在成功时跑，于是工具作者写在 hook 里的
+    // 那句 `oldFiberUntouched=true` 永远到不了模型。失败分支现在也跑 summarize。
+    const { entry } = makeEntry()
+    const tool = await makeTool(
+      makeHost({
+        entries: [entry],
+        cache: makeCache().port,
+        importFresh: async () => {
+          throw new Error('syntax error on disk')
+        },
+      }),
+    )
+
+    const result = await run(tool, { entryId: 'pkg-a' })
+    const text = renderToolResultText(HOT_RELOAD_TOOL, result, summarizeReloadForTest)
+    expect(text).toContain('oldFiberUntouched=true')
+    expect(text).toContain('evidence: ')
   })
 
   it('apply 期失败 → reload-failed，hint 说清旧版本已放回', async () => {
@@ -751,9 +784,12 @@ describe('dsh_hot_reload · 工具层', () => {
     }
     const tool = await makeTool(makeHost({ entries: [entry], cache: makeCache().port }))
 
-    const error = expectFail(await run(tool, { entryId: 'pkg-a' }))
+    const result = await run(tool, { entryId: 'pkg-a' })
+    const error = expectFail(result)
     expect(error.kind).toBe('reload-failed')
     expect(error.hint).toContain('put back')
+    // 回滚成不成立是**结构化事实**，不是散文：`rolledBack: true` 才是模型该信的。
+    expect(expectFailEvidence(result)).toMatchObject({ rolledBack: true })
   })
 
   it('宿主端口自己抛异常时，execute **也不抛**，收敛成结构化失败', async () => {

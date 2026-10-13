@@ -17,6 +17,7 @@ import {
   depsFor,
   execWith,
   expectFail,
+  expectFailEvidence,
   expectOk,
   recordingSpawn,
   run,
@@ -150,6 +151,11 @@ describe('dsh_dump_config', () => {
       expect(error.kind).toBe('command-failed')
       expect(error.message).toContain('composition error')
       expect(error.message).toContain('skipping')
+      // hint 让模型「按 actionable 里的 entryId 去找那一行」—— 那就必须把 actionable 给它，
+      // 否则这句话在指一个模型看不见的东西（这就是 evidence 槽存在的理由）。
+      const evidence = expectFailEvidence(result) as { actionable?: unknown[] }
+      expect(Array.isArray(evidence.actionable)).toBe(true)
+      expect(evidence.actionable?.length ?? 0).toBeGreaterThan(0)
     })
 
     it('error 指向非 preset 行 → 真问题，报 command-failed', async () => {

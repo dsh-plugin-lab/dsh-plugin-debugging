@@ -135,14 +135,21 @@ src/
 
 ## 5. 工具半边
 
-四个工具都遵守同一条输出契约：
+五个工具都遵守同一条输出契约：
 
 ```ts
-{ ok: true,  data: {...}, nextStep?: {...} }          // 成功
-{ ok: false, error: { kind, message, hint }, nextStep? }  // 预期内失败
+{ ok: true,  data: {...}, nextStep?: {...} }                      // 成功
+{ ok: false, error: { kind, message, hint }, evidence?, nextStep? }  // 预期内失败
 ```
 
 - **`execute` 绝不 throw**。`kind` 是**闭枚举**，决定模型该不该重试；`message` 给人看；`hint` 是下一步。
+- **`ok` 只描述「工具这次操作有没有完成」，不描述系统健不健康**。所以「诊断成功、只是结论是坏消息」
+  走 `ok: true` + `data`（`verdict` 承载结论，`dsh_diagnose_plugin_load` 是样板），
+  只有「操作没完成、但看到了值得留下的事实」才走 `ok: false`。
+- **`evidence` 是失败路径上观测到的事实**（如 `oldFiberTouched` / `rolledBack` / `actionable` /
+  `credentials`），与成功的 `data` **分开命名**：它不是成功 payload 的替代品，而是「我看到了什么，
+  而操作没成」。**没有证据时不写这个字段**（空对象会让「有没有证据」不可判）。渲染层会把它打成
+  一行 `evidence: {...}`，并让 `summarize` 在失败时也跑一次（否则工具作者写在 hook 里的那句判定到不了模型）。
 - **每个工具都给 `nextStep`**：排障进度不能靠模型背历史（compaction 会丢），要把下一步落进工具结果。
 - **`exec.signal` 透传**到 fetch / spawn，让宿主的取消能到 IO 层。
 - **工具侧超时 > 传输层超时**：让传输层先超时，得到结构化错误，而不是裸 `TimeoutError`。

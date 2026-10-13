@@ -36,7 +36,7 @@
  * **不归 effect 管，dispose 旧 fiber 不会释放 → 静默泄漏**。工具无法检测它们，
  * 所以只能在 description 与 `why` 里明说。
  */
-import { fail, ok, toToolError, type NextStep, type ToolResult } from './errors.js'
+import { fail, ok, toToolError, type JsonValue, type NextStep, type ToolResult } from './errors.js'
 import { loaderFrom } from './loader.js'
 
 /** 定位 entry 的三种方式（§2.3；三者择一）。 */
@@ -927,7 +927,28 @@ export function outcomeToToolResult(outcome: ReloadOutcome): ToolResult<ReloadDa
       hint: failure.hint,
     },
     verifyNextStep(outcome.data),
+    failureEvidence(outcome.data),
   )
+}
+
+/**
+ * 失败时交给模型的**观测事实**：换的是哪个 entry、清了几格缓存、旧 fiber 有没有被碰、有没有回滚。
+ *
+ * 为什么必须有：这两条决定**要不要收拾** —— `oldFiberTouched: false` 是什么都不用做，
+ * `rolledBack: false` 是必须重启。只把它们写在 message/hint 里，等于让模型读英文句子去判，
+ * 而 message 恰恰是契约里「会随版本变」的那一层（`errors.ts` 的 `ToolError` 注释）。
+ * 机制层本来就在失败路径上算好了这些值，此前只是**出口丢了**。
+ *
+ * @param data 机制层在失败路径上已经算好的报告片段。
+ */
+function failureEvidence(data: Partial<ReloadData> | undefined): JsonValue | undefined {
+  if (data === undefined) return undefined
+  return {
+    ...(data.entry === undefined ? {} : { entry: data.entry as unknown as JsonValue }),
+    ...(data.modulesCleared === undefined ? {} : { modulesCleared: data.modulesCleared }),
+    ...(data.oldFiberTouched === undefined ? {} : { oldFiberTouched: data.oldFiberTouched }),
+    ...(data.rolledBack === undefined ? {} : { rolledBack: data.rolledBack }),
+  } as JsonValue
 }
 
 /**

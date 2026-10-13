@@ -13,7 +13,7 @@
  */
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools'
 
-import { fail, ok } from '../lib/errors.js'
+import { fail, ok, type JsonValue } from '../lib/errors.js'
 import { budgetFor, createDeadline } from '../lib/timeouts.js'
 import {
   classifyDiagnostic,
@@ -162,6 +162,11 @@ export function createDumpConfigTool(deps: ToolDeps): ToolDefinition {
               args: { profile },
               why: 'after fixing the config, run it again and confirm actionable is empty',
             },
+            // 证据：hint 让模型「按 actionable 里的 entryId 去找那一行」，那就必须**把 actionable 给它**
+            // —— 否则这句话在指一个模型看不见的东西（这正是本仓补 `evidence` 槽的起因）。
+            // `kind` 仍是 `command-failed`：这是「发现坏消息」，不是「工具没干成活」。
+            // `evidence` 声明为 `JsonValue`（无损 JSON），这里的结构化诊断是它的子集，边界处显式收窄。
+            { actionable, counts, diagnostics } as unknown as JsonValue,
           ),
         )
       }

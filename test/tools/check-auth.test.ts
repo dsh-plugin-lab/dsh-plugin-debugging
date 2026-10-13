@@ -15,6 +15,7 @@ import {
   depsFor,
   execWith,
   expectFail,
+  expectFailEvidence,
   expectOk,
   run,
   tempDshHome,
@@ -120,11 +121,21 @@ describe('dsh_check_auth', () => {
       const dshHome = await tempDshHome()
       const tool = createCheckAuthTool(depsFor(configFor(dshHome), { fetch: fetchWithStatus(401) }))
 
-      const error = expectFail(await run(tool, { port: 3080 }))
+      const result = await run(tool, { port: 3080 })
+      const error = expectFail(result)
       expect(error.kind).toBe('auth')
       expect(TOOL_ERROR_KINDS).toContain(error.kind)
       expect(error.message).toContain('401')
       expect(error.message).toContain('not "not running"')
+      // 凭据那一块是**证据**，不是 hint 里的一句摘要：401 的排查要 file / exists /
+      // client-connection / browser-session 全都看得见（此前只内联了 browserSessionPresent）。
+      const evidence = expectFailEvidence(result) as { credentials?: Record<string, unknown> }
+      expect(evidence.credentials).toBeDefined()
+      expect(typeof evidence.credentials?.['exists']).toBe('boolean')
+      expect(typeof evidence.credentials?.['clientConnectionPresent']).toBe('boolean')
+      expect(typeof evidence.credentials?.['browserSessionPresent']).toBe('boolean')
+      // 事实有了唯一的家（evidence），hint 不再复述它 —— 一处一事实。
+      expect(error.hint).not.toContain('browser-session entry')
     })
 
     it('not-running：ECONNREFUSED —— 宿主没启动（本工具的核心区分之二）', async () => {
