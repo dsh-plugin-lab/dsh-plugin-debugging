@@ -19,6 +19,7 @@ import { describe, expect, it } from 'vitest'
 import {
   ensureToolResult,
   fail,
+  jsonValueProblem,
   ok,
   TOOL_ERROR_KINDS,
   toolResultProblem,
@@ -195,6 +196,145 @@ describe('契约：守卫层的四条规则（旧「守卫层放行 evidence」�
   it('kind 仍在闭枚举内（兜底不改变 kind 的职责）', () => {
     expect(TOOL_ERROR_KINDS).toContain('timeout')
     expect(TOOL_ERROR_KINDS).toContain('internal')
+  })
+})
+
+/**
+ * 契约：**返回值还必须可无损落 JSON**（2026-10-13 加，守宿主的边界）。
+ *
+ * ## 为什么形状表不够（这一节是**实测**出来的，不是推演）
+ *
+ * 真机回归：`dsh_diagnose_plugin_load` 的
+ * `data.audit.startupLogs.reports[0].report.messages[2].text` 是一个**值为 `undefined`** 的
+ * 自有可枚举属性 —— `toolResultProblem` 的形状表**逐条全绿**（`data` 恰好三键、
+ * `verdict` 非空、`key` 是对象），而宿主在同一次调用上抛
+ * `ToolOutputError(toolName, ['value is not lossless JSON'])`：
+ * 模型拿到的是那句报错，**拿不到** `verdict` / `key` / `audit`。
+ *
+ * 所以 `toolResultProblem` 现在是**两段**：形状表 + 「可无损落 JSON」。
+ * 判据本体是宿主 `@deepseek-ai/dsh-util-values` 的 `walkJsonValue` 那四条
+ * （见 `src/lib/errors.ts` 的 `jsonValueProblem` 文件头）。
+ */
+describe('契约：返回值必须可无损落 JSON（宿主边界）', () => {
+  /** 四条判据各一个反例（外加三个同族的），逐个判红。 */
+  const violations: Array<[string, unknown, string]> = [
+    ['undefined', { a: undefined }, 'undefined'],
+    ['NaN', { a: Number.NaN }, 'NaN'],
+    ['Infinity', { a: Number.POSITIVE_INFINITY }, 'Infinity'],
+    ['negative zero', { a: -0 }, 'negative zero'],
+    ['bigint', { a: 1n }, 'bigint'],
+    ['function', { a: () => undefined }, 'function'],
+    ['symbol', { a: Symbol('x') }, 'symbol'],
+    ['class instance', new Error('x'), 'non-enumerable'],
+    [
+      'non-enumerable own property',
+      Object.defineProperty({ a: 1 }, 'hidden', { value: 2 }),
+      'non-enumerable',
+    ],
+    ['symbol key', { [Symbol('k')]: 1 }, 'symbol key'],
+    [
+      'accessor property',
+      {
+        get a(): number {
+          return 1
+        },
+      },
+      'accessor',
+    ],
+  ]
+
+  it('四类违规逐个判红，且报出**完整路径**', () => {
+    for (const [label, value, needle] of violations) {
+      const problem = jsonValueProblem(value, 'the result')
+      expect(problem, `${label} 竟然被判成无损 JSON`).toBeTypeOf('string')
+      expect(problem, `${label} 的报告里应当点明原因`).toContain(needle)
+    }
+  })
+
+  it('循环引用判红（DAG 的共享节点**不**判红 —— 只有祖先才算循环）', () => {
+    const cyclic: Record<string, unknown> = { verdict: 'v' }
+    cyclic['self'] = cyclic
+    expect(jsonValueProblem(cyclic, 'the result')).toContain('circular reference')
+
+    // 同一个对象在两处出现但**不是**循环：那是合法的 JSON，误判会让正常的共享记录变红。
+    const shared = { file: './cordis.patch.yml' }
+    const diamond = { a: { patches: [shared] }, b: { patches: [shared] } }
+    expect(jsonValueProblem(diamond, 'the result')).toBeUndefined()
+  })
+
+  it('合法值判绿（含 `null` / 空数组 / 负有限数 / 深到 60 层）', () => {
+    expect(jsonValueProblem(dataFor(), 'the result')).toBeUndefined()
+    expect(jsonValueProblem({ a: null, b: [], c: 0, d: -1.5, e: '' }, 'the result')).toBeUndefined()
+    let deep: unknown = 'leaf'
+    for (let i = 0; i < 60; i += 1) deep = { next: deep }
+    expect(jsonValueProblem(deep, 'the result')).toBeUndefined()
+  })
+
+  it('绝不抛：敌意对象与超深结构都收敛成一句话（`errors.ts` 承诺「绝不抛」）', () => {
+    // getOwnPropertyDescriptor 的**陷阱**：`Proxy` 能让这一次读抛，而判据在返回值路径上。
+    const hostile = new Proxy(
+      {},
+      {
+        ownKeys() {
+          throw new Error('trap')
+        },
+      },
+    )
+    expect(() => jsonValueProblem(hostile, 'the result')).not.toThrow()
+    expect(jsonValueProblem(hostile, 'the result')).toContain('could not be verified')
+
+    // getter 属性走的是「不可枚举 / 访问器」那一支 —— 判据**不调用它**，所以它抛不出来。
+    const accessor = {
+      get boom(): never {
+        throw new Error('trap')
+      },
+    }
+    expect(jsonValueProblem(accessor, 'the result')).toContain('accessor property')
+
+    // 超深结构：判红，**不是**当成合法放行（放行就等于把异常交给宿主）。
+    let tooDeep: unknown = 'leaf'
+    for (let i = 0; i < 200; i += 1) tooDeep = { next: tooDeep }
+    expect(jsonValueProblem(tooDeep, 'the result')).toContain('nesting depth')
+  })
+
+  it('`toolResultProblem` 把「形状合法但不是无损 JSON」判为违规 —— 守卫不再只查形状', () => {
+    const candidate = {
+      ok: true,
+      data: { verdict: 'v', key: {}, audit: { messages: [{ text: undefined }] } },
+    }
+    const problem = toolResultProblem(candidate)
+    expect(problem, '形状表全绿，而宿主会拒收 —— 这就是真机回归那条').toContain('undefined')
+    expect(problem).toContain('audit.messages[0].text')
+  })
+
+  it('`ensureToolResult` 把它换成**自身也无损**的兜底，而不是原样放行', () => {
+    const candidate = {
+      ok: true,
+      data: { verdict: 'v', key: {}, audit: { messages: [{ text: undefined }] } },
+    }
+    const guarded = ensureToolResult(candidate)
+    expect(guarded, '原样放行 = 把一次硬失败交给宿主').not.toBe(candidate)
+    if (guarded.ok) throw new Error('期望兜底失败')
+    expect(guarded.error.kind).toBe('internal')
+    // 兜底自己必须过两道判据 —— 否则宿主要拒收**它的**产物。
+    expect(toolResultProblem(guarded)).toBeUndefined()
+    expect(jsonValueProblem(guarded, 'the result')).toBeUndefined()
+    // 措辞要说清是「不是无损 JSON」而不是「形状不对」：两者的修法不一样。
+    expect(guarded.error.message).toContain('lossless JSON')
+    expect(guarded.data.verdict).toContain('lossless JSON')
+    // 形状类的兜底措辞**不许**被这一处改掉。
+    const shapeBroken = ensureToolResult({ ok: true, data: { verdict: '', key: {}, audit: {} } })
+    if (shapeBroken.ok) throw new Error('期望兜底失败')
+    expect(shapeBroken.error.message).toContain('invalid shape')
+  })
+
+  it('形状判据的**原有措辞**不变（B21 / B24 的断言逐字依赖它们）', () => {
+    // 判据按顺序走：形状先于无损，所以形状类的违规不会被新判据改写措辞。
+    expect(toolResultProblem({ ok: 'yes', data: dataFor() })).toContain('"ok" must be a boolean')
+    expect(toolResultProblem({ ok: true, data: { verdict: '', key: {}, audit: {} } })).toContain(
+      '"data.verdict" must be a non-empty string',
+    )
+    expect(toolResultProblem('not an object')).toContain('the result must be an object')
   })
 })
 

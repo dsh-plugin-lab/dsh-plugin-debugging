@@ -51,6 +51,7 @@ import {
   unreadableStartupLog,
   type StartupLogParse,
   type StartupLogReport,
+  type StartupMessage,
 } from '../lib/startup-log.js'
 import { composeDescription, type ToolDescription } from './describe.js'
 import {
@@ -831,11 +832,48 @@ function toAudit(input: {
         sizeBytes: item.sizeBytes,
         mtimeMs: item.mtimeMs,
         parse: item.parse,
-        report: item.report,
+        // ⚠️ `report.messages` **必须重新投影**，不能直接带出去。
+        report: { ...item.report, messages: item.report.messages.map(toMessageAudit) },
       })),
     },
   }
   return asAudit(audit)
+}
+
+/**
+ * 一条启动日志消息在 `audit` 里的投影（**只带真有值的字段**）。
+ *
+ * ## 为什么这里必须多走一步（2026-10-13 真机回归的漏点）
+ *
+ * 宿主在工具返回值上跑逐值校验（`@deepseek-ai/dsh-util-values` 的 `walkJsonValue`），
+ * 它拒绝 `undefined`。而 `lib/startup-log.ts` 的 `readStartupSection` 是这样写的：
+ *
+ * ```ts
+ * current.text = firstArgText(inline[1] ?? '')
+ * ```
+ *
+ * `firstArgText` 在认不出 `args` 的文本时返回 `undefined`，于是那条消息上就**真真切切**
+ * 挂着一个值为 `undefined` 的自有可枚举属性 —— 与 `StartupMessage.text?: string`
+ * 这个**类型**声明不符（声明是可选字段，运行期却是「存在但为 undefined」）。
+ *
+ * 实测（本机那份 `EADDRINUSE` 启动日志）：`messages[2]` 是
+ * `{ name: 'workspace-registry', type: 'warn', text: undefined }`，
+ * 于是整个工具返回 `Error: tool "dsh_diagnose_plugin_load" returned invalid output:
+ * value is not lossless JSON` —— **带不带 `package` 参数都复现**，而模型拿不到任何
+ * `verdict` / `key` / `audit`。
+ *
+ * 语义取法：**字段缺席，不是 `null`，更不是 `?? 'unknown'`**。这条消息的原文就是
+ * 「认不出这条组合期消息的第一个参数」，`undefined` 在这里表示「没有」，不表示「未知」。
+ * 与本仓其它地方的条件展开是同一条纪律。
+ *
+ * @param message 解析出来的一条组合期消息。
+ */
+function toMessageAudit(message: StartupMessage): JsonValue {
+  return {
+    ...(message.name === undefined ? {} : { name: message.name }),
+    ...(message.type === undefined ? {} : { type: message.type }),
+    ...(message.text === undefined ? {} : { text: message.text }),
+  }
 }
 
 /**

@@ -12,6 +12,7 @@ import {
 import { tmpdir } from 'node:os'
 import { dirname, join, posix } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { isDeepStrictEqual } from 'node:util'
 
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { afterAll, describe, expect, it } from 'vitest'
@@ -2514,17 +2515,20 @@ describe('B23 观察层不许自己写文件', () => {
 })
 
 /**
- * # 依赖五个工具全齐的红线：B17 / B20a / B20b / B18a / B21 / B24
+ * # 依赖五个工具全齐的红线：B17 / B20a / B20b / B18a / B21 / B24 / B25 / B26
  *
- * 这六条与前六条（B16 / B18b / B22）的分工：前六条只吃**合成 fixture**，任何工具都没落地也能跑；
- * 这六条要**真的把五个工具跑起来**（成功与失败各一条），因为它们的判据对象是
- * 「工具自己声明的描述与参数」「工具自己返回的 `data` 外形」「`execute` 在替身抛异常时的行为」——
+ * 这八条与前六条（B16 / B18b / B22）的分工：前六条只吃**合成 fixture**，任何工具都没落地也能跑；
+ * 这八条要**真的把五个工具跑起来**（成功与失败各一条），因为它们的判据对象是
+ * 「工具自己声明的描述与参数」「工具自己返回的 `data` 外形」「`execute` 在替身抛异常时的行为」
+ * 「工具返回值能不能无损落 JSON」——
  * 用合成对象断言等于在测我自己的夹具，不是测工具（活跃坑 18 的假绿形状）。
  *
- * ## 一处语料，六条红线共用
+ * ## 一处语料，多条红线共用
  *
- * {@link redlineCorpus} 把五个工具各跑成功 / 失败两次，B17 / B18a / B20b / B21 全部读它。
+ * {@link redlineCorpus} 把五个工具各跑成功 / 失败两次，B17 / B18a / B20b / B21 / B26 全部读它。
  * **不各写一份夹具**：各写一份必然漂，而漂出来的形状是「红线绿但工具已经改了」。
+ * （B26 在这 10 条之外**另有**一条自己带的夹具 —— 那 10 条的临时 `$DSH_HOME` 里没有
+ * `logs/` 目录，于是启动日志那条路走不到；见 B26 那段注释。）
  *
  * ## 为什么夹具写在**本文件内部**而不 import `test/tools/helpers.ts`
  *
@@ -2819,6 +2823,18 @@ async function buildRedlineCorpus(): Promise<RedlineRun[]> {
       CHECK_AUTH_TOOL,
       'check_auth · 连不上（ECONNREFUSED）',
       { port: 3080 },
+    ),
+    // B18a「死路」判据的**唯一语料**：端口三条来源都没有（port 0 + env 空）→ `not-configured`，
+    // 且它是**确定性**拒绝（重调同一个不动点）。B18a 要靠这条把「带 tool + 空 args」判红；
+    // 没有它那条判据就空转（活跃坑 18）。改回 `{ tool: CHECK_AUTH_TOOL }`（不给 args）
+    // 必须让 B18a 红；本仓库已把它改成 `manual` 支（真机 2026-10-13）。
+    await runFixture(
+      createCheckAuthTool(
+        redlineDeps(redlineConfig(makeTempRoot('dsh-redline-noport-'), { port: 0 }), { env: {} }),
+      ),
+      CHECK_AUTH_TOOL,
+      'check_auth · 端口三条来源都没有（not-configured 确定性失败）',
+      {},
     ),
     await runFixture(
       effectModeWith('hmr'),
@@ -3122,6 +3138,24 @@ describe('B20b 描述不许复述输出', () => {
 
 // ── B18a nextStep 出现时必须带动作 ────────────────────────────────────────
 
+/**
+ * 「重试一次」**可能**得到不同结果的失败档（白名单）。
+ *
+ * 分界不是「args 空不空」，是**这次失败会不会自己变**：预算/传输层耗尽会随时间与负载变，
+ * 确定性拒绝（缺端口来源、包解析不到）不会 —— 那带工具名重调就是**不动点**。
+ * ⚠️ **新增 `kind` 时必须裁决它属哪一档**，否则 B18a 会静默放行或误红（SHAPE §4.1）。
+ */
+const NON_DETERMINISTIC_KINDS: ReadonlySet<string> = new Set(['timeout'])
+
+/** 从工具原始返回值里取失败的 `kind`（成功或取不到时返回空串）。 */
+function failureKindOf(value: unknown): string {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return ''
+  const error = (value as Record<string, unknown>)['error']
+  if (typeof error !== 'object' || error === null) return ''
+  const kind = (error as Record<string, unknown>)['kind']
+  return typeof kind === 'string' ? kind : ''
+}
+
 describe('B18a nextStep 出现时必须带动作', () => {
   it('语料里每个 nextStep 都落在两支之一，且**两支都真的出现过**', async () => {
     const runs = await redlineCorpus()
@@ -3166,6 +3200,25 @@ describe('B18a nextStep 出现时必须带动作', () => {
       }
       if (seg(record['tool']).trim() === '') {
         offenders.push(`${run.label}: tool 不是非空字符串`)
+        continue
+      }
+      // 「带工具名 + 空参数」= **死路**判据（真机 2026-10-13 抓到的那一处）：
+      // `{ tool: 'dsh_check_auth' }`（不给 args）在 `not-configured` 上，模型逐字重调 → **同一个不动点**。
+      // **例外**：非确定性失败（`timeout` 这类预算耗尽）重试**可能**得到不同结果 → 合法。
+      // 确定性拒绝（`not-configured` / `not-found` / `command-failed` / `internal` …）→ 非法。
+      // ⚠️ 只在 args **为空**时判；args 非空的「去问一个更具体的问题」永远合法。
+      // 「非确定性」读的是**失败 `kind`**（闭枚举），不靠人读 `why` 的语义。
+      const argKeys =
+        typeof record['args'] === 'object' &&
+        record['args'] !== null &&
+        !Array.isArray(record['args'])
+          ? Object.keys(record['args'] as Record<string, unknown>)
+          : []
+      if (argKeys.length === 0 && !NON_DETERMINISTIC_KINDS.has(failureKindOf(run.value))) {
+        offenders.push(
+          `${run.label}: 带 tool 却给空 args —— 确定性失败上重调是**不动点**（死路）；` +
+            '下一步是用户动作就该给 manual 支（不带 tool）',
+        )
         continue
       }
       toolBranch += 1
@@ -3646,6 +3699,252 @@ describe('B25 守卫合成的兜底必须可渲染', () => {
   })
 })
 
+// ── B26 返回值必须可无损落 JSON（宿主边界的硬要求） ────────────────────────
+
+/**
+ * B26：**五个工具的每个返回值都必须无损通过一次 JSON 往返。**
+ *
+ * ## 为什么这条独立于 B21
+ *
+ * B21 判的是 §4.1 的**形状**表，而形状表照不到宿主的逐值判据：实测（2026-10-13 真机回归）
+ * `data.audit.startupLogs.reports[0].report.messages[2].text` 是一个**值为 `undefined`** 的
+ * 自有可枚举属性 —— B21 逐条全绿，而宿主在同一次调用上抛
+ * `ToolOutputError('dsh_diagnose_plugin_load', ['value is not lossless JSON'])`，
+ * 模型因此拿不到任何 `verdict` / `key` / `audit`。
+ *
+ * ## 判据：往返 + 深度相等（`isDeepStrictEqual`，**不是** `toEqual`）
+ *
+ * `expect(parsed).toEqual(value)` 有一条**必须避开的陷阱**：vitest 的 `toEqual`
+ * **忽略值为 `undefined` 的属性** —— 恰好把这条红线要抓的那一类放过。
+ * `isDeepStrictEqual` 不放过（它比的是键的集合），且对 `NaN` / `-0` 用 `Object.is` 语义。
+ * 四类违规于是全部被覆盖：
+ *
+ * | 违规 | 往返后 | 判据 |
+ * |---|---|---|
+ * | `undefined` 值 | 该键**消失** | 键集合不等 → 红 |
+ * | `NaN` / `±Infinity` | `null` | 不等 → 红 |
+ * | `-0` | `0` | `Object.is` 不等 → 红 |
+ * | 循环引用 | `JSON.stringify` **抛** | `try/catch` 记红 |
+ * | `Date` / `Map` / 类实例 | 变成别的形状 | 不等 → 红 |
+ *
+ * ## 三条下界（缺任何一条，这条红线就是恒真的）
+ *
+ * 1. **判据能红**：七种**故意违规**的值（`undefined` / `NaN` / `Infinity` / 负零 / 循环引用 /
+ *    `Map` / `Date`）各喂一次，`judgeLosslessRoundTrip` 必须对每一个都给出问题
+ *    （活跃坑 18：让判据自己看起来通过是最危险的失败）。
+ * 2. **守卫能红**：`toolResultProblem` 必须判「形状合法但不是无损 JSON」的候选为违规，
+ *    且 `ensureToolResult` 把它换成**自身也无损**的兜底 —— 这条守着
+ *    `src/lib/errors.ts` 的那道闸（把它改回「只查形状」就会红）。
+ * 3. **夹具没空转**：五个工具一个都不许漏，语料不足 10 条判红（不 skip）。
+ *
+ * ## ⚠️ 为什么每条还必须断言「返回值**不是**守卫合成的兜底」（实测踩过的假绿）
+ *
+ * 本条第一版只断言「往返 + `ensureToolResult(value) === value`」，于是把 2a 的修复
+ * 改回原样（`report: item.report`）之后 —— **仍然全绿**。原因：工具自己的 `toOutput()`
+ * 在返回前就调过 `ensureToolResult`，所以宿主与本红线拿到的**永远是兜底**，而兜底
+ * **当然**无损、也**当然**过自己的守卫。这是活跃坑 37 的原样形状：
+ * 断言的是「症状（宿主报错）消失」，而不是「根因（那个 `undefined`）修好」。
+ *
+ * 修法是 `isGuardFallback()`：合成的兜底 `audit` **必定**含且只含 `received` 一个键
+ * （`src/lib/errors.ts` 的 `malformedResult`，全仓唯一写这个键的地方）。
+ * 任何一条 fixture 返回了兜底 → 判红，因为那时「这个工具的无损性」根本没被测到。
+ */
+
+/**
+ * 这个返回值是不是 `ensureToolResult` **合成的兜底**。
+ *
+ * 判据取 `data.audit` 里的 `received` 键：那是 `malformedResult` 独有的字段
+ * （`audit: { received: describe(value) }`），五个工具自己从不写它。
+ *
+ * @param value 工具返回值。
+ */
+function isGuardFallback(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null) return false
+  const data = (value as { data?: unknown }).data
+  if (typeof data !== 'object' || data === null) return false
+  const audit = (data as { audit?: unknown }).audit
+  if (typeof audit !== 'object' || audit === null) return false
+  return Object.prototype.hasOwnProperty.call(audit, 'received')
+}
+
+/**
+ * B26 专属的一条夹具：**带组合期消息的启动日志**（真机回归那条路的形状）。
+ *
+ * ## 为什么必须另有这一条（`redlineCorpus()` 那 10 条覆盖不到）
+ *
+ * 那 10 条 fixture 的临时 `$DSH_HOME` **没有 `logs/` 目录** —— 于是启动日志那条路
+ * 根本不会被走到，漏点回归对 B26 是**完全不可见**的（那条「看起来绿」的形状）。
+ * 这里是本仓第一次把「启动日志存在且被解析」这条**真机形状**做成夹具。
+ *
+ * ## 夹具里那一条消息为什么是关键
+ *
+ * 真机日志里 `workspace-registry` 的 `args` 是一个**跨行**的双引号字符串：
+ *
+ * ```
+ * args: [
+ *   "workspace 'w' filtered session 's' from membership: cwd 'D:\\x' does not resolve",
+ *   [length]: 1
+ * ]
+ * ```
+ *
+ * 而 `lib/startup-log.ts` 的 `firstArgText` 的引号正则**只认单引号** ⇒ 返回 `undefined`，
+ * 于是那条消息上挂着一个值为 `undefined` 的自有属性。2026-10-13 的真机回归就是这么来的。
+ * 这份夹具按原样复刻那个形状（**故意不加 `[entries]` 段**，与真机那份不同 ——
+ * 少一个锚点只让 `gaps` 多一条，与本条红线要判的「无损与否」无关）。
+ */
+const REAL_SHAPED_STARTUP_LOG = [
+  '  error: startup failed: 1 required plugin did not activate',
+  '  Failed plugins (1):',
+  '    webserver (required)',
+  '      Package: dsh-web',
+  '      Error: listen EADDRINUSE: address already in use 127.0.0.1:19388',
+  '  [startup]: {',
+  '    messages: [',
+  '      {',
+  "        name: 'workspace-registry',",
+  "        type: 'warn',",
+  '        args: [',
+  "          \"workspace 'w' filtered session 's' from membership: cwd 'D:\\\\x' does not resolve\",",
+  '          [length]: 1',
+  '        ]',
+  '      },',
+  '      [length]: 1',
+  '    ]',
+  '  }',
+  '}',
+  '',
+].join('\n')
+
+/** 跑一次 `dsh_diagnose_plugin_load`，`$DSH_HOME` 里有 profile 清单与上面那份启动日志。 */
+async function runDiagnoseWithStartupLog(): Promise<unknown> {
+  const home = makeTempRoot('dsh-redline-b26-log-')
+  const dir = writeProfileFixture(home, ['pkg-a'])
+  writeInstalledPackageFixture(dir, 'pkg-a')
+  writeTextFile(
+    join(home, 'logs', 'startup-2026-01-01T00-00-00.000Z-b26.log'),
+    REAL_SHAPED_STARTUP_LOG,
+  )
+  const tool = createDiagnosePluginLoadTool(redlineDeps(redlineConfig(home)))
+  return await tool.execute({}, redlineExec())
+}
+
+describe('B26 返回值必须可无损落 JSON（宿主边界的硬要求）', () => {
+  it('五个工具的每个返回值：往返深度相等 + 不是守卫合成的兜底', async () => {
+    const runs = [...(await redlineCorpus())]
+
+    // 真机形状那条另跑一次（`redlineCorpus()` 里没有带启动日志的夹具）。
+    const logRun = await runDiagnoseWithStartupLog()
+    runs.push({
+      tool: DIAGNOSE_PLUGIN_LOAD_TOOL,
+      label: 'diagnose · 读到了带组合期消息的启动日志（真机形状）',
+      value: logRun,
+      text: '',
+    })
+
+    // ── 下界 1：判据能红（四类违规逐个） ────────────────────────────────────
+    const cyclic: Record<string, unknown> = { verdict: 'v' }
+    cyclic['self'] = cyclic
+    const violations: Array<[string, unknown]> = [
+      ['undefined', { ok: true, data: { verdict: 'v', key: {}, audit: { a: undefined } } }],
+      ['NaN', { ok: true, data: { verdict: 'v', key: { n: Number.NaN }, audit: {} } }],
+      ['negative zero', { ok: true, data: { verdict: 'v', key: { n: -0 }, audit: {} } }],
+      [
+        'Infinity',
+        { ok: true, data: { verdict: 'v', key: { n: Number.POSITIVE_INFINITY }, audit: {} } },
+      ],
+      ['circular', cyclic],
+      ['class instance', { ok: true, data: { verdict: 'v', key: new Map(), audit: {} } }],
+      ['Date', { ok: true, data: { verdict: 'v', key: {}, audit: { at: new Date(0) } } }],
+    ]
+    const blindViolations = violations
+      .filter(([, value]) => judgeLosslessRoundTrip(value) === undefined)
+      .map(([label]) => label)
+    expect(
+      blindViolations,
+      `B26 下界失败：往返判据对下面这些**故意违规**的值居然说没问题 —— 这条红线在空转：\n${blindViolations.join('\n')}`,
+    ).toEqual([])
+
+    // ── 下界 2：守卫（`src/lib/errors.ts` 那道闸）能红 ─────────────────────────
+    const shapeValidButNotLossless = {
+      ok: true,
+      data: { verdict: 'v', key: {}, audit: { message: { text: undefined } } },
+    }
+    const guardProblem = toolResultProblem(shapeValidButNotLossless)
+    if (guardProblem === undefined) {
+      expect.fail(
+        'B26 下界失败：`toolResultProblem` 对「形状合法但含 undefined」的值说没问题 —— ' +
+          '守卫不再要求无损 JSON（把它改回只查形状，这条就会红）',
+      )
+    }
+    const fallback = ensureToolResult(shapeValidButNotLossless)
+    expect(fallback, '守卫必须把这个值换掉，而不是原样放行').not.toBe(shapeValidButNotLossless)
+    expect(
+      judgeLosslessRoundTrip(fallback),
+      '守卫自己合成的兜底必须也是无损的，否则宿主要拒收它的产物',
+    ).toBeUndefined()
+
+    // ── 判据本体：五个工具的每个返回值 ─────────────────────────────────────
+    const offenders: string[] = []
+    const covered = new Set<string>()
+    for (const run of runs) {
+      covered.add(run.tool)
+      const roundTrip = judgeLosslessRoundTrip(run.value)
+      if (roundTrip !== undefined) offenders.push(`${run.label}: 往返失败 —— ${roundTrip}`)
+      if (toolResultProblem(run.value) !== undefined) {
+        offenders.push(`${run.label}: toolResultProblem 判它违规（守卫没查无损 JSON？）`)
+      }
+      // ⚠️ **这一条是本条红线真正的载荷**（实测踩过一次假绿，见下面那段注释）。
+      if (isGuardFallback(run.value)) {
+        offenders.push(
+          `${run.label}: 返回的是**守卫合成的兜底**（audit.received 存在）—— 工具自己踩了契约，这条夹具正走在那条路上，"无损"无从判断`,
+        )
+      }
+    }
+
+    // ── 下界 3：空转判红，一个工具都不许漏 ──────────────────────────────────
+    for (const shape of toolShapes()) {
+      if (!covered.has(shape.name)) {
+        offenders.push(`${shape.name}: 语料里一条 fixture 都没有 —— 这条红线在空转`)
+      }
+    }
+    if (runs.length < 10) {
+      offenders.push(`语料只有 ${String(runs.length)} 条（期望 ≥10）—— 这条红线的覆盖面在缩水`)
+    }
+    expect(offenders, `B26 违规：\n${offenders.join('\n')}`).toEqual([])
+  })
+})
+
+/**
+ * B26 的判据本体：一次 JSON 往返之后**深度相等**。
+ *
+ * 为什么用 `node:util` 的 `isDeepStrictEqual` 而不是 vitest 的 `toEqual`：
+ * `toEqual` **忽略值为 `undefined` 的属性** —— 恰好放过这条红线要抓的头号违规
+ * （实测那条 `messages[2].text`），那样这条红线就只剩 B21 的形状检查在起作用。
+ * `isDeepStrictEqual` 比的是**键的集合**，且标量用 `Object.is`（`-0` ≠ `0`）。
+ *
+ * @param value 待查的值。
+ * @returns 第一条违规描述；`undefined` = 无损。
+ */
+function judgeLosslessRoundTrip(value: unknown): string | undefined {
+  let text: string | undefined
+  try {
+    text = JSON.stringify(value)
+  } catch (error) {
+    return `JSON.stringify 抛了（${error instanceof Error ? error.message : String(error)}）`
+  }
+  if (text === undefined) return 'JSON.stringify 返回 undefined（顶层就是 undefined）'
+  let back: unknown
+  try {
+    back = JSON.parse(text)
+  } catch (error) {
+    return `JSON.parse 抛了（${error instanceof Error ? error.message : String(error)}）`
+  }
+  if (!isDeepStrictEqual(back, value)) {
+    return `往返后与原值不等（序列化长度 ${String(text.length)}）—— 典型原因：undefined 键 / NaN / ±Infinity / -0 / 类实例`
+  }
+  return undefined
+}
+
 /**
  * # 本文件的已知限度
  *
@@ -3689,6 +3988,9 @@ describe('B25 守卫合成的兜底必须可渲染', () => {
  * | 31 | B25 的「兜底可渲染」：`ensureToolResult` 合成的兜底 `key` 是 `{}`，而 `dsh_check_auth` / `dsh_diagnose_plugin_load` / `dsh_dump_config` 的 `keyText` 曾**会崩**在它上面（`resolvedLine(undefined)`） | 三条 `keyText` 现在都按 `typeof … === 'string' ? … : 'unknown'` 防御取值；`effect_mode` / `hot_reload` 的写法本来就是防御式的 | **这是已实测的工具侧缺陷**（2026-10-13 探针：`ensureToolResult({ok:true})` 的 `key={}` 喂五个 render 表 → 3 抛 / 2 过）。**已修，由 B25 守着**：变异（把三处防御改回直接取值）→ B25 **红**；还原 → 绿 |
  * | 32 | B25 只断言「**不抛** + 走正常渲染路径（有 `verdict: ` 行）+ 输出非空」，**不断言降级措辞** | 三个被修工具的降级句 `resolved: unknown (the guard synthesized this result)` 的逐字断言住在**它们各自的测试**里 | 有人把降级句改成别的诚实措辞（仍不抛）→ B25 **仍绿**（**有意**：那条措辞是各工具自己的契约，不是全局契约）；反之，谁把某个 `keyText` 改回直接取值 → **B25 红**（响亮，不是假绿） |
  * | 33 | B25 的兜底夹具只有**一种**坏法（`data.verdict` 是空串） | `ensureToolResult` 对任何 `toolResultProblem` 非 `undefined` 的值都走**同一个** `malformedResult` | 换一种坏法（缺 `data` / `ok` 不是布尔）走的是同一条合成路径 → 判据等价；但若将来给不同坏法**分叉**出不同的兜底形状，这条只覆盖其中一支 |
+ * | 34 | B26 的覆盖面 = `redlineCorpus()` 那 10 条 + **本文件自带的 1 条带启动日志的夹具** | 夹具是我造的；诊断工具的**第三种**返回路径（如某条新的失败分支）不在语料里 → 那条路不被本条看见。加分支时**同批加 fixture** | 同 #27，与 B21 共用同一个语料源 |
+ * | 35 | B26 用 `isDeepStrictEqual` 比往返结果（**不是** `toEqual`） | `toEqual` 忽略值为 `undefined` 的属性 —— 恰好放过本条要抓的头号违规 | 换成 `toEqual` → 本条只剩 `isGuardFallback` 那一半在起作用（**已实测**：换掉之后 M3 变异不红了）。**别换** |
+ * | 36 | B26 的 `isGuardFallback` 认的是 `data.audit.received` 这个键 | 它是 `src/lib/errors.ts` 的 `malformedResult` 独有的字段 | 某个工具自己开始往 `audit` 里写 `received` → **误报**（红，需同步改这一条）；反过来，`malformedResult` 改了合成形状而不再写 `received` → 本条对兜底**失明**（假绿）。改 `malformedResult` 时必须同批看 B26。【已探明】 |
  *
  * **B10 已知未覆盖的写入通道**（明确列出，不静默排除）：
  * `process.binding`、原生 addon、`require()`（本仓纯 ESM）、把 fs 方法先赋给别的变量再调用
