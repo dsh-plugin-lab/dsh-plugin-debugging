@@ -17,6 +17,30 @@
 
 ---
 
+## 0. 输出边界的契约（tool 返回值必须是无损 JSON）
+
+⚠️ **先读这条的后果，再读条件**：失败时**不是「少一个字段」，是整个工具不可用** ——
+宿主在构造结果那一步就抛，模型拿不到任何 `verdict` / `key` / `audit`。**静默的形状是「工具根本没被调用」**。
+**编号用 0 是有意的**：它不属于任何一个工具，是全部工具的共同前提；插在中间会把后面所有节号顶掉一位，
+而那些节号已经被 [SHAPE.md](SHAPE.md) 与 [ARCHITECTURE.md](ARCHITECTURE.md) 引着了。
+
+| # | 事实 | 证据 | 影响 |
+|---|---|---|---|
+| V1 | ⚠️ **入口 = `snapshotToolValue` → `snapshotJsonValue`；失败抛 `ToolOutputError(toolName, ['value is not lossless JSON'])`** | `dsh-tools/lib/index.js:3539` `createSuccessResult` 第一行就是 `snapshotToolValue(tool.name, candidate)`，**在 `validateJsonSchemaValue` 与 `render` 之前**；`:2576-2585` 是那个包装器；`:2551` 是 `ToolOutputError` `[已核]` | 顺序决定了后果：**渲染没跑、schema 也没校验，整个结果直接作废** |
+| V2 | **成功与失败走同一条路** | 失败结果同样由 `createSuccessResult` 落地 —— 即 `{ok:false}` **也必须**是无损 JSON | 「失败分支反正没人看」是错的：失败分支一样被宿主逐值判 |
+| V3 | ⚠️ **被拒的取值**：`undefined` / function / symbol / bigint；非有限数（`NaN` / `±Infinity`）；**`-0`**；循环引用；**symbol 键 / 不可枚举自有属性**；**非 plain 原型的对象与数组**（class 实例、子类数组）；**稀疏数组**；**数组带 `length` 以外的 own key**。<br>**注意「null 原型对象」是被接受的**（`hasPlainObjectPrototype` 显式放行 `prototype === null`）—— 别把它也归进被拒那类 | `dsh-util-values/lib/index.js`：`walkJsonValue:676-783`（`:735` `-0` 与非有限数、`:739` 非 object 的一律拒、`:740` 循环、`:670-673` `enumerableStringKeys`、`:741-744` 数组原型与 `ownKeys` 计数、`:760` 对象原型）、`hasPlainObjectPrototype:665-668`、`snapshotJsonValue:789`、`isJsonValue:797` `[已核]`<br>**逐条跑过宿主自己的 `isJsonValue`**（2026-10-13，上表每一类都是实跑结果，不是读代码推的）`[已实测]` | 逐值判，不是形状判 ⇒ **一个值为 `undefined` 的自有可枚举属性就足以让整个工具被拒收** |
+| V4 | **同一条规则也管工具入参**，只是错误类不同 | `dsh-tools/lib/index.js:1000-1006`，失败报 `tool arguments must be lossless JSON` `[已核]` | 同一份「无损」的纪律，两头都要守 |
+| V5 | **本机已被它咬过**（2026-10-13 真机回归） | `data.audit.startupLogs.reports[0].report.messages[2].text` 是个**值为 `undefined` 的自有可枚举属性**（`src/lib/startup-log.ts` 的 `firstArgText` 只认单引号，双引号 args 返回 `undefined`）⇒ 宿主抛 `ToolOutputError('dsh_diagnose_plugin_load', ['value is not lossless JSON'])`，**该工具完全不可用** `[已实测]` | 防线是**投影边界重投影 + 返回前守卫**；本仓的红线是 **B26**（见 [SHAPE.md](SHAPE.md) §10） |
+| V6 | **B26 已对齐本表**（对齐过程本身留下了记录） | 用同一批样本分别跑 `isJsonValue` 与 B26 的往返判据（`redlines.test.ts` 的 `judgeLosslessRoundTrip`），**逐条一致**：含不可枚举自有属性、`-0`、`NaN`/`±Infinity`、循环、稀疏数组、子类数组、数组带额外 own key。<br>**对齐前有两处差，方向相反**，都已修：① **假绿** —— 不可枚举自有属性**宿主拒、B26 绿**（`isDeepStrictEqual` 不比不可枚举键）→ 现在先单独走一遍 `getOwnPropertyNames` + `enumerable`（数组的 `length` 与下标豁免）；② **假红** —— **null 原型对象宿主接受**、B26 判红（往返后原型不再是 `null`）→ 现在比之前先把两侧原型归一。**两条各自有下界断言钉住**（拆掉任一条判据，B26 立刻红） | 「B26 绿」现在**可以**当「宿主会收」用，但只对**本表列出的类别**成立 —— 表外的新类别仍要先把样本喂给 `isJsonValue` 实测，别读源码推 |
+
+**未做（如实记）**：宿主对 **getter 抛错**走的是另一条路（`safelyIsJsonValue` / `losslessValueViolation`，`dsh-tools/lib/index.js:340,357,444`）—— 我们的红线没覆盖这一类。
+
+**本节的 V3 / V6 是逐条跑出来的**：探针直接 import 宿主自己的 `isJsonValue`，对本节列出的每一类各喂一个样本。
+**第一版草稿是靠读源码推的，被这次实跑证伪了两处** ——「null 原型对象被拒」与「子类数组 / 稀疏数组是 B26 的盲区」两条都不成立，已按实测改写。
+（这两处如果留着，会让下一个人照着一条**错的**边界去收紧投影面。）
+
+---
+
 ## 1. 热重载依赖的契约
 
 已实现并真机验证（`dsh_hot_reload`）；下面这几条是它**承重**的部分。
@@ -106,6 +130,10 @@
 - **真机实测**：隔离实例（`test/integration/` 的 bench 配方）上跑出来的进程 / 端口 / 日志记录。
   原始报告是**中转站的传递物**（按中转站自己的规则，传递物**不许被文档链接**）：结论已全部归位到本文与 [ARCHITECTURE.md](ARCHITECTURE.md)，原文打包归档在工作区里（git 忽略，不进历史）。
 - **仍缺源码阅读**：`dsh-smart-restart`（`src/canary.ts` 107KB / `src/index.ts` 75KB，含 canary 预检与 systemd 识别，与重启闸门相关）与 `dsh-hotswap` 托管区块的实现细节。
+- **§0 那一批的证据形态不同（如实标注）**：核的是**安装树里发布的产物 JS**，不是参考仓的 `.ts` 源码 ——
+  `…\@deepseek-ai\dsh\node_modules\@deepseek-ai\{dsh-tools,dsh-util-values}\lib\index.js`。
+  后果：**行号只对 `0.2.1-alpha.2` 这一份安装成立**，换宿主版本必须重核；且「读的是构建产物」这件事本身
+  意味着源码级注释与设计意图不在场，只认代码实际做的事。
 
 ---
 
@@ -116,4 +144,3 @@
 - 审批门在真实 UI/策略下的表现（`danger-full-access` 档下 `ask` 会被确定性拒绝）。
 - `schemastery` 两个版本间的行为差异（运行时比检出新一个预发布号）。
 - 「重启后启动即唤醒」的时序（参考实现实测「启动后 3 秒 `agents.get()` 还取不到」）—— 见 [SHAPE.md](SHAPE.md) §6.1。
-

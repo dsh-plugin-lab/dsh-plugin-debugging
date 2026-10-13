@@ -2991,9 +2991,9 @@ function sharedSubstringsRedline(a: string, b: string, min: number): string[] {
   return [...hits]
 }
 
-// ── B20a 描述四段骨架 + 上限 ──────────────────────────────────────────────
+// ── B20a 描述四段骨架 + 参数描述下界 ────────────────────────────────────
 
-describe('B20a 描述四段骨架 + 上限', () => {
+describe('B20a 描述四段骨架 + 参数描述下界', () => {
   it('五个工具：段数 / 行数 / 字符上限 / 每个参数描述非空且合计 > 0', () => {
     const offenders: string[] = []
     const measured: string[] = []
@@ -3910,9 +3910,85 @@ describe('B26 返回值必须可无损落 JSON（宿主边界的硬要求）', (
     if (runs.length < 10) {
       offenders.push(`语料只有 ${String(runs.length)} 条（期望 ≥10）—— 这条红线的覆盖面在缩水`)
     }
+
+    // ── 下界 4：oracle 对宿主的两条真实判据既不漏也不多报 ────────────────────
+    // 两类都是对着本机 `0.2.1-alpha.2` 的 `dsh-util-values/lib/index.js`
+    // 跑探针实测出来的（见 docs/HOST-CONTRACTS.md §0），不是读源码推的。
+    const nonEnumerable = { a: 1 } as Record<string, unknown>
+    Object.defineProperty(nonEnumerable, 'hidden', { value: 2, enumerable: false })
+    if (judgeLosslessRoundTrip(nonEnumerable) === undefined) {
+      offenders.push('oracle 对「不可枚举自有属性」判成无损 —— 宿主实测 REJECT，这是真盲区')
+    }
+    const nullPrototype = Object.assign(Object.create(null) as Record<string, unknown>, {
+      a: 1,
+      nested: Object.assign(Object.create(null) as Record<string, unknown>, { b: 2 }),
+    })
+    if (judgeLosslessRoundTrip(nullPrototype) !== undefined) {
+      offenders.push(
+        `oracle 对「null 原型对象」判成违规（${String(judgeLosslessRoundTrip(nullPrototype))}）—— 宿主实测接受，这是假红`,
+      )
+    }
+    // 空原型对象同样不该被判红（与上面同一族）。
+    if (judgeLosslessRoundTrip(Object.assign(Object.create(null) as object, {})) !== undefined) {
+      offenders.push('oracle 对「空的 null 原型对象」判成违规 —— 宿主实测接受')
+    }
+
     expect(offenders, `B26 违规：\n${offenders.join('\n')}`).toEqual([])
   })
 })
+
+/**
+ * 找出**不可枚举**的自有属性（宿主拒、B26 原判据放过的那一类）。
+ *
+ * `Object.keys` 只列可枚举的，`JSON.stringify` 也只写可枚举的 ⇒ 一遍往返之后
+ * 不可枚举键**两边都在、值也一样**，`isDeepStrictEqual` 判「无损」。但宿主
+ * `dsh-util-values` 的 `walkJsonValue` **拒收非枚举自有属性**
+ * （实测：`{a:1}` 加一个 `enumerable:false` 的 `hidden` ⇒ 宿主 REJECT，本函数绿）。
+ * 这条补上那个盲区。
+ *
+ * @param value 待查的值。
+ * @returns 第一条违规描述；`undefined` = 没有不可枚举自有属性。
+ */
+function judgeNonEnumerableOwnProperty(value: unknown): string | undefined {
+  const walk = (node: unknown, path: string): string | undefined => {
+    if (node === null || typeof node !== 'object') return undefined
+    if (Array.isArray(node)) {
+      // 数组的 `length` **天生**不可枚举，而宿主照收数组 —— 它不是违规。
+      // 只查下标与额外 own 键（实测：额外 own 键与稀疏下标宿主都拒）。
+      for (let index = 0; index < node.length; index += 1) {
+        if (!(index in node)) return `稀疏数组 ${path}[${String(index)}]（宿主拒收）`
+        const found = walk(node[index], `${path}[${String(index)}]`)
+        if (found !== undefined) return found
+      }
+      for (const key of Object.keys(node)) {
+        if (/^(0|[1-9]\d*)$/u.test(key)) continue
+        const descriptor = Object.getOwnPropertyDescriptor(node, key)
+        if (descriptor !== undefined && descriptor.enumerable === false) {
+          return `数组上的不可枚举自有属性 ${path}.${key}（宿主拒收）`
+        }
+        const found = walk(node[key as keyof typeof node], `${path}.${key}`)
+        if (found !== undefined) return found
+      }
+      return undefined
+    }
+    for (const key of Object.getOwnPropertyNames(node)) {
+      const descriptor = Object.getOwnPropertyDescriptor(node, key)
+      if (descriptor !== undefined && descriptor.enumerable === false) {
+        return `不可枚举自有属性 ${path}.${key}（宿主拒收，JSON 往返却看不见它）`
+      }
+    }
+    // 宿主认的容器只有普通对象与数组；别的（Date/Map/类实例）交给往返判据去抓。
+    const prototype = Object.getPrototypeOf(node)
+    const isPlain = prototype === Object.prototype || prototype === null
+    if (!isPlain) return undefined
+    for (const key of Object.keys(node)) {
+      const found = walk((node as Record<string, unknown>)[key], `${path}.${key}`)
+      if (found !== undefined) return found
+    }
+    return undefined
+  }
+  return walk(value, '$')
+}
 
 /**
  * B26 的判据本体：一次 JSON 往返之后**深度相等**。
@@ -3921,6 +3997,11 @@ describe('B26 返回值必须可无损落 JSON（宿主边界的硬要求）', (
  * `toEqual` **忽略值为 `undefined` 的属性** —— 恰好放过这条红线要抓的头号违规
  * （实测那条 `messages[2].text`），那样这条红线就只剩 B21 的形状检查在起作用。
  * `isDeepStrictEqual` 比的是**键的集合**，且标量用 `Object.is`（`-0` ≠ `0`）。
+ *
+ * ⚠️ 但它有一条**反向**的毛病：`isDeepStrictEqual` 连**原型**一起比，于是
+ * `Object.create(null)` 的普通对象会被判「不等」——**宿主是接受的**
+ * （`hasPlainObjectPrototype` 显式放行 `prototype === null`，实测）。那是**假红**，
+ * 所以比之前先把原型归一，只比可枚举键的集合与值。
  *
  * @param value 待查的值。
  * @returns 第一条违规描述；`undefined` = 无损。
@@ -3939,10 +4020,34 @@ function judgeLosslessRoundTrip(value: unknown): string | undefined {
   } catch (error) {
     return `JSON.parse 抛了（${error instanceof Error ? error.message : String(error)}）`
   }
-  if (!isDeepStrictEqual(back, value)) {
+  const hidden = judgeNonEnumerableOwnProperty(value)
+  if (hidden !== undefined) return hidden
+  // 归一**两侧**再比：`isDeepStrictEqual` 连原型一起比，而宿主把
+  // `Object.create(null)` 与 `{}` 一视同仁，所以原型不同不该在这里判红。
+  if (!isDeepStrictEqual(nullPrototypeToPlain(back), nullPrototypeToPlain(value))) {
     return `往返后与原值不等（序列化长度 ${String(text.length)}）—— 典型原因：undefined 键 / NaN / ±Infinity / -0 / 类实例`
   }
   return undefined
+}
+
+/**
+ * 把 `Object.create(null)` 的对象换成同键同值的普通对象（数组与标量原样返回）。
+ *
+ * 只为让 `isDeepStrictEqual` 不因**原型不同**而报不等 —— 宿主两等都接受，
+ * 所以原型不该成为本条红线的判据。
+ *
+ * @param value 待查的值。
+ */
+function nullPrototypeToPlain(value: unknown): unknown {
+  if (value === null || typeof value !== 'object') return value
+  if (Array.isArray(value)) return value.map((item) => nullPrototypeToPlain(item))
+  const prototype = Object.getPrototypeOf(value)
+  if (prototype !== null && prototype !== Object.prototype) return value
+  const out: Record<string, unknown> = {}
+  for (const key of Object.keys(value)) {
+    out[key] = nullPrototypeToPlain((value as Record<string, unknown>)[key])
+  }
+  return out
 }
 
 /**
