@@ -378,7 +378,7 @@ function buildVerdict(input: {
   if (input.failed.length > 0) {
     const detail = input.failed
       .map((item) => `${item.packageName} (${item.observed?.error ?? 'reason unavailable'})`)
-      .join('；')
+      .join('; ')
     parts.push(`**Observed load failure**: ${detail}`)
   }
   if (input.absent.length > 0) {
@@ -393,7 +393,7 @@ function buildVerdict(input: {
         const missing = item.observed?.missingInject ?? []
         return `${item.packageName} (waiting for ${missing.length === 0 ? 'mounting' : missing.join(', ')})`
       })
-      .join('；')
+      .join('; ')
     parts.push(`**Still pending**: ${detail}`)
   }
   if (input.stale.length > 0 && parts.length === 0) {
@@ -404,7 +404,7 @@ function buildVerdict(input: {
   if (parts.length === 0) {
     return 'all observed rows are active: the plugin really did load, so the problem is not at the "did it load" layer'
   }
-  return parts.join('。')
+  return parts.join('. ')
 }
 
 /**
