@@ -96,14 +96,21 @@ function describeOffenders(what: string, offenders: readonly string[]): string {
 }
 
 /**
- * 去掉块注释与行注释。
+ * 去掉块注释与行注释，**但保留换行**。
  *
  * 必须有：源码注释里会正常出现「不杀进程」「`--dump-config` 退出码恒 0」这类字样，
  * 不剥注释就会把**解释规则的文字**当成违规。`[^:]` 那一段是防 `https://` ——
  * 不防的话 URL 里那个 `//` 会被当成行注释起点，把整行后半截吃掉。
+ *
+ * **为什么把块注释的内容换成等量空格而不是整段删掉**：本仓几乎每个文件开头都有一大段
+ * 文档注释，整段删掉会让后面所有行号**整体前移** —— 于是红线报出的 `文件:行`
+ * 是个**错的位置**（实测：注入在第 190 行，报出来是 143 行）。
+ * 「一个精确到行的错位置，比一句模糊的描述更费人」，所以行号必须与真实文件对齐。
  */
 function stripComments(source: string): string {
-  return source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1')
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, (block) => block.replace(/[^\n]/g, ' '))
+    .replace(/(^|[^:])\/\/[^\n]*/g, '$1')
 }
 
 /** 遍历 `src/**` 下的 TS 源码（相对路径 + 内容）。 */
@@ -912,6 +919,23 @@ describe('B10 诊断半边只读：不含杀进程 / 写文件 / 走安装面的
     expect(fsBindingsOf(render?.text ?? '').namespaces).toEqual([])
     expect([...fsBindingsOf(render?.text ?? '').named].filter((n) => n === 'truncate')).toEqual([])
     expect(judgeReadOnly([render!])).toEqual([])
+  })
+
+  it('报出的行号是**真实文件行号**（块注释不能把行号带偏）', () => {
+    // 实测踩过：`stripComments` 早先整段删掉块注释，于是注入在第 190 行的违规被报成 143 行。
+    // 行号错的位置比模糊的描述更费人 —— 所以这条断言钉住「块注释不吃掉行」。
+    const source = [
+      '/**',
+      ' * 一段跨多行的文档注释',
+      ' * 第二行',
+      ' * 第三行',
+      ' */',
+      'const before = 1',
+      'process.kill(pid)',
+    ].join('\n')
+    expect(judgeReadOnly([{ path: 'synthetic.ts', text: source }])).toEqual([
+      'synthetic.ts:7 → process.kill',
+    ])
   })
 
   it('判据可被否证：每种被禁动作都能被照出来', () => {
