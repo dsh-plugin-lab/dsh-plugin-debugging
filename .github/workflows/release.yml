@@ -74,6 +74,13 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      # **必须构建**：`main` 与 `exports` 指向 `lib/`，而 `/lib/` 是**构建产物**、被
+      # `.gitignore` 忽略 —— 检出里根本没有它。ci.yml 里本来就有这一步，但本 workflow
+      # 曾经漏了它：`0.2.0` 发出去的 tarball 只有 9 个文件、**没有一行代码**，
+      # 装上去连入口都解析不到（静默挂不起来）。守卫见 check-release.mjs 的第 11 条。
+      - name: Build
+        run: npm run build
+
       - name: Test
         run: npm test
 

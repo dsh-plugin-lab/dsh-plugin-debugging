@@ -214,6 +214,69 @@ if (!existsSync(releaseWorkflowPath)) {
     'release.yml 里出现了往 main/master 的 push —— 那需要 App token 与 ruleset 放行；' +
       '本仓的发布只产出 tag 与 GitHub Release。',
   )
+
+  // 11. 发布前**一定会构建**（机制之一，不锁定某一种实现）。
+  //
+  //     为什么这条存在：`main` / `exports` 指向 `lib/`，而 `/lib/` 是**构建产物**、
+  //     被 `.gitignore` 忽略 —— 检出里根本没有它。`0.2.0` 就是这么发出去的：
+  //     tarball 只有 9 个文件、**一行代码都没有**，装上去连入口都解析不到（静默挂不起来）。
+  //
+  //     本工作区里另三个仓各有各的机制（release.yml 显式 build 步骤 / `test` 先 build /
+  //     `prepare` 先 build）—— 本仓当时**一种都没有**。所以这条判据要认的是
+  //     「publish 之前有构建」，而不是某一种写法；改机制不该把它判红。
+  const scripts = typeof pkg.scripts === 'object' && pkg.scripts !== null ? pkg.scripts : {}
+  /** 这个 npm script 会不会产生 `lib/`。 */
+  const scriptBuilds = (scriptName) => {
+    const body = scripts[scriptName]
+    if (typeof body !== 'string') return false
+    return /npm run build\b/.test(body) || /(^|\s)(tsc|tsdown)\b/.test(body)
+  }
+  const releaseLines = source.split('\n')
+  const buildAt = releaseLines.findIndex((line) => /^\s*(-\s*)?run:\s*npm run build\b/.test(line))
+  const testAt = releaseLines.findIndex((line) => /^\s*(-\s*)?run:\s*npm (run )?test\b/.test(line))
+  const publishAt = releaseLines.findIndex((line) => /\bnpm publish\b/.test(line))
+  const before = (a, b) => a !== -1 && b !== -1 && a < b
+  const mechanisms = [
+    before(buildAt, publishAt) && 'release.yml 在 publish 之前跑了 build',
+    (scriptBuilds('prepack') || scriptBuilds('prepare')) && '`prepack` / `prepare` 会构建',
+    before(testAt, publishAt) &&
+      scriptBuilds('test') &&
+      'release.yml 在 publish 之前跑 test，而 test 会构建',
+  ].filter((item) => typeof item === 'string')
+  require_(
+    '发布前一定会构建（lib/ 是构建产物）',
+    mechanisms.length > 0,
+    '`main` / `exports` 指向 `lib/`，而它是构建产物（被 gitignore）—— publish 之前必须真的构建，' +
+      '否则发出去的 tarball 里没有代码。三选一：release.yml 里 publish 之前跑 `npm run build`；' +
+      '或在 package.json 里加 `prepack: npm run build`；或让 `test` 脚本先构建（而 release.yml 会跑 test）。',
+  )
+
+  // 12. 入口文件真的在（**条件式** —— 与上面 SKILL.md 那条同一套理由：判据要写清它在哪个上下文里成立）。
+  //
+  //     这里刻意分三种情形，而不是一律判红：「还没构建的检出」与「构建跑过却没产出入口」
+  //     是两件不同的事 —— 前者是**上下文**（干净检出、`git archive` 出来的副本、CI 里 build 之前），
+  //     后者才是**故障**。一律判红会把前者也判红（本仓红线 A5 正是用**不构建的干净副本**跑守卫，
+  //     实测会被误判），而那种红会训练人忽略这道守卫。
+  const mainTarget = typeof pkg.main === 'string' ? pkg.main.replace(/^\.\//, '') : ''
+  if (mainTarget !== '') {
+    const outDir = mainTarget.includes('/') ? mainTarget.slice(0, mainTarget.lastIndexOf('/')) : ''
+    const outDirExists = outDir !== '' && existsSync(join(root, outDir))
+    if (existsSync(join(root, mainTarget))) {
+      require_(`入口文件在磁盘上（${mainTarget}）`, true, '')
+    } else if (outDirExists) {
+      require_(
+        `入口文件在磁盘上（${mainTarget}）`,
+        false,
+        `构建产物目录 ${outDir}/ **在**，但入口 ${mainTarget} 不在 —— 构建跑过却没产出入口，` +
+          '发出去的包会加载不到任何东西。先修构建，别发版。',
+      )
+    } else {
+      note(
+        `入口 ${mainTarget} 不在这个根下（${outDir}/ 也不在）—— 这看起来是**还没构建**的检出。` +
+          '发布态里它必须存在（由上面「发布前一定会构建」那条保证）；构建过的工作树里这条 note 自动转成硬判。',
+      )
+    }
+  }
 }
 
 /**

@@ -76,19 +76,67 @@
 
 1. `npm ci`（冻结安装）。
 2. 校验 `package.json` 与 `package-lock.json` 的版本号一致。
-3. `npm run typecheck` / `npm test`。
-4. `npm run check:release`（发布态不变量）。
-5. release-guard：`git describe --tags --abbrev=0 --match 'v[0-9]*'` 取上个 tag，
+3. `npm run typecheck`。
+4. **`npm run build`** —— ⚠️ **这一步不能少**，理由见下面「产物是构建出来的」。
+5. `npm test`（**它自己不构建**：本仓的 `test` = `vitest run`）。
+6. `npm run check:release`（发布态不变量）。
+7. release-guard：`git describe --tags --abbrev=0 --match 'v[0-9]*'` 取上个 tag，
    比 `上个 tag..HEAD` 的改动；**只剩非产物改动就中止**（发了等于制造一个内容相同的新版本号）。
    首次发版没有任何 tag，这一步自动跳过。
-6. 探该版本在不在 npm 上。在就跳过 publish，只补 git 侧 —— 重跑一条流水线不会撞 403。
-7. `npm publish --provenance --tag <dist-tag>`。
-8. 打 `v<version>` tag 并**只推这个 tag**；tag 已存在则跳过。
-9. 建 GitHub Release：**正文两级 —— 先读 Release Drafter 的 `next` 草稿，草稿空则回落
+8. 探该版本在不在 npm 上。在就跳过 publish，只补 git 侧 —— 重跑一条流水线不会撞 403。
+9. `npm publish --provenance --tag <dist-tag>`。
+10. 打 `v<version>` tag 并**只推这个 tag**；tag 已存在则跳过。
+11. 建 GitHub Release：**正文两级 —— 先读 Release Drafter 的 `next` 草稿，草稿空则回落
    `--generate-notes`**；并显式区分「草稿读不到」（配置坏了，发 `::warning::`）与
    「草稿读到了但没有条目」（正常）。
 
 `dry-run` 输入只做检查与打包，不发布也不打 tag。
+
+## 产物是构建出来的：**发布链路必须自己构建**
+
+`main` 与 `exports` 指向 `lib/`，而 **`/lib/` 是构建产物、被 `.gitignore` 忽略** ——
+**检出里没有它**。所以「CI 上能跑测试」不等于「CI 上能发出一个能用的包」：不构建就 publish，
+发出去的 tarball **一行代码都没有**。
+
+**判例（2026-10-13，`0.2.0`）**：这是本仓第一次真跑发布流程，就把这个洞打出来了 ——
+`release.yml` 当时只有 `npm ci` → typecheck → test → `check:release` → publish，**没有 build**。
+结果 `0.2.0` 的 tarball **只有 9 个文件**（`LICENSE` / 两份 locale / `package.json` / 两份 README /
+`SKILL.md` / `icon.svg` / `cordis.patch.yml`），**没有 `lib/`** → 装上去连入口都解析不到。
+对照：手动构建后发的 `0.1.0` 是 **53 个文件**。
+**症状是静默的**：包里 `cordis.patch.yml` 在、宿主照样把这一行插进树，然后 import 失败 ——
+正是「行在、功能不在」那个形状。
+
+**这一仓当时没有构建机制，而同工作区另外三个仓各有一种**（机制可以不同，事实必须成立）：
+
+| 机制 | 形态 |
+|---|---|
+| release.yml 里显式一步 | `- run: npm run build`（放在 publish 之前） |
+| `test` 脚本先构建 | `test = npm run build && vitest run`，而发布流程会跑 `test` |
+| `prepare` / `prepack` 先构建 | npm 在打包前自动跑它 |
+
+**前两种对「跑测试的那条链」有好处**：CI 与发布都经过它，`lib/` 必然存在。
+第三种只在打包那一刻生效 —— **测试仍在无产物的树上跑**，本仓特意选了显式一步（测试与发布看到的是同一棵树）。
+
+**两条守卫**（`scripts/check-release.mjs`，14 条里第 11、12 条）：
+
+- **第 11 条（机制）**：publish 之前**一定会构建** —— 三种机制认其一，不锁定写法，改机制不该把它判红。
+  这条能被 `npm test` 直接跑到，**不必等一次真发布**（真发布只能在 main 上 dispatch，代价太大）。
+- **第 12 条（事实）**：`main` 指向的入口文件在磁盘上。**条件式**，分三种情形：
+  入口在 → ok；**产物目录在而入口不在 → 判红**（构建跑过却没产出入口，那是故障）；
+  **两者都不在 → 只记 note**（还没构建的检出，例如 `git archive` 出来的副本、红线 A5 用的干净副本）。
+  一律判红会把「还没构建」也判红，而那种红会训练人忽略这道守卫。
+
+**发版前手动核一次产物**（比守卫更直接，且能看见文件名）：
+
+```shell
+npm pack --dry-run          # 看清单里有没有 lib/ 与 skills/
+```
+
+**发现发错了怎么办**：**不发 unpublish**（见文末「发布后缺陷处理」），
+**立即发 patch 版本修掉**（新版本一上，`latest` 就指回可用的那个），
+并给坏版本打 `deprecated`。⚠️ **`npm deprecate` 要一个本机 token，而本仓刻意不在本机放凭据**
+（发布走 Trusted Publisher / OIDC）—— 所以这一步**要么维护者手动做，要么另开一条带凭据的路径**，
+别以为它会自己发生。
 
 ## tag 与 Release 的形状
 
