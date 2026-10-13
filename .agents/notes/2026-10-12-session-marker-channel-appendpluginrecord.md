@@ -77,4 +77,4 @@ v1 的工具是只读的，排障结论只活在当次工具结果里；而排�
    `appendPluginRecord` 强制 `ignorable`：recon-C 命题 4（源为运行时内联包 **RTp** 0.2.1-alpha.2）。
 2. 跨重启闭环与 viewer 显示**待实测**：recon-C「②」第 4 条。
 3. 本仓当前无落点：`src/**` 零命中（仅 `docs/ARCHITECTURE.md:134`、`AGENTS.md:68-70`）。
-4. 决策冻结条款 D13：`.coord/decisions.md` 表格。
+4. 决策冻结条款 D13（那一轮的中转件已按中转站的约定清理，条款已落在本文与 [AGENTS.md](../../AGENTS.md)）。

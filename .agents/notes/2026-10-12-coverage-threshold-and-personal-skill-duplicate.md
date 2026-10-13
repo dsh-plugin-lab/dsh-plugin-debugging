@@ -17,9 +17,9 @@
 **它是宿主用来抓死代码的**，假定那棵树已被大量测试覆盖；搬到刚起步的插件仓上，
 只会换来一堆为凑数字而写的断言。
 
-姊妹仓 `dsh-workbuddy-bridge` 是唯一配了门禁的仓：`provider: 'v8'`、
+工作区里另一份检出是唯一配了门禁的仓：`provider: 'v8'`、
 `include: ['src/**/*.{ts,tsx}']`、`thresholds: { lines: 70, statements: 70, functions: 60, branches: 60 }`
-（`dsh-workbuddy-bridge/vitest.config.ts:78-83`，2026-10-12 现读）。
+（那份检出的 `vitest.config.ts:78-83`，2026-10-12 现读；别仓行号，只在该仓成立）。
 
 **决定：起步取 wbb 那一档**（lines / statements **70**，functions / branches **60**）。
 
@@ -35,7 +35,7 @@
 （2026-10-12 现读）——要同时加它，而 npm 12 会拦 postinstall，装带安装脚本的依赖前先明确
 `allowScripts`（本仓 `AGENTS.md`「活跃坑」第 10 条）；② 别漏 `exclude` 里的 `lib/**`，
 否则**构建产物**被计入，数字会随一次 build 变动而**源码一行没改**。
-**重开**：测试体量接近姊妹仓、或稳定高于档位时再评估抬档。
+**重开**：测试体量接近那份检出、或稳定高于档位时再评估抬档。
 
 ---
 
@@ -72,9 +72,9 @@ S2 做法（recon-A 一·2、`docs/ARCHITECTURE.md` 第 8 节）：隔离实例�
 
 1. 官方门禁的对象与理由：`[CK]\docs\testing.md:10`、`[CK]\docs\testing.zh.md:10`（2026-10-12 现读；
    `[CK]` = 源码检出，代号沿用 recon-C）。
-2. 起步档取自姊妹仓：`dsh-workbuddy-bridge/vitest.config.ts:78-83`（**别仓行号，只在该仓成立**）。
+2. 起步档取自另一份检出：`vitest.config.ts:78-83`（**别仓行号，只在该仓成立**）。
 3. 本仓现状（无 coverage 配置、无 `@vitest/coverage-v8`）：2026-10-12 直接读
    `vitest.config.ts`、`package.json`、`node_modules`。
 4. 两份 SKILL.md 字节相同：2026-10-12 对两个文件各算一次 SHA256。
 5. 个人级副本的根与 rank、同名竞争第一天就存在：recon-A「既成事实 F1」与一·2。
-6. 决策冻结条款 D6 / D14：`.coord/decisions.md` 表格。
+6. 决策冻结条款 D6 / D14（那一轮的中转件已按中转站的约定清理，条款已落在本文与 [AGENTS.md](../../AGENTS.md)）。

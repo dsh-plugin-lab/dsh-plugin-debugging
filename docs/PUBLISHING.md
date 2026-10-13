@@ -4,7 +4,7 @@
 [scripts/check-release.mjs](../scripts/check-release.mjs) 的断言集合定义。两者互补，不互相抄。
 
 **本文职责**：本仓怎么发一个版本、发之前要核什么、出错了怎么办。
-**不负责**：组织级的跨仓判据（那条在组织仓的 `docs/plugin-conventions.md`）；工具与技能的行为（见
+**不负责**：跨仓判据（那条在工作区里另一份检出的 `docs/plugin-conventions.md`，不在本仓）；工具与技能的行为（见
 [docs/ARCHITECTURE.md](ARCHITECTURE.md) 与 [README.md](../README.md)）。
 
 ## 发版前确认
@@ -16,12 +16,12 @@
   `skills/dsh-plugin-debugging/SKILL.md`、`exports` 暴露 `./skills/*`、
   以及**发布流程没有偷偷改写版本号**（最后一条读的是 `release.yml` 的文本）。
 - `npm run check`（= typecheck + build + test）与 `npm run lint`、`npm run format:check`。
-- 身份件比对：`node ../.github-dsh-plugin-lab/scripts/scaffold.mjs check .`
+- 身份件比对：在工作区根跑 `node <脚手架检出>/scripts/scaffold.mjs check dsh-plugin-debugging`（比对脚本不在本仓）
   —— 只比 5 个「逐字相同」件，离线只读。
 - **`git rev-parse origin/main` 必须等于 `git rev-parse HEAD`。**
   **没 push 就没有可发的东西**：发布守卫判的是「上个 tag 到 **HEAD** 之间有没有改动」，
   而 workflow 跑的是**远端**那份代码 —— 本地领先而没推时，远端那个区间是**空的**，
-  守卫会以「没有可发的」红掉（姊妹仓 2026-09-22 就是这么撞的：本地领先 11 个提交、
+  守卫会以「没有可发的」红掉（同工作区的另一个仓 2026-09-22 就是这么撞的：本地领先 11 个提交、
   远端还停在上一个 tag）。**先 push，再 dispatch。**
   这是组织判据里 Must agree 的一条（「发布前确认要发的提交已在远端」）。
 - 按下面的判定链定档，然后本地 bump：
@@ -44,7 +44,7 @@
 它**不需要任何仓库 secret**：认证走 npm Trusted Publishing（OIDC），
 向 npm 换短期凭据；git 侧只用内置 `GITHUB_TOKEN` 建 tag 与 Release。
 **本仓的发布不推 `main`** —— 所以不需要 GitHub App token 与 ruleset 放行
-（姊妹仓 `dsh-zhihu-search` 因为要把发布提交推回 main，才多一把 App 私钥）。
+（同工作区有的仓因为要把发布提交推回 main，才多一把 App 私钥）。
 
 ### bump 是发布**之前**的独立一步，workflow 不 bump
 

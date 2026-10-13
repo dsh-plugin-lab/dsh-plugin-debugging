@@ -8,7 +8,7 @@
 ## 背景
 
 那份记录定的「走 `ctx.skills.register()`（rank 250）、不走 filesystem provider」是对的，但它隐含了一个
-**当时没验证的前提**：*250 会压过用户级 500*。实测（`.coord/verify-s2.md`）证明这只在**同一层内**成立：
+**当时没验证的前提**：*250 会压过用户级 500*。实测证明这只在**同一层内**成立（当时的验证报告是中转件，已按约定清理：可复跑的判据在 [test/integration/](../../test/integration/)，结论见 [HOST-CONTRACTS.md](../../docs/HOST-CONTRACTS.md)）：
 
 - 注册表**先比层、再比 rank**：`collectFresh` 把 global 层与 scope 链合并，
   **最近层的同名条目直接胜出**，rank 只在同一层内裁决（`verify-s2.md` §1.2 源码直读）。

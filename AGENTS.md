@@ -5,16 +5,16 @@
 ## 状态
 
 - 版本以 [package.json](package.json) 的 `version` 为准
-- 尚未发布
-- **v1 能力面 = 1 个技能 + 4 个只读工具**；**v1.1 增加写侧**：`dsh_hot_reload` 已实现（算法与失败隔离由真机实验A 坐实），`dsh_restart` 仍**有意推迟**
-- **「v1 只读」纪律不覆盖写侧工具**：写侧改动必须先落决策 —— 见 [.agents/notes/2026-10-13-write-side-tool-boundaries.md](.agents/notes/2026-10-13-write-side-tool-boundaries.md)；**边界由 `test/redlines.test.ts` 的 B15 守着**（诊断半边那条是 B10）
+- **已发布 `0.1.0` 到 npm**（2026-10-13 手动发的 —— **那一次没有 provenance**；由 `release.yml` 发的版本才会带上，徽章也因此还没挂）。版本线与判例见 [docs/PUBLISHING.md](docs/PUBLISHING.md)
+- **能力面 = 1 个技能 + 5 个工具**：4 个只读（`dsh_check_effect_mode` / `dsh_diagnose_plugin_load` / `dsh_check_auth` / `dsh_dump_config`）+ **1 个写侧** `dsh_hot_reload`（已实现、已真机验证；算法与关键语义见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §5）。`dsh_restart` **有意推迟**（方案见 [docs/RESTART-PLAN.md](docs/RESTART-PLAN.md)）
+- **「只读」纪律只覆盖诊断半边**：写侧改动必须先落决策 —— 见 [.agents/notes/2026-10-13-write-side-tool-boundaries.md](.agents/notes/2026-10-13-write-side-tool-boundaries.md)；**边界由 `test/redlines.test.ts` 的 B10（诊断半边）与 B15（写侧只许碰进程内树）守着**
 
 ## 全局规则
 
 - **结论必须来自实测**，不来自文档推断。引用宿主行为时写清是**哪一份真源、什么版本**
   —— 本机「在跑的宿主」与「源码检出」常常不是同一个版本。
 - **能落成校验的就不写散文**：不变量做成 `test/` 下的红线或 `scripts/` 下的检查，这里只留指针。
-- **v1 保持只读**：不改 profile、不写 `$DSH_HOME`、不杀进程。任何越界的「顺手修一下」先落决策。
+- **诊断半边保持只读**：不改 profile、不写 `$DSH_HOME`、不杀进程。**写侧只做「不杀进程」的那一种**（就地换模块，失败放回旧版本）；**会杀掉宿主的重启类动作不引入**。任何越界的「顺手修一下」先落决策。
 - **一处一事实，别处只留指针**：一个事实有两个落点时，删掉一个。
 - **改动连带同步点**：谁引用了你改过的路径 / 名字 / 规则，同批改。双语门面（[README.md](README.md)
   与 [README_zh.md](README_zh.md)）与两份 `locale/*.json` 是典型的成对件。
@@ -25,9 +25,9 @@
 - **改动走 PR，不直推 `main`**（维护者 2026-10-13 指定）。ruleset 里那条 `RepositoryRole` bypass 让直推
   **技术上能过** —— 但那是逃生门，不是常规路径。流程：开分支 → 推 → `gh pr create` → 等 `CI Success` → 合并。
   本地门禁（`npm run check` / `lint` / `format:check` / `check:release` / 链接校验）照旧在开 PR 前跑完。
-- **门面的语言切换行与姊妹仓写法一致**（放在居中 div 里的 HTML `<a href>`）。**这曾经是有意的分歧**：
+- **门面的语言切换行与工作区其他插件仓写法一致**（放在居中 div 里的 HTML `<a href>`）。**这曾经是有意的分歧**：
   本仓原先用 Markdown 链接行（`English | 中文` 那种写法）以换取链接校验 **0 警告**，代价是那一行不居中；
-  维护者 2026-10-13 要求门面与姊妹仓视觉一致，于是改回 HTML 形。**代价如实记下**：链接校验会把
+  维护者 2026-10-13 要求门面与工作区其他插件仓视觉一致，于是改回 HTML 形。**代价如实记下**：链接校验会把
   HTML 锚点报成「引用未做成链接」，即本仓现在**稳定有那两条警告**（错误数仍为 0）。
   想回到 0 警告就把两份门面的语言切换改回 Markdown 行 —— 要改就同批改这里。
 
@@ -42,11 +42,11 @@ npm run format:check   # 格式
 
 ```shell
 # 身份件比对：只比 5 个「逐字相同」件，离线只读，随时可跑
-# （脚手架在**组织仓**，不在本仓；下面这条绝对路径是它的本机检出位置）
-node "D:\.github-dsh-plugin-lab\scripts\scaffold.mjs" check .
+# （脚手架**不在本仓**，在工作区里的另一份检出中；下面这条路径按实际那份填）
+node "<脚手架检出>/scripts/scaffold.mjs" check dsh-plugin-debugging
 
 # 链接校验与换行校验
-# （check-links.py 住**枢纽仓**的 scripts/，不在本仓；它同时是那边 CI 用的那一份）
+# （check-links.py **不在本仓**，在工作区根的 scripts/ 下）
 python "..\scripts\check-links.py" . --fragments --refs
 git diff --check
 ```
@@ -55,16 +55,24 @@ git diff --check
 
 - 对外说明 → [README.md](README.md)（English）· [README_zh.md](README_zh.md)（中文）
 - 设计说明（**为什么这样分层**）→ [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- **宿主契约台账（已核 / 已实测的宿主事实，调宿主 API 前先查）** → [docs/HOST-CONTRACTS.md](docs/HOST-CONTRACTS.md)
+- **未做的工具的方案**（`dsh_restart`）+ 参考实现索引 → [docs/RESTART-PLAN.md](docs/RESTART-PLAN.md)
 - 发布流程与判例 → [docs/PUBLISHING.md](docs/PUBLISHING.md)
 - 决策与依据 → [.agents/notes/](.agents/notes/)
 - 展示元数据 → `locale/en.json` · `locale/zh.json`（只住这里，别处只留指针）
 - 真机红线（**本机跑，不进 CI**）→ [test/integration/README.md](test/integration/README.md)
 - 发布态不变量 → [scripts/check-release.mjs](scripts/check-release.mjs)
 
+**四份文档的分工（别混）**：ARCHITECTURE 答「我们为什么这么设计」，HOST-CONTRACTS 答「宿主实际上是什么样」，
+RESTART-PLAN 答「还没做的那件事怎么做」，AGENTS（本文）答「在这个仓里怎么干活」。
+
 ## 待办
 
-- [ ] v1.1：`dsh_hot_reload`（前置门：profile 里真的挂了 `hmr`）与 `dsh_restart`
-      （先 dry-run；`danger-full-access` 档下 `ask` 会被确定性拒绝，语义要先定）
+- [ ] **`dsh_restart`（唯一还没做的工具）**：方案见 [docs/RESTART-PLAN.md](docs/RESTART-PLAN.md)，
+      动手前先读 [docs/HOST-CONTRACTS.md](docs/HOST-CONTRACTS.md) §2（拉起与恢复的契约）。
+      **先 dry-run**；`danger-full-access` 档下 `ask` 会被确定性拒绝，语义要先定。
+      （`dsh_hot_reload` 已完成并真机验证，已从本清单移除 —— 设计与宿主事实分别见
+      [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §5 与 [docs/HOST-CONTRACTS.md](docs/HOST-CONTRACTS.md) §1。）
 - [ ] **技能压过用户级同名技能**：已实现（**动态 scope 注入**：技能同时注册进全局层与每个活跃 agent
       的 preset 作用域，与 `skill-filesystem` 同层 → rank 250 才真正赢）。静态写进 preset 组合的方案
       **已实测否决**（坏包会让默认 standard 会话建不起来）。决策见
@@ -81,6 +89,11 @@ git diff --check
       实现方向：Linux 用 `ss -ltnp`、macOS 用 `lsof -i`。
       **注意这事有个便宜可占**：CI 就在 ubuntu 上跑，所以这层**能被 CI 真正验证** ——
       与「只能本机红线」的那几项不同。做完要把 README 的「平台支持」一节同批改。
+- [ ] **两个真机红线脚本里硬编码的宿主 pid 已过期**（`leak-fix.ps1` 的 `-HostPid` 默认值、`bench-s1.ps1` 的
+      内联判断里那个数）：宿主重启过多次，写死的值不再指向宿主 → **保护实际失效**。
+      改法：按端口 3080 现查 pid（查不到就**什么都不杀**，fail-safe），别写常数。
+      （本轮只改了 [test/integration/README.md](test/integration/README.md) 的措辞 —— 见「不抄会漂的值」；
+      脚本本身按维护者边界「不改代码逻辑」未动。）
 - [ ] **CI 与本地平台不同**：本机是 Windows，CI 是 ubuntu。**任何写死平台行为的断言都会在 CI 上红**
       （首次推送就踩过：`probed === true` 那一条）。新增与平台相关的判据时，
       要么按平台分支断言，要么让两种平台的行为都被钉住。
@@ -174,7 +187,7 @@ git diff --check
     里却没有它们，**CI 克隆下来直接缺文件**。这个坑来自组织脚手架模板的 `_common/.gitignore`
     （模板里就是裸 `lib/`），任何把源码放在 `src/lib/` 的新仓都会中招。**加了新目录后，
     用 `git status --ignored --porcelain` 看一眼「被忽略的到底有哪些」**，别只看 `git status`。
-    （模板已修：组织仓 `490e752`。）
+    （模板已修。）
 24. **判据必须写清「在哪个运行上下文里成立」**：`npm pack` 解包目录里 `import` 一个**peer 型**包
     **恒假** —— 实测报 `ERR_MODULE_NOT_FOUND: @deepseek-ai/schemastery`（peers 不在解包目录里）。
     正确判据是「**在 peers 可解析的上下文里** import 成功且无副作用」。
