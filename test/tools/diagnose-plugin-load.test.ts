@@ -1170,6 +1170,78 @@ describe('dsh_diagnose_plugin_load', () => {
       ).toBe(true)
     })
 
+    it('**双引号** args 也要真取出文本（`util.inspect` 遇单引号串会改用双引号）', () => {
+      const { report } = parseStartupLog(REAL_STARTUP_LOG)
+      // 夹具里这条消息的 `args[0]` 是双引号串（正文含单引号故 inspect 换了引号）。
+      const row = report.messages.find((item) => item.name === 'workspace-registry')
+      expect(row).toBeDefined()
+      // 取不到就不该挂出这个键 —— 值为 `undefined` 的自有属性会让宿主拒收整个返回值。
+      expect(row).toHaveProperty('text')
+      expect(String(row?.text)).toContain('filtered session')
+      // inspect 把反斜杠写成 `\\`，必须还原（否则路径不可用）。
+      expect(String(row?.text)).toContain('dsh-zhihu-search')
+      expect(String(row?.text)).not.toContain('\\\\')
+      // 每一行消息都没有值为 `undefined` 的自有属性（`JSON.stringify` 会静默丢掉它们，
+      // 所以这里逐条查 own property，而不是比 JSON 串）。
+      for (const item of report.messages) {
+        expect(Object.keys(item).some((key) => item[key as keyof typeof item] === undefined)).toBe(
+          false,
+        )
+      }
+    })
+
+    it('单引号与双引号两支都真的走过（防空转：只有一支被断言 = 白测）', () => {
+      const { report } = parseStartupLog(REAL_STARTUP_LOG)
+      const withText = report.messages.filter((item) => typeof item.text === 'string')
+      // 双引号那支。
+      expect(
+        withText.some(
+          (item) =>
+            item.name === 'workspace-registry' && String(item.text).startsWith('workspace '),
+        ),
+      ).toBe(true)
+      // 单引号那支（含内嵌双引号的）。
+      expect(
+        withText.some((item) => item.text?.includes('patch: name mismatch for "llm-deepseek"')),
+      ).toBe(true)
+      // 多元素 `args`：只取 `args[0]`，`args[1]` 不会被当文本。
+      expect(withText.find((item) => item.name === 'hmr')?.text).toBe('config reload at %C failed')
+    })
+
+    it('取不到文本时**不许挂出 `text` 键**（这条守卫只有在取不到时才承重）', () => {
+      // `args[0]` 是数字：既不是字符串也不是 `Error:` 开头 ⇒ `firstArgText` 取不到。
+      // 少了「赋不到就不赋」那道守卫，这里就会挂出一个值为 `undefined` 的自有属性。
+      const log = String.raw`
+{
+  timestamp: '2026-10-13T00:00:00.000Z',
+  profile: 'web',
+  error: StartupError: dsh: startup failed: 1 required plugin did not activate
+    Failed plugins (1):
+      webserver (required)
+        Package: @deepseek-ai/dsh-host-webserver
+        Error: listen EADDRINUSE: address already in use 127.0.0.1:19388
+    Plugins waiting for services (0):
+      Plugin                 Missing services
+  [startup]: {
+    messages: [
+      {
+        ts: 1,
+        name: 'numeric-arg',
+        type: 'warn',
+        args: [ 42 ]
+      },
+      [length]: 1
+    ]
+  }
+}
+`
+      const row = parseStartupLog(log).report.messages.find((item) => item.name === 'numeric-arg')
+      expect(row).toBeDefined()
+      // 判据的判据：`Object.keys` 看得见 `text` 这个自有属性吗？
+      expect(Object.keys(row ?? {})).not.toContain('text')
+      expect(row?.text).toBeUndefined()
+    })
+
     it('解析失败 → `parse.ok=false`（判红），且与「真的没有失败条目」**可分**', () => {
       // 结尾是 `}`（所以**不是**截断），但里面一个锚点都没有。
       const broken = parseStartupLog('{ nothingRecognisable: true }\n')
