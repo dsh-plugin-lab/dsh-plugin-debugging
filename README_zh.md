@@ -5,8 +5,8 @@
 <h1 align="center">dsh-plugin-debugging</h1>
 
 <div align="center">
-  <p><strong>Diagnose a running DSH instance — read-only checks, plus one in-place hot reload</strong></p>
-  <p><em>给正在跑的 DSH 实例排障：只读诊断，外加一个就地热重载</em></p>
+  <p><strong>Let your DSH agent inspect and fix its own runtime</strong></p>
+  <p><em>让 DSH Agent 自检自修它身处的运行时</em></p>
 
   <p>
     <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/powered_by_dsh-4D6BFE?style=flat&logo=deepseek&logoColor=white" alt="由 dsh 驱动"></a>
