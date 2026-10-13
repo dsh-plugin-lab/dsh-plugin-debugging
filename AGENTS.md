@@ -7,7 +7,7 @@
 - 版本以 [package.json](package.json) 的 `version` 为准
 - 尚未发布
 - **v1 能力面 = 1 个技能 + 4 个只读工具**；**v1.1 增加写侧**：`dsh_hot_reload` 已实现（算法与失败隔离由真机实验A 坐实），`dsh_restart` 仍**有意推迟**
-- **「v1 只读」纪律不覆盖写侧工具**：写侧改动必须先落决策 —— 见 [.agents/notes/2026-10-13-write-side-tool-boundaries.md](.agents/notes/2026-10-13-write-side-tool-boundaries.md)
+- **「v1 只读」纪律不覆盖写侧工具**：写侧改动必须先落决策 —— 见 [.agents/notes/2026-10-13-write-side-tool-boundaries.md](.agents/notes/2026-10-13-write-side-tool-boundaries.md)；**边界由 `test/redlines.test.ts` 的 B15 守着**（诊断半边那条是 B10）
 
 ## 全局规则
 

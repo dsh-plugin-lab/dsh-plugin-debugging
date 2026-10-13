@@ -668,8 +668,12 @@ describe('B9 工具名是闭集', () => {
 })
 
 /**
- * B10 判据：**v1 只读**。这是对外承诺（README「v1 is read-only on purpose」、
- * `docs/ARCHITECTURE.md` §1），必须由断言守着，不能只写在散文里。
+ * B10 判据：**诊断半边只读** —— 那四个诊断工具不许杀进程 / 写文件 / 走 `dsh plugin` 安装面。
+ *
+ * **它管的是诊断半边，不是「整个 `src/**` 只读」。** v1.1 起本仓有了**写侧**
+ * （`dsh_hot_reload`），写侧的边界是**另一条**红线 —— B15（写侧只许碰进程内树）。
+ * 两条的分工：B10 = 诊断半边不许改系统状态；B15 = 写侧不许越出进程内。
+ * **这里三类扫描（杀进程 / fs 写入 / 安装面）一个字都没有放宽。**
  *
  * 允许与禁止的边界**要划准**，否则这条会变成噪声：
  * - 允许 `child_process.spawn` —— 本仓的诊断要起 `dsh --dump-config` 这类**只读**子进程，
@@ -781,17 +785,22 @@ const FS_WRITE_APIS = [
 const FS_OPEN_WRITE_FLAG =
   /\b(open|openSync)\s*\([^)]*['"`](w|a|r\+|w\+|a\+|wx|ax|as|rs\+|w\+x|a\+x)['"`]/
 
-/** B10 判据：扫源码，返回违规（`路径:行号 → 记号`）。 */
-function judgeReadOnly(sources: readonly { path: string; text: string }[]): string[] {
+/**
+ * fs **写入类**用法的判定（B10 与 B15 共用）。
+ *
+ * 判据只在「确有 `node:fs` 来源的名字」上生效，见 {@link fsBindingsOf}。
+ * 抽出来是因为两条红线共用同一套 fs 语义，分开写会漂。
+ *
+ * @param sources 源码（相对路径 + 内容）。
+ * @returns 违规清单（`路径:行号 → 记号`）。
+ */
+function judgeFsWriteUsage(sources: readonly { path: string; text: string }[]): string[] {
   const offenders: string[] = []
   for (const { path, text } of sources) {
     const { namespaces, named } = fsBindingsOf(text)
     const lines = stripComments(text).split('\n')
     lines.forEach((line, index) => {
       const at = `${path}:${index + 1}`
-      for (const { label, pattern } of FORBIDDEN_PROCESS_VIOLATIONS) {
-        if (pattern.test(line)) offenders.push(`${at} → ${label}`)
-      }
       if (FS_OPEN_WRITE_FLAG.test(line)) offenders.push(`${at} → fs.open（可写标志）`)
       // 具名导入有两种用法：**直接当函数**（`truncate(...)`）与**命名空间别名**
       // （`import { promises as fsp }` → `fsp.rmdir(...)`）。两种都查，
@@ -813,14 +822,29 @@ function judgeReadOnly(sources: readonly { path: string; text: string }[]): stri
   return offenders
 }
 
-describe('B10 v1 只读：src/** 不含改变系统状态的动作', () => {
+/** B10 判据：扫源码，返回违规（`路径:行号 → 记号`）。 */
+function judgeReadOnly(sources: readonly { path: string; text: string }[]): string[] {
+  const offenders: string[] = []
+  for (const { path, text } of sources) {
+    const lines = stripComments(text).split('\n')
+    lines.forEach((line, index) => {
+      const at = `${path}:${index + 1}`
+      for (const { label, pattern } of FORBIDDEN_PROCESS_VIOLATIONS) {
+        if (pattern.test(line)) offenders.push(`${at} → ${label}`)
+      }
+    })
+  }
+  return [...offenders, ...judgeFsWriteUsage(sources)]
+}
+
+describe('B10 诊断半边只读：不含杀进程 / 写文件 / 走安装面的动作', () => {
   it('真实源码里没有杀进程 / 写文件 / 碰安装面的动作', () => {
     const sources = readSourcesUnder('src')
     // 非空自证：真的扫到了源码（0 个文件时这条会假绿）。
     expect(sources.length, 'src/** 下没扫到 TS 源码 —— 判据没跑到').toBeGreaterThan(5)
 
     const offenders = judgeReadOnly(sources)
-    expect(offenders, describeOffenders('v1 只读被破坏', offenders)).toEqual([])
+    expect(offenders, describeOffenders('诊断半边只读被破坏', offenders)).toEqual([])
   })
 
   it('判据可被否证：安装面的三种命令形态都必须红（含字符串与模板字符串）', () => {
@@ -1216,6 +1240,117 @@ describe('B14 src/** 的模型可见字符串不含 CJK（注释除外）', () =
     expect(
       collectCjkInStringLiterals("const q = 'a \\' 中文 \\' b'").map((hit) => hit.line),
     ).toEqual([1])
+  })
+})
+
+/**
+ * B15 判据：**写侧工具只许碰进程内树**。
+ *
+ * v1.1 起本仓有写侧（`dsh_hot_reload`）：它改的是**进程内**的模块缓存与 fiber ——
+ * 不写文件、不起子进程、不杀进程、不碰 `$DSH_HOME`。这是对外承诺，
+ * 决策见 `.agents/notes/2026-10-13-write-side-tool-boundaries.md`。
+ *
+ * **为什么按文件清单限定**（而不是扫全 `src/**`）：诊断半边**合法地** spawn
+ * `dsh --dump-config`（只读 CLI，出口在 `src/lib/exec.ts`）并**读**文件；
+ * 全扫会把那些合法用法判红。B10 与 B15 的分工就在这里：
+ * **B10 = 诊断半边不许改系统状态；B15 = 写侧不许越出进程内。**
+ *
+ * **没有 skip**：「这两个文件在不在」本身就是判据的一部分 —— 写侧被删/改名时，
+ * 应当**响亮失败并要求人显式改这条红线**，而不是静默跳过（本仓假绿判例，见活跃坑 18）。
+ */
+const WRITE_SIDE_FILES = ['src/tools/dsh_hot_reload.ts', 'src/lib/hot-reload.ts'] as const
+
+/** 写侧额外禁止的记号（fs 写入类由 {@link judgeFsWriteUsage} 另行判定）。 */
+const WRITE_SIDE_FORBIDDEN: ReadonlyArray<{ label: string; pattern: RegExp }> = [
+  { label: 'node:child_process（写侧不起子进程）', pattern: /['"`]node:child_process['"`]/ },
+  { label: 'process.kill', pattern: /\bprocess\.kill\b/ },
+  { label: 'taskkill', pattern: /\btaskkill\b/i },
+  { label: 'Stop-Process', pattern: /\bStop-Process\b/i },
+  { label: 'SIGKILL', pattern: /\bSIGKILL\b/ },
+  { label: 'SIGTERM', pattern: /\bSIGTERM\b/ },
+  { label: 'DSH_HOME（写侧不碰宿主主目录）', pattern: /\bDSH_HOME\b/ },
+]
+
+/** B15 判据：扫写侧文件，返回违规（`路径:行号 → 记号`）。 */
+function judgeWriteSide(sources: readonly { path: string; text: string }[]): string[] {
+  const offenders: string[] = []
+  for (const { path, text } of sources) {
+    const lines = stripComments(text).split('\n')
+    lines.forEach((line, index) => {
+      const at = `${path}:${index + 1}`
+      for (const { label, pattern } of WRITE_SIDE_FORBIDDEN) {
+        if (pattern.test(line)) offenders.push(`${at} → ${label}`)
+      }
+    })
+  }
+  return [...offenders, ...judgeFsWriteUsage(sources)]
+}
+
+describe('B15 写侧工具只许碰进程内树', () => {
+  it('写侧两个文件都在（不在 = 响亮失败，要求显式改这条红线）', () => {
+    const missing = WRITE_SIDE_FILES.filter((rel) => !existsRepo(rel))
+    expect(
+      missing,
+      `写侧文件不见了：${missing.join(', ')}。` +
+        '\n这不是「写侧还没实现」—— 本红线按文件清单限定作用域，文件被删/改名必须显式改这里，' +
+        '否则这条判据会**静默变成空转**。',
+    ).toEqual([])
+  })
+
+  it('真实写侧源码里没有 fs 写入 / 子进程 / 杀进程 / DSH_HOME', () => {
+    const sources = WRITE_SIDE_FILES.map((rel) => ({ path: rel, text: readRepo(rel) }))
+    // 非空自证：两处都真读到了内容（读成空串会让这条假绿）。
+    for (const { path, text } of sources) {
+      expect(text.length, `${path} 读出来是空的 —— 判据没跑到`).toBeGreaterThan(200)
+    }
+
+    const offenders = judgeWriteSide(sources)
+    expect(
+      offenders,
+      describeOffenders('写侧越出了进程内', offenders) +
+        '\n写侧只许改进程内的模块缓存与 fiber：不写文件、不起子进程、不杀进程、不碰 $DSH_HOME。' +
+        '（诊断半边起 `dsh --dump-config` 是合法的，那条由 B10 管 —— 别放宽 B10。）',
+    ).toEqual([])
+  })
+
+  it('扫描器非空转：含 writeFile 的样本必须报，纯只读样本必须不报', () => {
+    const writing = [
+      "import { writeFile } from 'node:fs/promises'",
+      'export async function f(p: string) {',
+      "  await writeFile(p, 'x')",
+      '}',
+    ].join('\n')
+    const readOnly = [
+      "import { readFile } from 'node:fs/promises'",
+      'export async function f(p: string) {',
+      "  return await readFile(p, 'utf8')",
+      '}',
+    ].join('\n')
+    expect(judgeWriteSide([{ path: 'w.ts', text: writing }]).length).toBeGreaterThan(0)
+    expect(judgeWriteSide([{ path: 'r.ts', text: readOnly }])).toEqual([])
+  })
+
+  it('判据可被否证：四类禁止记号都能照出来', () => {
+    const cases: Array<string> = [
+      "import { spawn } from 'node:child_process'",
+      'process.kill(pid)',
+      "const home = process.env.DSH_HOME + '/profiles'",
+      "import { rmSync } from 'node:fs'\nrmSync(p, { recursive: true })",
+    ]
+    for (const source of cases) {
+      expect(
+        judgeWriteSide([{ path: 'synthetic.ts', text: source }]),
+        `漏了：${source}`,
+      ).not.toEqual([])
+    }
+  })
+
+  it('读文件与只读 fs API 不算违规（别误伤合法用法）', () => {
+    const source = [
+      "import { readFileSync } from 'node:fs'",
+      'export function f(p: string) { return readFileSync(p, "utf8") }',
+    ].join('\n')
+    expect(judgeWriteSide([{ path: 'synthetic.ts', text: source }])).toEqual([])
   })
 })
 
