@@ -524,14 +524,28 @@ function countByClass(
  * @param key 本次的 `key`。
  */
 function keyText(key: DumpConfigKey): string[] {
+  // 渲染层**绝不抛**（`render.ts` §3.1）：`ensureToolResult` 合成的兜底里 `data.key` 是 `{}`
+  // （`lib/errors.ts` 的 `malformedResult`），数组字段可能整块缺席 —— `for…of undefined`
+  // 会当场抛。`key` 本身不是对象时也要有输出，**不许静默返回空数组**。
+  if (!key || typeof key !== 'object') return [GUARD_FALLBACK_LINE]
   const lines: string[] = [resolvedLine(key.resolved)]
-  for (const invocation of key.invocations) lines.push(invocationLine(invocation))
-  if (key.hmr !== undefined) {
+  // 「缺席」与「空数组」不是一回事：兜底路径上不许把「不知道」印成「没有」
+  // （活跃坑 18 的三值纪律，`listStartupLogs` 那边同样处理）。
+  if (!Array.isArray(key.invocations)) {
+    lines.push('dump: unknown (the guard synthesized this result)')
+  } else {
+    for (const invocation of key.invocations) lines.push(invocationLine(invocation))
+  }
+  if (key.hmr) {
     lines.push(
-      key.hmr.present ? `hmr: present=yes disabled=${key.hmr.disabled}` : 'hmr: present=no',
+      key.hmr.present === true
+        ? `hmr: present=yes disabled=${String(key.hmr.disabled)}`
+        : 'hmr: present=no',
     )
   }
-  if (key.actionable.length === 0) {
+  if (!Array.isArray(key.actionable)) {
+    lines.push('actionable: unknown (the guard synthesized this result)')
+  } else if (key.actionable.length === 0) {
     lines.push('actionable: none')
   } else {
     for (const item of key.actionable) lines.push(actionableLine(item))
@@ -540,12 +554,28 @@ function keyText(key: DumpConfigKey): string[] {
 }
 
 /**
+ * 兜底行：`ensureToolResult` 合成的结果里 `key` 是 `{}`。
+ *
+ * 为什么**必须**印出来而不是省略整行：这条路径只在「工具自己返回了坏形状」时才走到 ——
+ * 那一刻模型最该知道的事实正是「这个结果是守卫合成的，里面的字段都不可信」。
+ * 省略这一行会让兜底**静默**（看起来像一次正常的空结果）。
+ */
+const GUARD_FALLBACK_LINE = 'resolved: unknown (the guard synthesized this result)'
+
+/**
  * `resolved:` 那一行 —— 整份结论的前提，也是 `nextStep.args.profile` 的取值来源。
  *
- * @param resolved `key.resolved`。
+ * 字段按 `typeof` 防御取值：兜底合成的 `key` 里整块 `resolved` 都不在，
+ * 直接取字段会当场抛（这正是本工具过去在兜底路径上崩掉的原因）。
+ *
+ * @param resolved `key.resolved`（可能是兜底合成的 `undefined`）。
  */
-function resolvedLine(resolved: ResolvedKey): string {
-  return `resolved: profile=${resolved.profile} dshHome=${resolved.dshHome} (${resolved.dshHomeSource})`
+function resolvedLine(resolved: ResolvedKey | undefined): string {
+  if (!resolved || typeof resolved !== 'object') return GUARD_FALLBACK_LINE
+  const profile = typeof resolved.profile === 'string' ? resolved.profile : 'unknown'
+  const dshHome = typeof resolved.dshHome === 'string' ? resolved.dshHome : 'unknown'
+  const source = typeof resolved.dshHomeSource === 'string' ? resolved.dshHomeSource : 'unknown'
+  return `resolved: profile=${profile} dshHome=${dshHome} (${source})`
 }
 
 /**

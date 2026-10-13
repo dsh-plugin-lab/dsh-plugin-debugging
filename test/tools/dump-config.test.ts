@@ -25,7 +25,12 @@ import {
   DESCRIPTION_MAX_CHARS,
   DESCRIPTION_MAX_LINES,
 } from '../../src/tools/describe.ts'
-import { TOOL_ERROR_KINDS, toolResultProblem, type JsonValue } from '../../src/lib/errors.ts'
+import {
+  ensureToolResult,
+  TOOL_ERROR_KINDS,
+  toolResultProblem,
+  type JsonValue,
+} from '../../src/lib/errors.ts'
 import {
   cmdResult,
   configFor,
@@ -540,6 +545,32 @@ describe('dsh_dump_config', () => {
       const tool = createDumpConfigTool(depsFor(configFor(dshHome)))
       const text = renderText(tool, { nonsense: true })
       expect(text).toBe(`[${DUMP_CONFIG_TOOL}] {"nonsense":true}`)
+    })
+
+    it('守卫合成的兜底（`key` 是 `{}`）必须可渲染，且降级值看得出来', async () => {
+      const dshHome = await tempDshHome()
+      const tool = createDumpConfigTool(depsFor(configFor(dshHome)))
+
+      // 造一个**形状非法**的返回值（`data.verdict` 是空串）→ 守卫合成兜底（`key: {}`）。
+      const malformed = { ok: true, data: { verdict: '', key: {}, audit: {} } }
+      const fallback = ensureToolResult(malformed)
+
+      // ⚠️ 下界（活跃坑 18 / 37）：自证这**真的是**兜底 —— 幂等（它自己过了守卫），
+      // 且**不等于**输入（输入被换掉了）。否则下面「渲染它当然不抛」是恒真的。
+      expect(fallback, '守卫没换掉这个值 —— 下面测的就不是兜底路径').not.toBe(malformed)
+      expect(ensureToolResult(fallback), '兜底自己没过守卫').toBe(fallback)
+      expect(fallback.ok).toBe(false)
+
+      // 渲染层**绝不抛**（`render.ts` §3.1）：兜底里 `invocations` / `actionable` 整块缺席，
+      // 直接 `for…of` / `.length` 会当场抛。
+      let text = ''
+      expect(() => {
+        text = renderText(tool, fallback)
+      }, '守卫合成的兜底把渲染层打崩了').not.toThrow()
+      expect(text).toContain('verdict:')
+      expect(text).toContain('resolved: unknown (the guard synthesized this result)')
+      // 「不知道」不许印成「没有」：`actionable: none` 会被读成「一条问题都没有」。
+      expect(text).toContain('actionable: unknown (the guard synthesized this result)')
     })
 
     it('`audit` 的叶子值一个字符都不许进模型文本（B22 的哨兵手法）', async () => {

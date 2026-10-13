@@ -522,6 +522,30 @@ describe('dsh_check_auth', () => {
       const text = renderText(tool, {}, { nonsense: true })
       expect(text).toBe(`[${CHECK_AUTH_TOOL}] {"nonsense":true}`)
     })
+
+    it('守卫合成的兜底（`key` 是 `{}`）必须可渲染，且降级值看得出来', async () => {
+      const dshHome = await tempDshHome()
+      const tool = createCheckAuthTool(depsFor(configFor(dshHome), { fetch: fetchWithStatus(200) }))
+
+      // 造一个**形状非法**的返回值（`data.verdict` 是空串）→ 守卫合成兜底（`key: {}`）。
+      const malformed = { ok: true, data: { verdict: '', key: {}, audit: {} } }
+      const fallback = ensureToolResult(malformed)
+
+      // ⚠️ 下界（活跃坑 18 / 37）：自证这**真的是**兜底 —— 幂等（它自己过了守卫），
+      // 且**不等于**输入（输入被换掉了）。否则下面「渲染它当然不抛」是恒真的。
+      expect(fallback, '守卫没换掉这个值 —— 下面测的就不是兜底路径').not.toBe(malformed)
+      expect(ensureToolResult(fallback), '兜底自己没过守卫').toBe(fallback)
+      expect(fallback.ok).toBe(false)
+
+      // 渲染层**绝不抛**（`render.ts` §3.1）：这条路径的崩溃永远发生在「本来就已经出错」的时刻。
+      let text = ''
+      expect(() => {
+        text = renderText(tool, {}, fallback)
+      }, '守卫合成的兜底把渲染层打崩了').not.toThrow()
+      expect(text).toContain('verdict:')
+      // 降级值必须让「兜底发生了」**看得出来** —— 静默省略这一行等于把事实藏起来。
+      expect(text).toContain('resolved: unknown (the guard synthesized this result)')
+    })
   })
 
   /**
