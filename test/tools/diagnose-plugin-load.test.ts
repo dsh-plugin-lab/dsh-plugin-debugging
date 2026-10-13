@@ -375,13 +375,14 @@ describe('dsh_diagnose_plugin_load', () => {
       })
     })
 
-    it('非 win32（CI 就是这一条）：不 spawn、降级成 probed=false，并说明当前平台', async () => {
+    it('非 win32（CI 就是这一条）：只跑本平台的命令，绝不跑 powershell.exe', async () => {
       await withPlatform('linux', async () => {
         const dshHome = await tempDshHome()
         const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
         await writeInstalledPackage(profileDir, 'pkg-a')
-        // 关键断言：即便给了 spawn 实现，非 Windows 上**一次都不许调用** ——
-        // 否则等于在 Linux 上试图跑 `powershell.exe`。
+        // 关键断言：**一条命令都不许是 `powershell.exe`** —— 在 Linux 上跑它毫无意义。
+        // 断言「跑了几条」会把实现细节钉死（恰好两条 ss 是当前实现的巧合），
+        // 所以这里断言**命令的族**，不是条数。
         const { spawn, calls } = recordingSpawn(() => cmdResult({ stdout: LISTENING_OUTPUT }))
         const tool = createDiagnosePluginLoadTool(
           depsFor(configFor(dshHome, { port: 3080 }), { spawn }),
@@ -392,11 +393,17 @@ describe('dsh_diagnose_plugin_load', () => {
           string,
           unknown
         >
+        // 喂进去的是 **Windows 那张 `pid|name|startedAt` 表**，而 linux 走 `ss`，
+        // 解析器读不懂它 ⇒ 「一张表都认不出」= 不可信 ⇒ `probed: false`。
+        // 这是**形状**判定，与「恰好 spawn 两次」无关。
         expect(lookup['probed']).toBe(false)
         expect(lookup['listening']).toBe(false)
         expect(lookup['listeners']).toEqual([])
         expect(String(lookup['detail'])).toContain('linux')
-        expect(calls).toHaveLength(0)
+        for (const call of calls) {
+          expect(call.command.toLowerCase()).not.toContain('powershell')
+        }
+        expect(calls.length).toBeGreaterThan(0)
 
         // 端口值与来源仍然照报（文件层诊断不受平台影响）。
         const resolved = data.key['resolved'] as Record<string, unknown>
@@ -426,7 +433,7 @@ describe('dsh_diagnose_plugin_load', () => {
       })
     })
 
-    it('非 win32：同一次 spawn 输出**不被消费** → artifactNewerThanProcess=null（未知，不是 false）', async () => {
+    it('非 win32：`ss` 那张表给不出进程启动时间 → artifactNewerThanProcess=null（未知，不是 false）', async () => {
       await withPlatform('linux', async () => {
         const dshHome = await tempDshHome()
         const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
@@ -443,7 +450,12 @@ describe('dsh_diagnose_plugin_load', () => {
         // 关键区分：`null` = **判不了**（拿不到进程启动时间），不是 `false` = 「产物不比进程新」。
         // 把未知报成 false 会在非 Windows 上给出**反向结论**。
         expect(pkg?.['artifactNewerThanProcess']).toBeNull()
-        expect(calls).toHaveLength(0)
+        // 非 win32 上命令**跑了**（linux 走 `ss`），但喂的是 Windows 那张表 ⇒ 认不出 ⇒
+        // 启动时间取不到。承重的是「认不出那张表」，不是「一次都没跑」。
+        expect(calls.length).toBeGreaterThan(0)
+        for (const call of calls) {
+          expect(call.command.toLowerCase()).not.toContain('powershell')
+        }
       })
     })
 

@@ -6,12 +6,21 @@
  * 这里做两件事：
  * 1. **自检 `withPlatform` 真的会还原** —— 一个「临时改全局」的助手如果会漏还原，
  *    它自己就是下一个静默故障源；
- * 2. 把 `lookupPort` 的**两条平台分支**与 Windows 分支的**各条失败路径**直接钉住，
+ * 2. 把 `lookupPort` 的**平台分流形状**与 Windows 分支的**各条失败路径**直接钉住，
  *    这样它们在任何机器上都被真跑到，不再依赖「谁在什么平台跑」。
+ *
+ * 三条分支各自的**输出解析**判据在 `ports-crossplatform.test.ts`（那里才是逐条钉列的地方）；
+ * 本文件只管「哪个平台走哪条命令」与 Windows 的回归网。
  */
 import { describe, expect, it } from 'vitest'
 
-import { lookupPort, parsePortLookup, PORT_LOOKUP_SHELL } from '../../src/lib/ports.ts'
+import {
+  DARWIN_LOOKUP_COMMAND,
+  LINUX_LOOKUP_COMMAND,
+  lookupPort,
+  parsePortLookup,
+  PORT_LOOKUP_SHELL,
+} from '../../src/lib/ports.ts'
 import { cmdResult, recordingSpawn, withPlatform } from './helpers.ts'
 
 describe('withPlatform 自检', () => {
@@ -82,8 +91,37 @@ describe('withPlatform 自检', () => {
 })
 
 describe('lookupPort · 非 Windows 分支（CI 走这条）', () => {
-  it('不 spawn，直接降级成 probed=false 并说明当前平台', async () => {
+  // v1 曾在非 win32 上早返回（`probed: false`、一次都不 spawn）。
+  // 现在三条平台分支都各有命令（win32 powershell / linux ss / darwin lsof+netstat），
+  // 逐条分支的判据在 `ports-crossplatform.test.ts`；这里只留**平台分流的形状**。
+  it('linux：会 spawn，但跑的是 `ss` 而**绝不是** powershell.exe', async () => {
     await withPlatform('linux', async () => {
+      const { spawn, calls } = recordingSpawn(() => cmdResult({ stdout: '' }))
+
+      const result = await lookupPort(3080, { spawn, timeoutMs: 1_000 })
+
+      expect(calls.length).toBeGreaterThan(0)
+      expect(calls.every((call) => call.command === LINUX_LOOKUP_COMMAND)).toBe(true)
+      expect(result.probed).toBe(true)
+    })
+  })
+
+  it('darwin：会 spawn，但跑的是 `lsof`（空表即可信，兜底不白跑）', async () => {
+    await withPlatform('darwin', async () => {
+      const { spawn, calls } = recordingSpawn(() => cmdResult({ stdout: '' }))
+
+      const result = await lookupPort(3080, { spawn, timeoutMs: 1_000 })
+
+      // 第一条就可信（空表 = 真没人听）⇒ 兜底**不该**被跑到：
+      // 多跑一条命令只是白花一次进程预算。
+      expect(calls.map((call) => call.command)).toEqual([DARWIN_LOOKUP_COMMAND])
+      expect(result.probed).toBe(true)
+      expect(result.listening).toBe(false)
+    })
+  })
+
+  it('不支持的平台仍降级成 probed=false，且**一次都不 spawn**', async () => {
+    await withPlatform('aix', async () => {
       const { spawn, calls } = recordingSpawn(() => cmdResult({ stdout: '4242|node|2020-01-01\n' }))
 
       const result = await lookupPort(3080, { spawn, timeoutMs: 1_000 })
@@ -91,8 +129,9 @@ describe('lookupPort · 非 Windows 分支（CI 走这条）', () => {
       expect(result.probed).toBe(false)
       expect(result.listening).toBe(false)
       expect(result.listeners).toEqual([])
-      expect(result.detail).toContain('linux')
-      // 最要紧的一条：绝不尝试跑 `powershell.exe`。
+      // 平台标识是这条说明里唯一稳定的部分。
+      expect(result.detail.startsWith('aix:')).toBe(true)
+      // 最要紧的一条：没有命令方案时绝不尝试起进程。
       expect(calls).toHaveLength(0)
     })
   })

@@ -7,6 +7,8 @@
 - 版本以 [package.json](package.json) 的 `version` 为准
 - **已发布到 npm**（当前版本见 [package.json](package.json)；`latest` 与 dist-tags 以 registry 为准）。**`0.2.0` 是第一个由 `release.yml` 发出的版本**（带 provenance）；`0.1.0` 是手动发的、**没有** provenance。SLSA 徽章的真实性判据写在 [README.md](README.md) 的徽章注释里（对**具体版本**查 attestations 端点）。版本线与判例见 [docs/PUBLISHING.md](docs/PUBLISHING.md)
 - **能力面 = 1 个技能 + 5 个工具**：4 个只读（`dsh_check_effect_mode` / `dsh_diagnose_plugin_load` / `dsh_check_auth` / `dsh_dump_config`）+ **1 个写侧** `dsh_hot_reload`（已实现、已真机验证；算法与关键语义见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §5）。**目标形态与后续工具的归属见 [docs/SHAPE.md](docs/SHAPE.md)**（`dsh_restart` 有意推迟，排在最后）
+- **本仓是两个半边**：工具半边（`src/tools/`，都是代码）与技能半边（正文 + [src/skills/](src/skills/README.md) 的注册代码）。
+  技能正文在 [skills/](skills/README.md)，它**是运行时载荷而不是文档** —— 同一目录下那两份双件才是文档，区别见那条目录的说明。
 - **「只读」纪律只覆盖诊断半边**：写侧改动必须先落决策 —— 见 [.agents/notes/2026-10-13-write-side-tool-boundaries.md](.agents/notes/2026-10-13-write-side-tool-boundaries.md)；**边界由 `test/redlines.test.ts` 的 B10（诊断半边）与 B15（写侧只许碰进程内树）守着**
 - **输出契约 = `{ verdict, key, audit }`**（顶层恰好三键，成功失败同形）。冻结签名见 [docs/SHAPE.md](docs/SHAPE.md) §4.1；`hint` 已删、`evidence` 已并入 `data`；**`error.message` 不进模型文本**（它的角色与 `verdict` 不同，见 SHAPE §4.1 的字段角色表）
 
@@ -63,18 +65,29 @@ git diff --check
 
 ## 文档地图
 
-- 对外说明 → [README.md](README.md)（English）· [README_zh.md](README_zh.md)（中文）
-- 设计说明（**为什么这样分层**）→ [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
-- **宿主契约台账（已核 / 已实测的宿主事实，调宿主 API 前先查）** → [docs/HOST-CONTRACTS.md](docs/HOST-CONTRACTS.md)
-- **插件形态方案（工具怎么分、JSON 怎么管、双通道、未做工具的归属、红线清单）** → [docs/SHAPE.md](docs/SHAPE.md)
-- 发布流程与判例 → [docs/PUBLISHING.md](docs/PUBLISHING.md)
-- 决策与依据 → [.agents/notes/](.agents/notes/)
-- 展示元数据 → `locale/en.json` · `locale/zh.json`（只住这里，别处只留指针）
-- 真机红线（**本机跑，不进 CI**）→ [test/integration/README.md](test/integration/README.md)
-- 发布态不变量 → [scripts/check-release.mjs](scripts/check-release.mjs)
+**两层职责互斥**：规则层只答「在这里工作要遵守什么」，手册层只答「这里有什么、改哪波及谁」。
+每个可维护目录都有一对；进目录自动注入规则层，手册层按需读。
 
-**五份文档的分工（别混）**：SHAPE 答「最终长什么样、接下来怎么改」，ARCHITECTURE 答「现在为什么这么设计、代价是什么」，
-HOST-CONTRACTS 答「宿主实际上是什么样」，PUBLISHING 答「怎么发」，AGENTS（本文）答「在这个仓里怎么干活」。
+- 对外说明（门面）→ [README.md](README.md)（English）· [README_zh.md](README_zh.md)（中文）
+
+**根级文档**（跨模块的那几份，各答一个问题、别混）：
+
+- 设计说明（为什么这样分层）→ [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- 宿主契约台账（已核 / 已实测的宿主事实，调宿主 API 前先查）→ [docs/HOST-CONTRACTS.md](docs/HOST-CONTRACTS.md)
+- 插件形态方案（工具怎么分、JSON 怎么管、双通道、未做工具的归属、红线清单）→ [docs/SHAPE.md](docs/SHAPE.md)
+- 发布流程与判例 → [docs/PUBLISHING.md](docs/PUBLISHING.md)
+- 发布态不变量（可执行的检查脚本）→ [scripts/check-release.mjs](scripts/check-release.mjs)
+- 展示元数据 → `locale/en.json` · `locale/zh.json`（只住这里，别处只留指针）
+
+**子树手册**（各子树的职责、依赖与变更影响路由在各自的手册层里）：
+
+- 实现半边 → [src/](src/README.md) · 三棵子树的规则与手册见各自双件
+- 技能半边 → [skills/](skills/README.md)（正文目录的规则见其 [AGENTS.md](skills/AGENTS.md)）
+  ⚠️ **技能正文是运行时载荷，不是文档**：它由 [src/skills/register.ts](src/skills/register.ts) 在启动时读走交给宿主技能服务，**没有「源文件 vs 产物」的关系，不需要跟谁同步，改了也不必重新编译**。删掉它不会让插件崩溃，只会让技能静默消失 —— [scripts/check-release.mjs](scripts/check-release.mjs) 才拦得住。
+- 判据 → [test/](test/README.md) · 本机红线（不进 CI）见 [test/integration/README.md](test/integration/README.md)
+- 决策与依据 → [.agents/notes/](.agents/notes/README.md)（不建索引，去哪查规则见它的双件）
+- 托管侧配置 → [.github/](.github/README.md) · 发布态检查脚本 → [scripts/](scripts/README.md)
+- 目录级规则与手册的分工见根 [AGENTS.md](AGENTS.md) 的「上下文注入」那一节；门面与子目录双件**不是**同一套设计，理由同样在里面。
 
 ## 待办
 
@@ -99,10 +112,11 @@ HOST-CONTRACTS 答「宿主实际上是什么样」，PUBLISHING 答「怎么发
       「Fiber 级状态没有查询入口」（**已被证伪**，见活跃坑 19）。排期与形态见
       [docs/SHAPE.md](docs/SHAPE.md) §9。**红线连带**：SHAPE §10 拟补 **B12b**（断言「干预」一节存在且非空），
       否则「解冻了却没写」是静默的（现有 B12 **不比对 v2.1.4 原件**，只查 frontmatter 合规与正文长度 → 解冻不会让它变红）。
-- [ ] **非 Windows 的端口识别**（v1 只在 Windows 上查监听端口，见 `src/lib/ports.ts` 的早返回）。
-      实现方向：Linux 用 `ss -ltnp`、macOS 用 `lsof -i`。
-      **注意这事有个便宜可占**：CI 就在 ubuntu 上跑，所以这层**能被 CI 真正验证** ——
-      与「只能本机红线」的那几项不同。做完要把 README 的「平台支持」一节同批改。
+- [x] **非 Windows 的端口识别** —— **已落地**（Windows / Linux / macOS 三平台；Linux 走 `ss` 两档、
+      macOS 走 `lsof` → `netstat`；方案表在 `src/lib/ports.ts` 的 `portLookupPlan`，别在文档里抄命令名）。
+      **这层能被 CI 真验**（CI 在 ubuntu 上），与「只能本机红线」的项不同。
+      ⚠️ 三值互不重叠：`probed:false`（查不了）/ `listening:false`（没人听）/ `listening:true + unidentified`
+      （有人在听但读不到 pid）。压成两值就是**反向结论**。
 - [ ] **CI 与本地平台不同**：本机是 Windows，CI 是 ubuntu。**任何写死平台行为的断言都会在 CI 上红**
       （首次推送就踩过：`probed === true` 那一条）。新增与平台相关的判据时，
       要么按平台分支断言，要么让两种平台的行为都被钉住。
