@@ -58,7 +58,7 @@
 
 ### `dsh_diagnose_plugin_load` —— 插件加载了没有
 
-- `package`：要查的包名，如 `dsh-zhihu-search` 或 `@scope/name`；省略则逐个列出 `bundles` 里的包。
+- `package`：要查的包名，如 `my-dsh-plugin` 或 `@scope/name`；省略则逐个列出 `bundles` 里的包。
 - `port`：要探测的宿主端口。
 
 **边界**：**观测**到的证据（`loader` 树可读时看 `fiber.state`；模块在 import 期就崩时 `fiber` 是 `undefined`）与**推断**出的证据（三处前置条件：在不在 `bundles`、安装形态、entry 文件）分开呈现；读不到树时输出会显式标注 `mode=inferred`。进程**按端口**查，不用命令行子串。
@@ -96,7 +96,7 @@
 dsh plugin --profile web add dsh-plugin-debugging
 ```
 
-尚未发布到 npm —— 这条路径在首次发布后可用。
+已发布 `0.1.0`（2026-10-13，**手动发的** —— 那一版**不带** npm provenance；由本仓发布流程发出的版本才带）。
 
 ### 从源码安装
 

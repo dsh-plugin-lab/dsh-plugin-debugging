@@ -37,8 +37,8 @@ pwsh -NoProfile -File test/integration/bench-s1.ps1 -Port 18399
 ## 3. 手工复现（脚本里的同一条路，可复制）
 
 ```powershell
-$repo        = '<本仓根>'                                                   # 例：D:\ProjectSomething\dsh-plugins\dsh-plugin-debugging
-$bench       = 'D:\ProjectSomething\dsh-plugins\.local\bench-dsh-plugin-debugging'
+$repo        = '<本仓根>'                                                   # 例：<工作区>\dsh-plugin-debugging
+$bench       = '<工作区>\.local\bench-dsh-plugin-debugging'
 $profileName = 'bench'      # 变量名避开 PS 自动变量 $PROFILE；不得用 acp/headless/sdk/sdk-minimal/web（shipped 名）
 $port        = 18331        # 必须避开 3080（本机宿主占用）
 
@@ -103,5 +103,8 @@ dsh: warning: 1 entry did not activate / <name> (<name>): failed to import      
 - **`--dump-config` 的退出码恒为 0**，任何场景都不能当门禁；能用退出码的只有 `--dump-config-schema`（1 = 有 error）。
 - 判定**不硬编码行下标**：脚本从 `x-cordis.entries` 里按 `id=dsh-plugin-debugging` 取该行的 `path` 再比对 error，preset 数量漂移不会让它假绿/假红。
 - `pluginInventory/list` 的 payload **必须是 `{args:{}}`**（否则报 `Remote payload must contain exactly one plain-object args field`）；token 在启动打印的 URL 里，用它换一次页面即可拿到 `dsh-auth-*` cookie。
-- 台子目录在枢纽仓 `.gitignore` 的 `/.local/` 之下，**不进任何仓库历史**；脚本从不删目录，原始输出留在 `<bench>\logs\`。
-- **别碰 pid 34216**（本会话宿主，监听 3080）。脚本里对 34216 有硬编码保护。
+- 台子目录在工作区 `.gitignore` 的 `/.local/` 之下，**不进任何仓库历史**；脚本从不删目录，原始输出留在 `<bench>\logs\`。
+- **别碰宿主**：宿主监听 **3080**。跑之前**按端口现查**它的 pid
+  （`netstat -ano | Select-String ':3080\s.*LISTENING'`），杀进程前确认目标不是它。
+  ⚠️ **两个脚本里还写着旧的宿主 pid 常数**（`leak-fix.ps1` 的 `-HostPid` 默认值、`bench-s1.ps1` 的内联判断）——
+  **那个数会漂，别信它**（宿主重启过多次），按上面现查；这处待修见 [AGENTS.md](../../AGENTS.md) 的「待办」。

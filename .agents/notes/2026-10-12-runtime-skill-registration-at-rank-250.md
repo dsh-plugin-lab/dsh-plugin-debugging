@@ -72,6 +72,6 @@ rank **500**（recon-A「既成事实 F1」）。也就是说「同名竞争」�
    0.2.1-alpha.2；行号只对该版本成立）。
 2. 同名竞争已存在：recon-A「既成事实 F1」。
 3. 两套实现互斥、provider rank 无旋钮、`bundledSkillDir` 字段存在但禁用：recon-A 二·2 与二·4。
-4. `parseSkillFile` 非公开：`decisions.md` 的「勘误」第 1 条（运行时导出只有
+4. `parseSkillFile` 非公开：那轮中转件里的「勘误」第 1 条（运行时导出只有
    `Config / FileSystemSkillProvider / apply / inject / name`，`exports` 只有 `.` / `./src/*` / `./package.json`）。
-5. 决策冻结条款 D1 / D2 / D3：`.coord/decisions.md` 表格。
+5. 决策冻结条款 D1 / D2 / D3（那一轮的中转件已按中转站的约定清理，条款已落在本文与 [AGENTS.md](../../AGENTS.md)）。

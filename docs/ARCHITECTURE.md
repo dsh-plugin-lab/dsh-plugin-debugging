@@ -1,7 +1,7 @@
 # dsh-plugin-debugging — 设计说明
 
-**本文职责**：这个插件**为什么这样分层**、每条设计的理由与代价、以及「哪些结论是核过的、哪些还没」。
-**不负责**：怎么在这个仓里干活 → [AGENTS.md](../AGENTS.md)；发布流程 → [PUBLISHING.md](PUBLISHING.md)；决策快照 → [.agents/notes/](../.agents/notes/)。
+**本文职责**：这个插件**为什么这样分层**、每条设计的理由与代价。
+**不负责**：**宿主侧已核 / 未核的事实** → [HOST-CONTRACTS.md](HOST-CONTRACTS.md)（本文只引用结论，不重述证据）；**没做的工具的方案** → [RESTART-PLAN.md](RESTART-PLAN.md)；怎么在这个仓里干活 → [AGENTS.md](../AGENTS.md)；发布流程 → [PUBLISHING.md](PUBLISHING.md)；决策快照 → [.agents/notes/](../.agents/notes/)。
 **读者纪律**：本文里的宿主行为结论都标了真源。**在跑的宿主**与**源码检出**常常不是同一个版本 —— 引用之前先确认哪一份。
 
 ---
@@ -158,6 +158,7 @@ src/
 - **零运行时依赖**：只用 `node:` 内建与宿主服务。加依赖要先过决策。
 
 各工具的关键语义（判定都依赖它们，写错就静默给错结论）：
+**这些语义背后的宿主侧实测证据**（哪一条是怎么核出来的、行号在哪）→ [HOST-CONTRACTS.md](HOST-CONTRACTS.md)。
 
 | 工具 | 关键语义 |
 |---|---|
@@ -204,10 +205,9 @@ profile 名只能从 env `DSH_PROFILE` / `DSH_PROFILE_DIR` 读：**`--profile` �
 | S6 会话标记闭环 | 写 → 重启 → 读回 | 失败退路依赖工具通路 |
 | S7 副作用工具 | dry-run → 真跑 | 它会杀掉宿主；搞坏一次，S1–S6 的环境全部重来 |
 
-## 9. 还没核过的（写在这里，别当成已知）
+## 9. 还没核过的
 
-- 插件技能在**真实 catalog** 里的合并结果与 `source` 显示值 —— 源码只给恒定 250 与分层规则，**必须起实例看**。
-- `ctx.skills.register()` 的注册时机与 catalog 缓存失效是否正确配对（源码有实现，耦合读不出来）。
-- 审批门在真实 UI/策略下的表现（`danger-full-access` 档下 `ask` 会被确定性拒绝）。
-- `schemastery` 两个版本间的行为差异（运行时比检出新一个预发布号）。
-- `npm pack` 的 tarball 与隔离实例装载 —— S4 尚未执行。
+**这份清单在 [HOST-CONTRACTS.md](HOST-CONTRACTS.md) §5**（「哪些结论核过了、哪些还没」是同一种事实，住一处）。
+本文件只保留那些**不是宿主事实、而是产品/产物层面的**待验项：
+
+- `npm pack` 的 tarball 与隔离实例装载 —— §8 阶梯的 S4 尚未执行。

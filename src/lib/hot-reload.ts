@@ -1,5 +1,5 @@
 /**
- * 热重载的**机制层** —— 按 `docs/PLAN.md` §2.1 的 8 步算法，顺序即判据。
+ * 热重载的**机制层** —— 按 [ARCHITECTURE.md](../../docs/ARCHITECTURE.md) §5 记的 8 步算法，顺序即判据（真机证据见 [HOST-CONTRACTS.md](../../docs/HOST-CONTRACTS.md) §1）。
  *
  * ## 为什么单独一层，且不 import Cordis
  *

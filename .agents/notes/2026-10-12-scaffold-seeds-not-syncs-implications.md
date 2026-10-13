@@ -6,10 +6,10 @@
 
 ## 背景
 
-本仓的骨架来自组织仓的播种器：`scripts/scaffold.mjs` + `templates/plugin/`
+本仓的骨架来自工作区里另一份检出的播种器：`scripts/scaffold.mjs` + `templates/plugin/`
 （配方 **npm-tsc** + **--host-only**）。播种器的定位是 **seeds, not syncs** ——
 给空目录铺一次骨架，**永不回写任何已存在的仓**
-（组织仓 `.agents/notes/2026-10-12-scaffold-seeds-not-syncs.md:14-24`；
+（工作区里另一份检出 `.agents/notes/2026-10-12-scaffold-seeds-not-syncs.md:14-24`；
 判据侧在 `docs/plugin-conventions.md:51-54`）。
 
 那条决策要解的真实张力：组织 §2 定「workflow 副本靠**逐字相同**约束、**不靠模板生成**」
@@ -30,7 +30,7 @@
    —— 它们是 `scaffold check` 的比对对象（`scripts/scaffold.mjs:86-92`）。
    要加就是**有意的分歧**，必须记一句（本仓记在 `AGENTS.md` 的「活跃坑」）。
 4. **模板会陈腐，唯一的守卫是在真实仓上跑 `check`**（同上 note `:41-42`）：
-   `node ../.github-dsh-plugin-lab/scripts/scaffold.mjs check .`
+   `node <脚手架检出>/scripts/scaffold.mjs check dsh-plugin-debugging`
 
 ## 本仓已知的偏离（都是有意为之，不是漏铺）
 
@@ -44,7 +44,7 @@
 
 **注意**：播种器**不生成**继承层的社区健康文件（`CONTRIBUTING.md` / `SECURITY.md` /
 `SUPPORT.md` / `CODE_OF_CONDUCT.md` / `PULL_REQUEST_TEMPLATE.md` / `.github/ISSUE_TEMPLATE/`）
-—— 这是**有意**的，它们由组织仓回退提供，本仓**不该**自带（`docs/plugin-conventions.md:22-31`）。
+—— 这是**有意**的，它们由工作区里另一份检出回退提供，本仓**不该**自带（`docs/plugin-conventions.md:22-31`）。
 「本仓没有这些文件」不是缺件。
 
 ## 替代方案与被否的理由
@@ -71,10 +71,10 @@
 
 ## 证据出处
 
-1. 播种器的定位、边界、被否方案、重开条件：组织仓
+1. 播种器的定位、边界、被否方案、重开条件：工作区里另一份检出
    `.agents/notes/2026-10-12-scaffold-seeds-not-syncs.md`（`:9`、`:14-24`、`:26-35`、`:41-48`）。
-2. 身份件清单与比对实现：组织仓 `scripts/scaffold.mjs:86-92`（`IDENTITY_FILES`）、
+2. 身份件清单与比对实现：工作区里另一份检出 `scripts/scaffold.mjs:86-92`（`IDENTITY_FILES`）、
    `:333-380`（`check`）；判据侧 `docs/plugin-conventions.md:205-208`。
-3. 回退层不该自带哪些文件：组织仓 `docs/plugin-conventions.md:22-31`；
+3. 回退层不该自带哪些文件：工作区里另一份检出 `docs/plugin-conventions.md:22-31`；
    「发布前确认远端」的落点要求：同文件 `:178`。
-4. 决策冻结条款 D10 / D12：`.coord/decisions.md`；本仓的 G7 备件：`.coord/g7-batch-edits.md`。
+4. 决策冻结条款 D10 / D12 与本仓的 G7 备件（那一轮的中转件已按中转站的约定清理，条款已落在本文与 [AGENTS.md](../../AGENTS.md)）。
