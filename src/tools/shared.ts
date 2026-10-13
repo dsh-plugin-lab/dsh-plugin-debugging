@@ -16,7 +16,7 @@ import { defaultFetchImpl } from '../lib/http.js'
 import type { SpawnImpl } from '../lib/exec.js'
 import { defaultSpawnImpl } from '../lib/exec.js'
 import type { LoaderReadResult } from '../lib/loader.js'
-import { renderToolResult, type ResultSummary, type TextBlockLike } from '../lib/render.js'
+import { renderToolResult, type RenderTable, type TextBlockLike } from '../lib/render.js'
 
 /** 四个工具共享的依赖。 */
 export interface ToolDeps {
@@ -39,11 +39,18 @@ export interface ToolDeps {
   readonly loader: () => LoaderReadResult
 }
 
-/** 没有宿主上下文时的 loader 实现：干净地降级，而不是抛。 */
+/**
+ * 没有宿主上下文时的 loader 实现：干净地降级，而不是抛。
+ *
+ * `reason` 会**逐字进模型可见的 L2**（`reason: …`），所以它有两条硬要求：
+ * ① 英文；② **短**。短不只是文风 —— 红线 B16（「不许有恒定块」）把「两份 fixture 里
+ * 都出现、且 ≥40 字符的行」判红，而这条 reason 在「没有宿主上下文」的每一次调用里
+ * **逐字相同**。压到 40 字符以内，它才是「恒定块压成一行」而不是恒定块。
+ */
 export function unavailableLoader(): LoaderReadResult {
   return {
     ok: false,
-    reason: 'this call has no host context, so the loader service cannot be read',
+    reason: 'no host context',
     entries: [],
   }
 }
@@ -145,20 +152,22 @@ export const TOOL_OUTPUT_SCHEMA = { type: 'json' } as const
 /**
  * 造一个工具的 `output` 声明。
  *
+ * `render` 只读 `data.verdict`（L1）与 `table.key(data)`（L2）；
+ * `audit` 不进模型文本（SHAPE §3.1 规则 1）。
+ *
  * @param toolName 工具名（渲染首行用）。
- * @param summarize 可选的一句话结论：把该工具最重要的判定提到渲染首行，
- *   免得模型从整块 JSON（可能含长证据）里自己找。只在成功结果上用。
+ * @param table 该工具的输出表（L2 投影；L1 就是 `data.verdict` 逐字）。
  */
-export function toolOutput(
+export function toolOutput<T>(
   toolName: string,
-  summarize?: ResultSummary,
+  table: RenderTable<T>,
 ): {
   schema: typeof TOOL_OUTPUT_SCHEMA
   render(args: unknown, value: unknown): TextBlockLike[]
 } {
   return {
     schema: TOOL_OUTPUT_SCHEMA,
-    render: (_args: unknown, value: unknown) => renderToolResult(toolName, value, summarize),
+    render: (_args: unknown, value: unknown) => renderToolResult(toolName, value, table),
   }
 }
 
@@ -241,6 +250,10 @@ export function effectiveConfig(
  * **拿空路径去读文件**，而读空的结论看起来完全正常 —— 那是最坏的一类静默坏。
  * 一行断言的代价，换「读错目录」变成一条响亮的失败。
  *
+ * 形状（新契约）：失败分支必须带 `data`，所以 `verdict` 承载「所以呢」那句
+ * （旧 `hint` 里的「这不是配置问题、是本插件的 bug」搬到这里），`nextStep` **不出现**
+ * —— 模型没有动作可做，硬编一步只会是「裸结论伪装成下一步」。
+ *
  * @param config 已补齐默认值的配置。
  */
 export function assertResolvedDshHome(config: ResolvedConfig): ToolFail | undefined {
@@ -248,12 +261,13 @@ export function assertResolvedDshHome(config: ResolvedConfig): ToolFail | undefi
   return fail(
     {
       kind: 'internal',
-      message:
-        'ResolvedConfig.dshHome is an empty string — the contract requires resolveConfig to finish its three-level fallback',
-      hint: 'this is a bug in this plugin, not a configuration problem; report this message verbatim',
+      message: 'ResolvedConfig.dshHome is an empty string',
     },
     {
-      why: 'continuing with an empty path would read files and produce conclusions that look fine but came from the wrong directory',
+      verdict:
+        'nothing was read: the resolved DSH_HOME is empty, which the contract forbids — this is a bug in this plugin, not a configuration problem',
+      key: {},
+      audit: { dshHomeSource: config.dshHomeSource, profile: config.profile },
     },
   )
 }

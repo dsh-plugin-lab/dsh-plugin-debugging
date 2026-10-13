@@ -6,27 +6,46 @@
  * 把机制层的失败原因映射成闭枚举 `kind` → 补 `nextStep`。
  * 算法本身在 `lib/hot-reload.ts`（那里可脱离宿主单测）。
  *
- * **写侧的含义必须在 description 里说清**：它会改运行中的树。所以四要素里的
- * 「一个必知陷阱」给了「cordis 之外开的资源不会被追踪、会静默泄漏」——
- * 那是这个工具唯一会让人事后吃亏的地方。
+ * ## 新契约下的形状（SHAPE §2 / §3 / §4 / §5）
+ *
+ * 1. **描述四段**（`what / useWhen / boundary / cost`）并由 `composeDescription` 合成；
+ *    上限是红线 B20a 的硬数（description ≤240 字符、参数描述合计 ≤100）。
+ *    **`cost` 段必写**（§2 的规则 ④：只对行动 / 派生类写）——「改不改状态、有没有
+ *    `dryRun`、可不可逆」三件事都在这一行里。
+ * 2. **`data` 顶层恰好三键** `{verdict, key, audit}`，成功失败同形（B21），由
+ *    `outcomeToToolResult()` 一处产出（机制层负责算，本层不重算）。
+ * 3. **失败分支没有 `hint` 了**（§4.1 删掉它）：那句最要紧的
+ *    "the running entry was never touched — nothing to undo" 现在住在 **`verdict`**（L1），
+ *    而「要不要收拾」的两个结构化事实（`oldFiberTouched` / `rolledBack`）住在 **`key`**（L2）。
+ *    `error.message` **不进模型文本**，所以失败分支的「所以呢」只能由 `verdict` 承载。
+ * 4. **`kind` 不许降级**：import / apply 两档仍是 `reload-failed` —— 那是模型判
+ *    「该去改被重载的那份插件代码再重试」的唯一稳定机器码（`kindForReason` 里钉住）。
+ * 5. `execute` **绝不 throw**（B24）：写侧工具抛异常最难收拾 —— 树可能已经改了一半，
+ *    而调用方只看到一条栈。顶层 try/catch 因此不是风格，是契约的承载条件。
  */
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools'
 
 import { fail } from '../lib/errors.js'
 import {
   hotReload,
+  kindForReason,
   outcomeToToolResult,
   parseReloadTarget,
   reloadInternalFailure,
   type ReloadArgs,
-  type ReloadData,
   type ReloadHost,
+  type ReloadKey,
 } from '../lib/hot-reload.js'
 import { createDeadline } from '../lib/timeouts.js'
+import type { RenderTable } from '../lib/render.js'
+import { composeDescription, type ToolDescription } from './describe.js'
 import { toolOutput, toOutput, type ToolDeps } from './shared.js'
 
 /** 工具名。 */
 export const HOT_RELOAD_TOOL = 'dsh_hot_reload'
+
+/** 出错时唯一可派发的只读工具（它的 L2 里就有 entryId，正是重载要的输入）。 */
+const DIAGNOSE_TOOL = 'dsh_diagnose_plugin_load'
 
 /**
  * 这个工具的运行期依赖。
@@ -45,8 +64,46 @@ export interface HotReloadDeps extends ToolDeps {
   readonly reload: ReloadHost
 }
 
-/** 本工具不读任何配置文件、不涉及端口 —— 它的结论不依赖读的是哪个 profile 目录。 */
-export type HotReloadToolData = ReloadData
+/**
+ * 本工具的描述（SHAPE §2.1 四段骨架）。
+ *
+ * 逐段理由：
+ * - `what`：动词 + 对象，并点明它**不重启**（那是它与 `dsh_restart` 的分界）。
+ * - `useWhen`：路由信号 = 「刚改完插件自己的代码」+ 「三个目标参数只能给一个」
+ *   （后者是执行前必须知道、且调用结果里学不到的约束 —— §1.1 的判据）。
+ * - `boundary`：**唯一的反直觉点**，也是这个工具唯一会让人事后吃亏的地方 ——
+ *   cordis 之外开的资源不归 effect 管、dispose 旧 fiber 不会释放 → 静默泄漏。
+ * - `cost`：行动类的三件事 —— 会改**运行中的树**、有 `dryRun` 可预览、失败会回滚。
+ */
+export const HOT_RELOAD_DESCRIPTION: ToolDescription = {
+  what: 'Swaps one loader entry to code on disk, in place, no restart.',
+  useWhen: 'Use after editing plugin code; pass exactly one target.',
+  boundary: 'Outside-cordis resources (timers, sockets, handlers) leak silently.',
+  cost: 'Write-side; dryRun previews; failures roll back.',
+}
+
+/**
+ * 参数描述（B20a：该工具**全部参数描述**字符合计 ≤100）。
+ *
+ * 「三者择一」那条约束**不在这里复述**（§2：参数规则放参数上、工具描述里不复述）——
+ * 它属于「执行前必须知道的约束」，已经写在描述第 2 行；错误分支的 `verdict` 里也再说一次。
+ */
+const PARAMETERS = {
+  entryId: { type: 'string', description: 'Loader entry id' },
+  module: { type: 'string', description: 'Module or package name' },
+  serverName: { type: 'string', description: 'MCP server name' },
+  dryRun: { type: 'boolean', description: 'Report only, change nothing' },
+} as const
+
+/**
+ * 本工具的输出表：L1 就是 `data.verdict` 逐字，L2 由 `key` 投影成行。
+ *
+ * 行数上限用默认 15 —— 本工具最多三行（entry / reload / moduleUrl），
+ * 与 `diagnose` 那种「一个 bundle 一行」的量级不同，不需要抬。
+ */
+const TABLE: RenderTable<ReloadKey> = {
+  key: (data) => keyText(data.key),
+}
 
 /**
  * 造工具。
@@ -56,35 +113,9 @@ export type HotReloadToolData = ReloadData
 export function createHotReloadTool(deps: HotReloadDeps): ToolDefinition {
   return defineTool({
     name: HOT_RELOAD_TOOL,
-    description:
-      'Swaps one mounted loader entry to the code currently on disk, in place, without restarting the host. ' +
-      'Use it after changing host-side code of a plugin when a restart would be worse than the change. ' +
-      'This is write-side: it mutates the running tree, so pass dryRun first if you only want to know what would change. ' +
-      'If the new code fails to import the old entry is never touched, and if it fails to apply the previous code is put back ' +
-      '- but anything the plugin opened outside cordis (timers, sockets, process handlers, file handles, workers) is not tracked and will leak silently.',
-    parameters: {
-      entryId: {
-        type: 'string',
-        description:
-          'Loader entry id to replace, e.g. from dsh_diagnose_plugin_load. Pass exactly one of entryId, module, or serverName.',
-      },
-      module: {
-        type: 'string',
-        description:
-          'Module or package name to match instead of entryId. Pass exactly one of entryId, module, or serverName.',
-      },
-      serverName: {
-        type: 'string',
-        description:
-          'MCP serverName to match instead of entryId. Pass exactly one of entryId, module, or serverName.',
-      },
-      dryRun: {
-        type: 'boolean',
-        description:
-          'Check the closure and report what would be replaced, without touching the tree. Nothing is cleared and no fiber is disposed.',
-      },
-    },
-    output: toolOutput(HOT_RELOAD_TOOL, summarizeHotReload),
+    description: composeDescription(HOT_RELOAD_DESCRIPTION),
+    parameters: PARAMETERS,
+    output: toolOutput(HOT_RELOAD_TOOL, TABLE),
 
     timeoutMs: deps.config.timeoutMs,
     // 写侧工具**不安全**：两次并发重载会把缓存的备份/回滚交叉在一起。
@@ -99,13 +130,17 @@ export function createHotReloadTool(deps: HotReloadDeps): ToolDefinition {
         if (parsed.failure !== undefined) {
           return toOutput(
             fail(
+              { kind: kindForReason(parsed.failure.reason), message: parsed.failure.message },
               {
-                kind: 'not-found',
-                message: parsed.failure.message,
-                hint: parsed.failure.hint,
+                // 失败分支也有实质 L1（§4.1 约定 1）：机制层给出的那句结论就是它。
+                verdict: parsed.failure.verdict,
+                // **key 为空是有意的**：这一步什么都没定位到，没有任何可供决策的观测
+                // —— 不许拿 `rolledBack: false` 之类的默认值冒充「树是安全的」。
+                key: {},
+                audit: { providedTargets: providedTargetNames(args) },
               },
               {
-                tool: 'dsh_diagnose_plugin_load',
+                tool: DIAGNOSE_TOOL,
                 why: 'it lists the entries that actually exist, so you can pass an exact entryId instead of guessing',
               },
             ),
@@ -114,11 +149,18 @@ export function createHotReloadTool(deps: HotReloadDeps): ToolDefinition {
         if (parsed.target === undefined) {
           // 到不了这里（parse 的契约是二者恰有其一），但类型上要收窄。
           return toOutput(
-            fail({
-              kind: 'internal',
-              message: 'target parsing returned neither a target nor a failure',
-              hint: 'this is a bug in this plugin; report this message verbatim',
-            }),
+            fail(
+              {
+                kind: 'internal',
+                message: 'target parsing returned neither a target nor a failure',
+              },
+              {
+                verdict:
+                  'nothing was reloaded: this plugin could not resolve the call arguments, which is a bug in this plugin — report this message verbatim',
+                key: {},
+                audit: {},
+              },
+            ),
           )
         }
 
@@ -139,33 +181,51 @@ export function createHotReloadTool(deps: HotReloadDeps): ToolDefinition {
 }
 
 /**
- * 渲染首行的**一句话结论**（形如 §2.4 草稿）。
+ * `key` → L2 的逐行文本。
  *
- * 为什么要有：`data` 里带着闭包 URL 列表与两段解释，整块 JSON 不短；
- * 而模型唯一必须先看到的是**「换了几个模块、旧 fiber 有没有被碰、有没有回滚」** ——
- * 这三件事决定它接下来该说什么。
+ * 顺序即输出顺序，也是模型读的顺序：
+ * **先「换的是谁」（下一句要引用的标识符），再「换成什么样 / 要不要收拾」，最后才是路径**。
  *
- * @param data 工具的 `data`；形状不对时返回 `undefined`，让渲染退回纯 JSON。
+ * 三条纪律：
+ * - **不给默认值**：字段缺省就整项不印（`key` 是「这次知道了什么」，不是一张填满的表）；
+ * - **`dryRun` 只在为真时印**：`false` 是默认值，L2 只放本次非默认的（§3）；
+ * - **identifiers 必须出现**：`nextStep.args.package` 取的是 `entry.moduleName`，
+ *   所以它必须印在 L1/L2 里（B17 的判据，否则模型在拿一个它从没见过的值去调下一个工具）。
+ *
+ * @param key 本次的 `key`。
  */
-export function summarizeHotReload(data: unknown): string | undefined {
-  if (typeof data !== 'object' || data === null) return undefined
-  const record = data as Partial<ReloadData>
-  const entry = record.entry
-  if (typeof entry !== 'object' || entry === null) return undefined
-  const entryId = (entry as { entryId?: unknown }).entryId
-  if (typeof entryId !== 'string') return undefined
-
-  if (record.dryRun === true) {
-    const count = typeof record.moduleCount === 'number' ? record.moduleCount : 0
-    return `verdict: entry=${entryId} · wouldSwap=${String(count)} modules · dryRun=true (nothing was touched)`
+function keyText(key: ReloadKey): string[] {
+  const lines: string[] = []
+  if (key.entry !== undefined) {
+    const server = key.entry.serverName === undefined ? '' : ` serverName=${key.entry.serverName}`
+    lines.push(`entry: ${key.entry.entryId} module=${key.entry.moduleName}${server}`)
   }
 
-  const cleared = typeof record.modulesCleared === 'number' ? record.modulesCleared : 0
-  const rolledBack = record.rolledBack === true
-  const base = `verdict: entry=${entryId} · swapped=${String(cleared)} modules · rolledBack=${String(rolledBack)}`
-  // import 期失败那档最要紧的信息是「旧 fiber 从未被碰」—— 它决定有没有东西要收拾。
-  if (record.oldFiberTouched === false && record.newFiberState == null && rolledBack === false) {
-    return `${base} · oldFiberUntouched=true`
+  const facts: string[] = []
+  if (key.dryRun === true) facts.push('dryRun=true')
+  if (key.modulesCleared !== undefined) facts.push(`cleared=${String(key.modulesCleared)}`)
+  if (key.oldFiberTouched !== undefined) {
+    facts.push(`oldFiberTouched=${String(key.oldFiberTouched)}`)
   }
-  return base
+  if (key.rolledBack !== undefined) facts.push(`rolledBack=${String(key.rolledBack)}`)
+  if (key.newFiberState !== undefined) facts.push(`newFiberState=${String(key.newFiberState)}`)
+  if (facts.length > 0) lines.push(`reload: ${facts.join(' ')}`)
+
+  if (key.moduleUrl !== undefined) lines.push(`moduleUrl: ${key.moduleUrl}`)
+  return lines
+}
+
+/**
+ * 从参数里挑出「给了哪几个目标」（只留名字，不留值 —— 值可能是拼错的包名，不值得进日志）。
+ *
+ * @param args 工具参数。
+ */
+function providedTargetNames(args: ReloadArgs): string[] {
+  const names: string[] = []
+  if (typeof args.entryId === 'string' && args.entryId.trim() !== '') names.push('entryId')
+  if (typeof args.module === 'string' && args.module.trim() !== '') names.push('module')
+  if (typeof args.serverName === 'string' && args.serverName.trim() !== '') {
+    names.push('serverName')
+  }
+  return names
 }

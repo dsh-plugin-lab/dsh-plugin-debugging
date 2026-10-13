@@ -34,7 +34,16 @@
  *
  * 插件在 cordis 之外拿的裸资源（`setInterval` / 裸 socket / `process.on` / 文件句柄 / worker）
  * **不归 effect 管，dispose 旧 fiber 不会释放 → 静默泄漏**。工具无法检测它们，
- * 所以只能在 description 与 `why` 里明说。
+ * 所以只在**描述层的边界段**明说一次（SHAPE §2：恒定知识写一次，不进每次输出）。
+ *
+ * ## v1.1 契约迁移（SHAPE §4.1）
+ *
+ * 旧契约里每条失败带 `message` + `hint`（散文建议）。现在 `hint` 删了，它拆成两处：
+ * - `message` **不变**：这次**操作**为什么没做成（操作视角），进 `error.message`；
+ * - `verdict`（新）：**结论**（世界视角），进 `data.verdict`，就是模型读到的 L1。
+ *
+ * 所以本文件里每条失败都必须写一句实质 `verdict` —— 模型看不到 `error.message`
+ * （渲染不打印它），失败的「所以呢」只能由 `verdict` 承载。
  */
 import { fail, ok, toToolError, type JsonValue, type NextStep, type ToolResult } from './errors.js'
 import { loaderFrom } from './loader.js'
@@ -74,11 +83,20 @@ export type ReloadFailureReason =
   | 'cancelled'
   | 'timeout'
 
-/** 一条失败：`message` / `hint` 都直接进工具输出，所以必须英文、可执行。 */
+/**
+ * 一条失败。
+ *
+ * 两个字段角色不同，**不是同一句的两个副本**（SHAPE §4.1 的字段角色表）：
+ * - `message` = **这次操作**为什么没做成（操作视角）→ `error.message`；
+ * - `verdict` = **结论**（世界视角）→ `data.verdict`，也就是模型读到的 L1。
+ *
+ * 两者都必须英文（B14 扫 `src/**`）。`verdict` 必须**实质**：只写 `failed` 等于
+ * 让模型只看得到头行的 `failed (<kind>)`。
+ */
 export interface ReloadFailure {
   reason: ReloadFailureReason
   message: string
-  hint: string
+  verdict: string
 }
 
 /**
@@ -228,7 +246,8 @@ export function parseReloadTarget(args: ReloadArgs): TargetParse {
       failure: {
         reason: 'bad-target',
         message: 'no target was given: exactly one of entryId, module, or serverName is required',
-        hint: 'pass exactly one — get an entryId from dsh_diagnose_plugin_load, or pass the plugin name as module',
+        verdict:
+          'nothing was reloaded: no target was given, and this tool does not guess which plugin you meant',
       },
     }
   }
@@ -238,7 +257,7 @@ export function parseReloadTarget(args: ReloadArgs): TargetParse {
       failure: {
         reason: 'bad-target',
         message: `more than one target was given (${kinds}); they are alternatives, not filters`,
-        hint: 'pass exactly one of entryId, module, or serverName — this tool does not guess which one you meant',
+        verdict: `nothing was reloaded: more than one target was given (${kinds}); they are alternatives, not filters, so this tool cannot tell which one you meant`,
       },
     }
   }
@@ -465,7 +484,14 @@ export function restoreCache(cache: ModuleCachePort, backup: CacheBackup): boole
   return complete
 }
 
-/** 重载成功后落进工具 `data` 的报告。 */
+/**
+ * 重载成功后落进工具 `data` 的**机制报告**。
+ *
+ * 它是 `key` / `audit` 两种投影的共同原料（工具层负责切），所以这里字段齐全。
+ * **没有 `why`**：旧契约里那句话是「这次会怎么走」的解释，而新契约把它拆成两处 ——
+ * 恒定知识（cordis 外资源会泄漏）进描述层边界段写一次，本次特有的动作进 `nextStep.why`。
+ * 留一个没有消费者的字段就是「一处两事实」。
+ */
 export interface ReloadData {
   target: ReloadTarget
   entry: { entryId: string; moduleName: string; serverName?: string }
@@ -484,8 +510,31 @@ export interface ReloadData {
   oldFiberState: number | null
   newFiberState: number | null
   rolledBack: boolean
+  /** 结论（L1）。 */
   verdict: string
-  why: string
+}
+
+/**
+ * `data.key` 的投影（L2）：**下一个决定可能要用到的**原料。
+ *
+ * 判据是 SHAPE §5 那句「模型看不到它，会不会做出不同的下一步？」——
+ * 对写侧工具就是这三件：换的是哪个 entry、清了几格缓存、**要不要收拾**
+ * （`oldFiberTouched` / `rolledBack`）。
+ *
+ * 字段**可缺省**是有意的：失败可能在「还没定出 entry」时就发生（`no-match` / 多目标），
+ * 那时 key 是 `{}` —— 不许拿默认值（`rolledBack: false` 之类）去冒充「事实是安全的」。
+ */
+export interface ReloadKey {
+  entry?: { entryId: string; moduleName: string; serverName?: string }
+  dryRun?: boolean
+  moduleUrl?: string
+  moduleCount?: number
+  modulesCleared?: number
+  oldFiberTouched?: boolean
+  oldFiberCount?: number
+  oldFiberState?: number | null
+  newFiberState?: number | null
+  rolledBack?: boolean
 }
 
 /** 机制层的返回：要么报告，要么一条失败（失败也可带部分报告，供排查）。 */
@@ -527,10 +576,10 @@ export async function hotReload(
       failure: {
         reason: 'no-match',
         message: `no loader entry matched ${target.kind} "${target.value}" among ${String(entries.length)} entries`,
-        hint:
+        verdict:
           entries.length === 0
-            ? 'the loader tree could not be read — call dsh_diagnose_plugin_load to check the package name and profile'
-            : `use dsh_diagnose_plugin_load to get an exact entryId; first few entries: ${listed}`,
+            ? `nothing was reloaded: no entry could be matched, and the loader tree came back empty — check the package name and that the host context exposes a loader`
+            : `nothing was reloaded: no entry matched ${target.kind} "${target.value}" among ${String(entries.length)} entries — use an exact entryId from dsh_diagnose_plugin_load (first few: ${listed})`,
       },
     }
   }
@@ -541,7 +590,7 @@ export async function hotReload(
       failure: {
         reason: 'ambiguous',
         message: `${String(hits.length)} entries matched ${target.kind} "${target.value}"; this tool does not guess which one you meant`,
-        hint: `pass the exact entryId instead; candidates: ${listed}`,
+        verdict: `nothing was reloaded: ${String(hits.length)} entries matched ${target.kind} "${target.value}", so this tool cannot tell which one you meant — pass the exact entryId instead (candidates: ${listed})`,
       },
     }
   }
@@ -552,7 +601,7 @@ export async function hotReload(
       failure: {
         reason: 'no-match',
         message: `no loader entry matched ${target.kind} "${target.value}"`,
-        hint: 'use dsh_diagnose_plugin_load to get an exact entryId',
+        verdict: `nothing was reloaded: no loader entry matched ${target.kind} "${target.value}"`,
       },
     }
   }
@@ -565,7 +614,7 @@ export async function hotReload(
       failure: {
         reason: 'not-reloadable',
         message: `entry "${entry.entryId}" has no reloadable module name (module is "${entry.moduleName}")`,
-        hint: 'group or builtin entries cannot be swapped in place; restart the host instead',
+        verdict: `nothing was reloaded: entry "${entry.entryId}" has no reloadable module name, so it cannot be swapped in place — a restart is the only way`,
       },
       data: base,
     }
@@ -579,17 +628,36 @@ export async function hotReload(
         reason: 'no-internal',
         message:
           'this host exposes no internal module loader access, so module caches cannot be busted and code cannot be re-imported in place',
-        hint: 'restart the host instead; hard reload needs loader.internal (--expose-internals or the node-addon-require-builtin fallback)',
+        verdict:
+          'nothing was reloaded: this host exposes no internal module loader access, so the module cache cannot be busted in place — a restart is the only way',
       },
       data: base,
     }
   }
 
   if (isAborted(options.signal)) {
-    return { ok: false, failure: cancelledFailure(), data: base }
+    return {
+      ok: false,
+      failure: {
+        reason: 'cancelled',
+        message: 'the caller cancelled this hot reload before the module cache was touched',
+        verdict:
+          'nothing was reloaded: the caller cancelled this call before any cache entry was cleared or any fiber was touched',
+      },
+      data: base,
+    }
   }
   if (options.expired()) {
-    return { ok: false, failure: timeoutFailure(), data: base }
+    return {
+      ok: false,
+      failure: {
+        reason: 'timeout',
+        message: 'the tool budget ran out before the hot reload could start',
+        verdict:
+          'nothing was reloaded: the tool budget ran out before the reload started, so the running tree is exactly as it was',
+      },
+      data: base,
+    }
   }
 
   // T2：解析 entry 的模块 URL。
@@ -602,7 +670,7 @@ export async function hotReload(
       failure: {
         reason: 'not-reloadable',
         message: `cannot resolve the module URL for entry "${entry.entryId}": ${messageOf(error)}`,
-        hint: 'check that the entry module name is a resolvable specifier or file URL',
+        verdict: `nothing was reloaded: the module URL for entry "${entry.entryId}" could not be resolved, so the code on disk was never imported`,
       },
       data: base,
     }
@@ -615,7 +683,8 @@ export async function hotReload(
       failure: {
         reason: 'no-internal',
         message: 'the internal module loader exposes no loadCache, so the module closure cannot be collected',
-        hint: 'restart the host instead',
+        verdict:
+          'nothing was reloaded: the internal module loader exposes no loadCache, so the module closure cannot be collected — a restart is the only way',
       },
       data: { ...base, moduleUrl },
     }
@@ -631,7 +700,7 @@ export async function hotReload(
       failure: {
         reason: 'not-reloadable',
         message: `cannot walk the module closure of "${moduleUrl}": ${messageOf(error)}`,
-        hint: 'the loader internal structure may have changed; restart the host instead',
+        verdict: `nothing was reloaded: the module closure of "${moduleUrl}" could not be walked, so nothing was cleared and no fiber was touched`,
       },
       data: { ...base, moduleUrl },
     }
@@ -654,9 +723,6 @@ export async function hotReload(
         ...(withClosure as ReloadData),
         modulesCleared: 0,
         verdict: dryRunVerdict(entry, files.length),
-        why:
-          'dry run: the closure was collected but no cache entry was removed and no fiber was touched; ' +
-          'call again with dryRun=false to actually swap it',
       },
     }
   }
@@ -679,7 +745,7 @@ export async function hotReload(
       failure: {
         reason: 'import-failed',
         message: `the new code failed to import: ${messageOf(error)}`,
-        hint: restored
+        verdict: restored
           ? 'the running entry was never touched — nothing to undo; fix the import error on disk and call again'
           : 'the running entry was never touched — nothing to undo; fix the import error and call again, ' +
             'but note that the module cache could not be fully restored, so restart the host when convenient',
@@ -693,10 +759,11 @@ export async function hotReload(
     return {
       ok: false,
       failure: {
-        ...cancelledFailure(),
-        hint: restored
-          ? 'do not retry automatically; the caller gave up on purpose, and the module cache was restored'
-          : 'do not retry automatically; the caller gave up on purpose, but the module cache could not be fully restored — restart the host when convenient',
+        reason: 'cancelled',
+        message: 'the caller cancelled this hot reload after the module cache had been cleared',
+        verdict: restored
+          ? 'the reload was abandoned mid-way: the caller gave up on purpose, the module cache was put back, and the running entry was never touched'
+          : 'the reload was abandoned mid-way: the caller gave up on purpose and the running entry was never touched, but the module cache could not be fully restored — restart the host when convenient',
       },
       data: cleared as ReloadData,
     }
@@ -723,9 +790,9 @@ export async function hotReload(
       failure: {
         reason: 'apply-failed',
         message: `the new code failed while being applied: ${messageOf(error)}`,
-        hint: rolledBack
+        verdict: rolledBack
           ? 'the previous code was put back and is active again — fix the apply-time error and call again'
-          : 'rollback did not complete; restart the host to get back to a known state',
+          : 'rollback did not complete: the previous code is not confirmed active, so the running tree may be half-swapped — restart the host to get back to a known state',
       },
       data: { ...(cleared as ReloadData), oldFiberTouched, rolledBack },
     }
@@ -739,12 +806,7 @@ export async function hotReload(
       oldFiberTouched,
       newFiberState: state,
       rolledBack: false,
-      verdict: successVerdict(entry, backup.entries.length),
-      why:
-        `re-imported ${moduleUrl} from disk and swapped the entry onto it; ` +
-        `${String(backup.entries.length)} module(s) busted, old fiber ` +
-        (oldFiberTouched ? 'disposed before the new one was mounted' : 'was never started, so it was re-initialized') +
-        '. Anything this plugin opened outside cordis (timers, sockets, process handlers, file handles, workers) is not tracked and may still be running.',
+      verdict: successVerdict(entry, backup.entries.length, oldFiberTouched),
     },
   }
 }
@@ -811,18 +873,24 @@ function baseReport(entry: ReloadEntryPort, target: ReloadTarget, dryRun: boolea
     newFiberState: null,
     rolledBack: false,
     verdict: '',
-    why: '',
   }
 }
 
 /**
- * 成功时的一句话结论（形如 §2.4 草稿）。
+ * 成功时的一句话结论（L1）。
+ *
+ * **不带 `verdict: ` 前缀**：渲染层已经用 `verdict: ` 起行（SHAPE §3.1），
+ * 留着前缀就会出现 `verdict: verdict: entry=…`。
  *
  * @param entry 目标 entry。
  * @param cleared 清掉的模块数。
+ * @param oldFiberTouched 旧 fiber 有没有被 dispose 过。
  */
-function successVerdict(entry: ReloadEntryPort, cleared: number): string {
-  return `verdict: entry=${entry.entryId} · swapped=${String(cleared)} modules · rolledBack=false`
+function successVerdict(entry: ReloadEntryPort, cleared: number, oldFiberTouched: boolean): string {
+  return (
+    `entry=${entry.entryId} · swapped=${String(cleared)} modules · ` +
+    `oldFiberTouched=${String(oldFiberTouched)} · rolledBack=false`
+  )
 }
 
 /**
@@ -832,33 +900,7 @@ function successVerdict(entry: ReloadEntryPort, cleared: number): string {
  * @param count 闭包里的模块数。
  */
 function dryRunVerdict(entry: ReloadEntryPort, count: number): string {
-  return `verdict: entry=${entry.entryId} · wouldSwap=${String(count)} modules · dryRun=true (nothing was touched)`
-}
-
-/**
- * 取消失败。
- *
- * @returns 失败对象。
- */
-function cancelledFailure(): ReloadFailure {
-  return {
-    reason: 'cancelled',
-    message: 'the caller cancelled this hot reload',
-    hint: 'do not retry automatically; the caller gave up on purpose',
-  }
-}
-
-/**
- * 预算耗尽失败。
- *
- * @returns 失败对象。
- */
-function timeoutFailure(): ReloadFailure {
-  return {
-    reason: 'timeout',
-    message: 'the tool budget ran out before the hot reload could start',
-    hint: 'raise timeoutMs and retry, or call dsh_diagnose_plugin_load first to confirm the target entry',
-  }
+  return `entry=${entry.entryId} · wouldSwap=${String(count)} modules · dryRun=true (nothing was touched)`
 }
 
 /**
@@ -904,7 +946,7 @@ export function kindForReason(
       return 'timeout'
     default:
       // import / apply 两档都归 `reload-failed`：树**没被换成功**，而
-      // 「message/hint 里说清了旧 fiber 有没有被碰、有没有回滚」才是模型要读的。
+      // `verdict` 与 `key` 里说清了旧 fiber 有没有被碰、有没有回滚 —— 那才是模型要读的。
       return 'reload-failed'
   }
 }
@@ -912,43 +954,79 @@ export function kindForReason(
 /**
  * 把机制层结果转成工具结果（含 `nextStep`）。
  *
- * @param toolName 工具名（用于提示文本）。
+ * `data` 顶层恰好三键，**成功与失败同形**（B21）：
+ * - `verdict` ← `failure.verdict`（失败）或 `outcome.data.verdict`（成功）；
+ * - `key`     ← 要模型决策的原料（`ReloadKey`）；
+ * - `audit`   ← 其余（给人复核，不进模型文本）。
+ *
  * @param outcome 机制层结果。
  */
-export function outcomeToToolResult(outcome: ReloadOutcome): ToolResult<ReloadData> {
+export function outcomeToToolResult(outcome: ReloadOutcome): ToolResult<ReloadKey> {
   if (outcome.ok) {
-    return ok(outcome.data, reloadNextStep(outcome.data))
+    return ok(
+      { verdict: outcome.data.verdict, key: keyOf(outcome.data), audit: auditOf(outcome.data) },
+      reloadNextStep(outcome.data),
+    )
   }
   const failure = outcome.failure
   return fail(
+    { kind: kindForReason(failure.reason), message: failure.message },
     {
-      kind: kindForReason(failure.reason),
-      message: failure.message,
-      hint: failure.hint,
+      verdict: failure.verdict,
+      key: keyOf(outcome.data),
+      audit: auditOf(outcome.data),
     },
     verifyNextStep(outcome.data),
-    failureEvidence(outcome.data),
   )
 }
 
 /**
- * 失败时交给模型的**观测事实**：换的是哪个 entry、清了几格缓存、旧 fiber 有没有被碰、有没有回滚。
+ * 把机制报告投影成 `key`（L2）：**下一个决定可能要用到的**。
  *
- * 为什么必须有：这两条决定**要不要收拾** —— `oldFiberTouched: false` 是什么都不用做，
- * `rolledBack: false` 是必须重启。只把它们写在 message/hint 里，等于让模型读英文句子去判，
- * 而 message 恰恰是契约里「会随版本变」的那一层（`errors.ts` 的 `ToolError` 注释）。
- * 机制层本来就在失败路径上算好了这些值，此前只是**出口丢了**。
+ * 为什么只这几项：SHAPE §5 的判据 —— 模型看不到它会不会做出不同的下一步？
+ * 「换的是哪个 entry」「清了几格缓存」「**要不要收拾**（旧 fiber 有没有被碰、有没有回滚）」
+ * 会；闭包 URL 列表（最多 40 条）不会 → 它进 `audit`。
  *
- * @param data 机制层在失败路径上已经算好的报告片段。
+ * **不许拿默认值冒充事实**：`data` 缺省时（还没定出 entry 的失败）返回 `{}`，
+ * 而不是 `{ rolledBack: false }` —— 后者会让「不知道」看起来像「安全」。
+ *
+ * @param data 机制层已经算好的报告（失败路径上可以有）。
  */
-function failureEvidence(data: Partial<ReloadData> | undefined): JsonValue | undefined {
-  if (data === undefined) return undefined
+function keyOf(data: Partial<ReloadData> | undefined): ReloadKey {
+  if (data === undefined) return {}
+  const key: ReloadKey = {}
+  if (data.entry !== undefined) key.entry = data.entry
+  if (data.dryRun !== undefined) key.dryRun = data.dryRun
+  // 空串 = 这次没解析出模块 URL，印出来只是一条空行（噪声）——不当成事实。
+  if (data.moduleUrl !== undefined && data.moduleUrl !== '') key.moduleUrl = data.moduleUrl
+  if (data.moduleCount !== undefined) key.moduleCount = data.moduleCount
+  if (data.modulesCleared !== undefined) key.modulesCleared = data.modulesCleared
+  if (data.oldFiberTouched !== undefined) key.oldFiberTouched = data.oldFiberTouched
+  if (data.oldFiberCount !== undefined) key.oldFiberCount = data.oldFiberCount
+  if (data.oldFiberState !== undefined) key.oldFiberState = data.oldFiberState
+  if (data.newFiberState !== undefined) key.newFiberState = data.newFiberState
+  if (data.rolledBack !== undefined) key.rolledBack = data.rolledBack
+  return key
+}
+
+/**
+ * 造 `audit`（给人复核；不进模型文本，所以列出全部原始记录）。
+ *
+ * 闭包 URL 列表住在这里：它最多 40 条，模型拿着也做不了下一个决定。
+ *
+ * @param data 机制层报告。
+ */
+function auditOf(data: Partial<ReloadData> | undefined): JsonValue {
+  if (data === undefined) return {}
   return {
-    ...(data.entry === undefined ? {} : { entry: data.entry as unknown as JsonValue }),
-    ...(data.modulesCleared === undefined ? {} : { modulesCleared: data.modulesCleared }),
-    ...(data.oldFiberTouched === undefined ? {} : { oldFiberTouched: data.oldFiberTouched }),
-    ...(data.rolledBack === undefined ? {} : { rolledBack: data.rolledBack }),
-  } as JsonValue
+    ...(data.target === undefined ? {} : { target: data.target as unknown as JsonValue }),
+    ...(data.moduleUrl === undefined ? {} : { moduleUrl: data.moduleUrl }),
+    ...(data.moduleCount === undefined ? {} : { moduleCount: data.moduleCount }),
+    ...(data.modules === undefined ? {} : { modules: data.modules }),
+    ...(data.modulesTruncated === undefined ? {} : { modulesTruncated: data.modulesTruncated }),
+    ...(data.oldFiberCount === undefined ? {} : { oldFiberCount: data.oldFiberCount }),
+    ...(data.oldFiberState === undefined ? {} : { oldFiberState: data.oldFiberState }),
+  }
 }
 
 /**
@@ -983,10 +1061,24 @@ function verifyNextStep(data: Partial<ReloadData> | undefined): NextStep {
 /**
  * 把任意异常收敛成工具失败（兜底分支用，保证 `execute` 绝不抛）。
  *
+ * 这条兜底是**唯一**允许产出 `internal` 的路径（B24 用它证明「异常不会漏出去」）。
+ * 它必须给出实质 `verdict`：模型看不到 `error.message`，只看到这一行 ——
+ * 而这里的诚实答案恰恰是「我不知道走到哪一步了」（本模块的算法正常路径绝不抛，
+ * 所以一旦抛出来，说明是本插件自己的 bug，树有多少被改动**无法从这个错误推断**）。
+ *
+ * `key` 是 `{}`：**没有任何可靠的可供决策的观测** —— 不拿 `rolledBack: false`
+ * 之类的默认值冒充「树是安全的」。
+ *
  * @param error 捕获到的异常。
  */
-export function reloadInternalFailure(error: unknown): ToolResult<ReloadData> {
-  return fail(toToolError(error, 'hot reload'))
+export function reloadInternalFailure(error: unknown): ToolResult<ReloadKey> {
+  const toolError = toToolError(error, 'hot reload')
+  return fail(toolError, {
+    verdict:
+      'this call failed before it could report an outcome, so how far the swap got is unknown — do not retry blindly; check the observed phase of the entry first',
+    key: {},
+    audit: { internalError: toolError.message },
+  })
 }
 
 /* ------------------------------------------------------------------ *
