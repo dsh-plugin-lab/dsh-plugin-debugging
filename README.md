@@ -15,11 +15,11 @@
   <p>
     <a href="https://github.com/dsh-plugin-lab/dsh-plugin-debugging/actions/workflows/ci.yml"><img src="https://github.com/dsh-plugin-lab/dsh-plugin-debugging/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
     <a href="https://www.npmjs.com/package/dsh-plugin-debugging"><img src="https://img.shields.io/npm/v/dsh-plugin-debugging.svg?style=flat" alt="npm"></a>
+    <a href="https://www.npmjs.com/package/dsh-plugin-debugging"><img src="https://img.shields.io/badge/SLSA-Build%20L2-green?logo=slsa&style=flat" alt="SLSA Build L2"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=flat" alt="MIT License"></a>
-    <!-- SLSA 徽章**故意不挂**：0.1.0 是手动发的，npm 上没有 provenance（SLSA 要求由
-         release.yml 走 Trusted Publisher 发布）。第一次由 CI 带 provenance 发版之后再补这枚 ——
-         在那之前挂上去就是假声明：
-         <a href="https://www.npmjs.com/package/dsh-plugin-debugging"><img src="https://img.shields.io/badge/SLSA-Build%20L2-green?logo=slsa&style=flat" alt="SLSA Build L2"></a> -->
+    <!-- SLSA 徽章的**真实性判据**（别凭印象挂）：对**具体版本**查
+         https://registry.npmjs.org/-/npm/v1/attestations/dsh-plugin-debugging@<版本> —— 200 才算有 provenance。
+         实测：`0.1.0`（手动发）→ 404，**那一版不该挂**；`0.2.0`（由 release.yml 发）→ 200。 -->
   </p>
 
   <p>
@@ -96,7 +96,7 @@ Installing it gives the model five tools — four read-only, one write-side — 
 dsh plugin --profile web add dsh-plugin-debugging
 ```
 
-Published as `0.1.0` (2026-10-13 — released by hand, so that release carries **no** npm provenance; versions published through this repository's release workflow do).
+On npm — the version badge above is the current release. Versions published through this repository's release workflow carry npm provenance; `0.1.0` was released by hand and does not.
 
 ### From source
 

@@ -136,6 +136,14 @@
   provenance 也进了透明度日志之后，registry 那一刻**可能还查不到**这个号。
   **别在这一刻判失败，更别重发**（重发撞的是「版本已存在」）；轮询
   `npm view dsh-plugin-debugging dist-tags`，等那个号出现。
+  **实测（2026-10-13 发 `0.2.0`）**：workflow 已 `completed success`、tag 与 Release 都已建，
+  而 registry 那一刻**仍显示 `latest: 0.1.0`、attestations 端点 404**；轮询第 2 次（约 20 秒后）
+  才变成 `latest: 0.2.0` / **200**。→ **「刚发完就查」看到的那个 404 不是发布失败。**
+- **provenance 的真假要对具体版本查，别凭「这次走的是 workflow」推断**：
+  `https://registry.npmjs.org/-/npm/v1/attestations/dsh-plugin-debugging@<版本>` —— **200 才算有**。
+  实测：手动发的 `0.1.0` → **404**；workflow 发的 `0.2.0` → **200**。这就是 SLSA 徽章能不能挂的判据。
+- **workflow 日志会自证 provenance**：`Signed provenance statement … from GitHub Actions` 与
+  `Provenance statement published to transparency log` 两行同时出现，才说明 `--provenance` 真的生效。
 - 核对该版本是否已经在 `latest`（预发布则应在 `alpha`，且 `latest` 未动）。
 
 ## 发布后缺陷处理
