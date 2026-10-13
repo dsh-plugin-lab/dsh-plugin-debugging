@@ -12,10 +12,12 @@
 
 ## 验证快照
 
-- **本机**：`npm run check` 全绿 = **14 files / 437 tests passed**；`tsc` 两个配置各 **0 error**；`lint` / `format:check` / `check:release`（14 条）全过
-- **红线**：`test/redlines.test.ts` **79 条**（B7–B15 / B19 / B23 / **B16 / B18b / B22**）
+- **本机**：`npm run check` 全绿 = **14 个 test files 全过**（用例数**故意不写在这里**）；`tsc` 两个配置各 **0 error**；`lint` / `format:check` / `check:release`（**14 条**）全过（2026-10-13 实跑）
+- **红线**：覆盖面**以 `test/redlines.test.ts` 里 `describe('B…')` 的闭集为准** —— **不要在这里手抄编号清单，也不要抄用例数**。
+  理由（踩过）：抄一次就意味着**每次加红线都得同批改这里**，而漏改的那次就是一句**骗人的假话**（本仓据此把「红线只到 B22」写错过一次）。
+  要个数就去 `npm run test` 看那一行 —— **文件数是稳定的，用例数不是**（本轮实测期间它就被并发写者从 455 推到 458）
 - **CI**：见 [.github/workflows/ci.yml](.github/workflows/ci.yml) 的 `CI Success`（唯一 required check）
-- 数字会漂 → **以本机实跑为准**，这里只记「跑法 + 上次实测值」
+- 上面留的是**跑法 + 形状**；任何会漂的值（用例数、红线条数、行号、宿主版本号）一律现查
 
 ## 全局规则
 
@@ -104,10 +106,11 @@ HOST-CONTRACTS 答「宿主实际上是什么样」，PUBLISHING 答「怎么发
 - [ ] **CI 与本地平台不同**：本机是 Windows，CI 是 ubuntu。**任何写死平台行为的断言都会在 CI 上红**
       （首次推送就踩过：`probed === true` 那一条）。新增与平台相关的判据时，
       要么按平台分支断言，要么让两种平台的行为都被钉住。
-- [ ] **红线批 2b：`B17 / B20a / B20b / B18a / B21 / B24`**（五个工具已齐，条件已满足）。
-      **`B24` 最要紧** —— 它是 SHAPE §4 说的「契约的承载条件」（`execute` 全路径不抛），
-      而五个工具的顶层 `try/catch` **已加、但还没有红线守着**：下一个人摘掉它不会有任何东西报警。
-      规则见 [docs/SHAPE.md](docs/SHAPE.md) §10 与 §10.0（三个空转口）；**B17 的取值面已改**（L1/L2 ∪ 目标工具自己的描述）。
+- [x] **红线批 2b：`B17 / B20a / B20b / B18a / B21 / B24`** —— **六条已全部落地**（2026-10-13 核；
+      真源是 `test/redlines.test.ts` 里 `describe('B…')` 的闭集，规则与逐条判据见 [docs/SHAPE.md](docs/SHAPE.md) §10）。
+      其中 **`B24`** 是 SHAPE §4 说的「契约的承载条件」（`execute` 全路径不抛）。
+      **B17 的取值面已改**（L1/L2 ∪ 目标工具自己的描述）。三条空转口见 [docs/SHAPE.md](docs/SHAPE.md) §10.0。
+      ⚠️ **待补的只剩 `B12b`**（上面那条 `SKILL.md` 解冻的连带），其余缺口以 SHAPE §10 为准。
 - [ ] **技术债：收敛重复的测试助手**（契约改造期 `test/tools/helpers.ts` 被冻结，
       四名成员各自内联了一份）。实测：`renderText` 在 **5 个文件**（其中 4 个逐字节相同）、
       `splitRender` 5 个、`sharedSubstrings` 3 个 —— 预计可减 **800–1000 行**。
