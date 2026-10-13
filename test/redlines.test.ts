@@ -495,6 +495,7 @@ const EXPECTED_TOOLS = [
   'dsh_diagnose_plugin_load',
   'dsh_check_auth',
   'dsh_dump_config',
+  'dsh_hot_reload',
 ] as const
 
 /**
@@ -584,17 +585,19 @@ if (!toolHalfImplemented) {
 describe('B9 工具名是闭集', () => {
   it('提取器本身有效：三种引号 + 内联 name 五种形态都认得', () => {
     // 每种形态各喂一个：认得几种就自检几种（自检与 TOOL_NAME_SHAPES 必须同批）。
+    // ⚠️ 必须写**字面量**名字，不能写 `EXPECTED_TOOLS[i]` —— 追加第 5 个工具后，
+    // 这里只喂前四个形态，而末尾拿 `[...EXPECTED_TOOLS]` 断言，就会自己判自己红。
     const synthetic = [
-      `export const A_TOOL = '${EXPECTED_TOOLS[0]}'`,
-      `export const B_TOOL = "${EXPECTED_TOOLS[1]}"`,
-      `export const C_TOOL = \`${EXPECTED_TOOLS[2]}\``,
-      `export const lowercaseName = "${EXPECTED_TOOLS[3]}"`,
-      `export function make() { return defineTool({ name: 'dsh_check_auth' }) }`,
+      `export const A_TOOL = 'dsh_check_effect_mode'`,
+      `export const B_TOOL = "dsh_diagnose_plugin_load"`,
+      `export const C_TOOL = \`dsh_check_auth\``,
+      `export const lowercaseName = "dsh_dump_config"`,
+      `export function make() { return defineTool({ name: 'dsh_hot_reload' }) }`,
     ].join('\n')
     const found = [
       ...new Set(collectDeclaredToolNames([{ path: 'synthetic.ts', text: synthetic }])),
     ]
-    // 四种常量形态 + 内联那一处（与第 4 个名字重复，去重后仍是四个）。
+    // 四种常量形态 + 内联那一处（各一个名字，去重后正好是闭集本身）。
     expect(found.sort()).toEqual([...EXPECTED_TOOLS].sort())
   })
 

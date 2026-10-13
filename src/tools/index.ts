@@ -25,10 +25,12 @@ import type { Context } from '@deepseek-ai/cordis'
 
 import type { PluginState } from '../contracts.js'
 import { readLoaderEntries, loaderFrom } from '../lib/loader.js'
+import { reloadHostFrom } from '../lib/hot-reload.js'
 import { createCheckAuthTool } from './dsh_check_auth.js'
 import { createDiagnosePluginLoadTool } from './dsh_diagnose_plugin_load.js'
 import { createDumpConfigTool } from './dsh_dump_config.js'
 import { createEffectModeTool } from './dsh_check_effect_mode.js'
+import { createHotReloadTool } from './dsh_hot_reload.js'
 import { createToolDeps } from './shared.js'
 
 /**
@@ -56,4 +58,9 @@ export function registerTools(ctx: Context, state: PluginState): void {
   for (const create of factories) {
     ctx.tools.register(create(deps))
   }
+
+  // 写侧工具（v1.1）：**唯一**一个会改运行中树的工具。
+  // 它比只读工具多要一个宿主端口（`reload`），所以单独构造 —— `deps` 那份
+  // 是四个只读工具共享的冻结形状，不为写侧破例。
+  ctx.tools.register(createHotReloadTool({ ...deps, reload: reloadHostFrom(ctx) }))
 }
