@@ -5,7 +5,7 @@
 ## 状态
 
 - 版本以 [package.json](package.json) 的 `version` 为准
-- **已发布 `0.1.0` 到 npm**（2026-10-13 手动发的 —— **那一次没有 provenance**；由 `release.yml` 发的版本才会带上，徽章也因此还没挂）。版本线与判例见 [docs/PUBLISHING.md](docs/PUBLISHING.md)
+- **已发布到 npm**（当前版本见 [package.json](package.json)；`latest` 与 dist-tags 以 registry 为准）。**`0.2.0` 是第一个由 `release.yml` 发出的版本**（带 provenance）；`0.1.0` 是手动发的、**没有** provenance。SLSA 徽章的真实性判据写在 [README.md](README.md) 的徽章注释里（对**具体版本**查 attestations 端点）。版本线与判例见 [docs/PUBLISHING.md](docs/PUBLISHING.md)
 - **能力面 = 1 个技能 + 5 个工具**：4 个只读（`dsh_check_effect_mode` / `dsh_diagnose_plugin_load` / `dsh_check_auth` / `dsh_dump_config`）+ **1 个写侧** `dsh_hot_reload`（已实现、已真机验证；算法与关键语义见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §5）。`dsh_restart` **有意推迟**（方案见 [docs/RESTART-PLAN.md](docs/RESTART-PLAN.md)）
 - **「只读」纪律只覆盖诊断半边**：写侧改动必须先落决策 —— 见 [.agents/notes/2026-10-13-write-side-tool-boundaries.md](.agents/notes/2026-10-13-write-side-tool-boundaries.md)；**边界由 `test/redlines.test.ts` 的 B10（诊断半边）与 B15（写侧只许碰进程内树）守着**
 
