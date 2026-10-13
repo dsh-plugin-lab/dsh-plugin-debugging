@@ -10,13 +10,51 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, posix } from 'node:path'
+import { dirname, join, posix } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { afterAll, describe, expect, it } from 'vitest'
 
+import type { ResolvedConfig } from '../src/contracts.ts'
 import type { NextStep, ToolData, ToolErrorKind, ToolResult } from '../src/lib/errors.ts'
+import { ensureToolResult, toolResultProblem } from '../src/lib/errors.ts'
+import type { SpawnImpl } from '../src/lib/exec.ts'
+import type { ReloadEntryPort, ReloadHost } from '../src/lib/hot-reload.ts'
+import type { FetchImpl } from '../src/lib/http.ts'
 import { renderToolResultText, type RenderTable } from '../src/lib/render.ts'
+import {
+  composeDescription,
+  DESCRIPTION_MAX_CHARS,
+  DESCRIPTION_MAX_LINES,
+  type ToolDescription,
+} from '../src/tools/describe.ts'
+import {
+  CHECK_AUTH_DESCRIPTION,
+  CHECK_AUTH_TOOL,
+  createCheckAuthTool,
+} from '../src/tools/dsh_check_auth.ts'
+import {
+  CHECK_EFFECT_MODE_DESCRIPTION,
+  EFFECT_MODE_TOOL,
+  createEffectModeTool,
+} from '../src/tools/dsh_check_effect_mode.ts'
+import {
+  createDiagnosePluginLoadTool,
+  DIAGNOSE_PLUGIN_LOAD_DESCRIPTION,
+  DIAGNOSE_PLUGIN_LOAD_TOOL,
+} from '../src/tools/dsh_diagnose_plugin_load.ts'
+import {
+  createDumpConfigTool,
+  DUMP_CONFIG_DESCRIPTION,
+  DUMP_CONFIG_TOOL,
+} from '../src/tools/dsh_dump_config.ts'
+import {
+  createHotReloadTool,
+  HOT_RELOAD_DESCRIPTION,
+  HOT_RELOAD_TOOL,
+} from '../src/tools/dsh_hot_reload.ts'
+import { createToolDeps, type ToolDeps } from '../src/tools/shared.ts'
 
 /**
  * 本仓的**红线**：能落成断言的不变量。
@@ -2476,6 +2514,1031 @@ describe('B23 观察层不许自己写文件', () => {
 })
 
 /**
+ * # 依赖五个工具全齐的红线：B17 / B20a / B20b / B18a / B21 / B24
+ *
+ * 这六条与前六条（B16 / B18b / B22）的分工：前六条只吃**合成 fixture**，任何工具都没落地也能跑；
+ * 这六条要**真的把五个工具跑起来**（成功与失败各一条），因为它们的判据对象是
+ * 「工具自己声明的描述与参数」「工具自己返回的 `data` 外形」「`execute` 在替身抛异常时的行为」——
+ * 用合成对象断言等于在测我自己的夹具，不是测工具（活跃坑 18 的假绿形状）。
+ *
+ * ## 一处语料，六条红线共用
+ *
+ * {@link redlineCorpus} 把五个工具各跑成功 / 失败两次，B17 / B18a / B20b / B21 全部读它。
+ * **不各写一份夹具**：各写一份必然漂，而漂出来的形状是「红线绿但工具已经改了」。
+ *
+ * ## 为什么夹具写在**本文件内部**而不 import `test/tools/helpers.ts`
+ *
+ * `test/tools/helpers.ts` 是 W1 冻结的、四个工具测试共享的形状，**不是这条红线的写域**。
+ * 需要助手就写在文件内部 —— 这也是本文件一直以来的做法（它至今只 import `src/**`）。
+ * **代价如实记下**：`withPlatform` 与那边的实现重复了一份（见文末「已知限度」的技术债条目）。
+ */
+
+// ── 运行期夹具 ────────────────────────────────────────────────────────────
+
+/** 造配置。 */
+function redlineConfig(dshHome: string, overrides: Partial<ResolvedConfig> = {}): ResolvedConfig {
+  return {
+    dshHome,
+    dshHomeSource: 'config',
+    profile: 'web',
+    port: 0,
+    timeoutMs: 15_000,
+    ...overrides,
+  }
+}
+
+/** 夹具默认的 spawn：**一次只会失败**，免得哪条路意外真起子进程。 */
+const redlineNeverSpawn: SpawnImpl = async () => {
+  throw new Error('redline fixture: this path must not start a subprocess')
+}
+
+/** 夹具默认的 fetch：同上。 */
+const redlineNeverFetch: FetchImpl = async () => {
+  throw new Error('redline fixture: this path must not make an HTTP request')
+}
+
+/**
+ * 造依赖。
+ *
+ * `env` 默认给**空对象**（不是 `process.env`）：否则本机的 `DSH_WEB_URL` 会让
+ * 「端口从哪来」随机器漂，判据就变成「在开发机上绿」。
+ */
+function redlineDeps(config: ResolvedConfig, overrides: Partial<ToolDeps> = {}): ToolDeps {
+  return createToolDeps(config, {
+    spawn: redlineNeverSpawn,
+    fetch: redlineNeverFetch,
+    env: {},
+    ...overrides,
+  })
+}
+
+/** 写一个 JSON 文件（自动建父目录）。 */
+function writeJsonFile(path: string, value: unknown): void {
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
+}
+
+/** 写一个文本文件（自动建父目录）。 */
+function writeTextFile(path: string, text: string): void {
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, text, 'utf8')
+}
+
+/** 造一个 profile 清单（`dsh.profile.bundles`）。 */
+function writeProfileFixture(dshHome: string, bundles: readonly string[]): string {
+  const dir = join(dshHome, 'profiles', 'web')
+  writeJsonFile(join(dir, 'package.json'), {
+    name: 'dsh-profile-web',
+    dsh: { profile: { bundles: [...bundles] } },
+    dependencies: {},
+  })
+  return dir
+}
+
+/** 造一个「已安装的包」（清单 + 产物文件都在）。 */
+function writeInstalledPackageFixture(profileDir: string, packageName: string): void {
+  const packageDir = join(profileDir, 'node_modules', ...packageName.split('/'))
+  writeJsonFile(join(packageDir, 'package.json'), {
+    name: packageName,
+    version: '0.0.1',
+    main: './lib/index.js',
+  })
+  writeTextFile(join(packageDir, 'lib', 'index.js'), '// redline fixture\n')
+}
+
+/** 造一个 exec（只需要 signal）。 */
+function redlineExec(): ToolRunContext {
+  return { signal: new AbortController().signal } as unknown as ToolRunContext
+}
+
+/**
+ * 临时把 `process.platform` 换成指定值，跑完**无条件还原**。
+ *
+ * 为什么必须有：`lib/ports.ts` 只在 Windows 上起子进程查监听端口，别的平台**早返回**。
+ * 不钉平台的话，「`diagnose × spawn` 这条注入到底有没有被走到」会随机器变 ——
+ * 本机 Windows 上绿、CI ubuntu 上 `spawn` 一次都没被调用 → **判据在 CI 上空转**。
+ * 钉住平台让两条分支在任意机器上都被真跑到（与活跃坑 25 同一条纪律）。
+ *
+ * ⚠️ 与 `test/tools/helpers.ts` 的 `withPlatform` 重复 —— 那边不是本红线的写域，
+ * 见文末「已知限度」的技术债条目。
+ *
+ * @param platform 要伪装的平台值。
+ * @param fn 在该平台下跑的逻辑。
+ */
+async function withPlatformRedline<T>(platform: NodeJS.Platform, fn: () => Promise<T>): Promise<T> {
+  const original = Object.getOwnPropertyDescriptor(process, 'platform')
+  if (original === undefined) throw new Error('process.platform has no property descriptor')
+  Object.defineProperty(process, 'platform', {
+    value: platform,
+    configurable: true,
+    enumerable: true,
+    writable: true,
+  })
+  try {
+    return await fn()
+  } finally {
+    Object.defineProperty(process, 'platform', original)
+  }
+}
+
+/**
+ * 走**工具自己的声明**取模型可见文本。
+ *
+ * 不直接调 `renderToolResultText`：`toolOutput()` 已经绑好了工具名与输出表，
+ * 自己再拼一次就多一个「红线拼装 ≠ 宿主取数」的漂移点。
+ *
+ * @param tool 工具定义。
+ * @param args 调用参数。
+ * @param value 工具返回值。
+ */
+function renderViaTool(tool: ToolDefinition, args: unknown, value: unknown): string {
+  const blocks = tool.output.render(args as never, value as never) as unknown as { text?: string }[]
+  return blocks.map((block) => block.text ?? '').join('\n')
+}
+
+/** 一次工具运行的结果（六条红线共用的语料条目）。 */
+interface RedlineRun {
+  /** 工具名。 */
+  tool: string
+  /** 这条 fixture 在测什么（报错时点名用）。 */
+  label: string
+  /** 工具返回的原始值（**未经守卫**）。 */
+  value: unknown
+  /** 模型可见文本。 */
+  text: string
+}
+
+/** 跑一条 fixture 并渲染。 */
+async function runFixture(
+  tool: ToolDefinition,
+  toolName: string,
+  label: string,
+  args: unknown,
+): Promise<RedlineRun> {
+  const value = await tool.execute(args, redlineExec())
+  return { tool: toolName, label, value, text: renderViaTool(tool, args, value) }
+}
+
+/** 造一个带 `ECONNREFUSED` 的异常（`probeHttp` 据此判 `not-running`）。 */
+function connectionRefused(): Error {
+  return Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' })
+}
+
+// ── 五个工具各一条成功 / 一条失败 ──────────────────────────────────────────
+
+/** `check_auth`：成功 = 200；失败 = 连接被拒。 */
+function checkAuthWith(fetch: FetchImpl): ToolDefinition {
+  const home = makeTempRoot('dsh-redline-auth-')
+  return createCheckAuthTool(redlineDeps(redlineConfig(home, { port: 3080 }), { fetch, env: {} }))
+}
+
+/** `effect_mode`：成功 = profile 文件里看得到 hmr；失败 = dsh 起不来（ENOENT）。 */
+function effectModeWith(kind: 'hmr' | 'no-dsh'): ToolDefinition {
+  const home = makeTempRoot('dsh-redline-effect-')
+  if (kind === 'hmr') writeProfileFixture(home, ['@deepseek-ai/dsh-hmr'])
+  const spawn: SpawnImpl = async () => {
+    if (kind === 'no-dsh') {
+      return {
+        code: null,
+        stdout: '',
+        stderr: '',
+        timedOut: false,
+        aborted: false,
+        spawnError: 'spawn: ENOENT',
+      }
+    }
+    return { code: 0, stdout: '', stderr: '', timedOut: false, aborted: false }
+  }
+  return createEffectModeTool(redlineDeps(redlineConfig(home), { spawn }))
+}
+
+/** `diagnose`：成功 = 清单与产物都在；失败 = 没有 profile 清单。 */
+function diagnoseWith(kind: 'loaded' | 'no-profile'): ToolDefinition {
+  const home = makeTempRoot('dsh-redline-diagnose-')
+  if (kind === 'loaded') {
+    const dir = writeProfileFixture(home, ['pkg-a'])
+    writeInstalledPackageFixture(dir, 'pkg-a')
+  }
+  // `port: 0` + 空 `env` ⇒ `resolvePort` 返回 `undefined` ⇒ 一次端口查询都不做：
+  // 这条 fixture 因此与平台无关（不必钉 win32）。
+  return createDiagnosePluginLoadTool(redlineDeps(redlineConfig(home)))
+}
+
+/** `dump_config`：成功 = 两次 dump 都干净；失败 = `--dump-config` 退出码非 0。 */
+function dumpConfigWith(kind: 'clean' | 'exit-code'): ToolDefinition {
+  const home = makeTempRoot('dsh-redline-dump-')
+  const spawn: SpawnImpl = async (options) => {
+    const schema = options.args.includes('--dump-config-schema')
+    if (kind === 'exit-code' && !schema) {
+      return { code: 5, stdout: '', stderr: 'dsh: boom\n', timedOut: false, aborted: false }
+    }
+    return {
+      code: 0,
+      stdout: schema ? '{}' : '- id: hmr\n  name: "@deepseek-ai/dsh-hmr"\n',
+      stderr: '',
+      timedOut: false,
+      aborted: false,
+    }
+  }
+  return createDumpConfigTool(redlineDeps(redlineConfig(home), { spawn }))
+}
+
+/** 造一个可控的 entry 端口。 */
+function reloadEntryFixture(): ReloadEntryPort {
+  return {
+    entryId: 'include:pkg-a',
+    moduleName: 'file:///repo/pkg-a/lib/index.js',
+    hasFiber: true,
+    oldFiberCount: 1,
+    fiberState: 2,
+    reloadable: true,
+    disposeOld: async () => undefined,
+    mountFresh: async () => undefined,
+    removeFresh: async () => undefined,
+    remountOld: async () => undefined,
+    refresh: async () => undefined,
+  }
+}
+
+/** `hot_reload`：成功 = 就地换成功；失败 = `reload` 端口的 `candidates()` 抛异常。 */
+function hotReloadWith(kind: 'success' | 'throwing'): ToolDefinition {
+  const home = makeTempRoot('dsh-redline-reload-')
+  const entry = reloadEntryFixture()
+  const store = new Map<string, unknown[]>([[entry.moduleName, ['job:1']]])
+  const reload: ReloadHost = {
+    internalAvailable: () => true,
+    cache: () => ({
+      read: (url) => store.get(url) ?? [],
+      write: (url, job) => {
+        const jobs = store.get(url) ?? []
+        jobs.push(job)
+        store.set(url, jobs)
+        return true
+      },
+      clear: (url) => {
+        store.delete(url)
+      },
+      children: async () => [],
+    }),
+    resolveEntryUrl: async () => entry.moduleName,
+    importFresh: async () => ({}),
+    candidates: () => {
+      if (kind === 'throwing') throw new Error('reload port exploded')
+      return [entry]
+    },
+  }
+  return createHotReloadTool({ ...redlineDeps(redlineConfig(home)), reload })
+}
+
+/**
+ * 五个工具各跑成功 / 失败一次。
+ *
+ * 只建一次（memo）：六条红线共用，避免每条各跑十次真 IO。
+ */
+let corpusPromise: Promise<RedlineRun[]> | undefined
+
+/** 取语料（首次调用时构建）。 */
+function redlineCorpus(): Promise<RedlineRun[]> {
+  corpusPromise ??= buildRedlineCorpus()
+  return corpusPromise
+}
+
+/** 构建语料。 */
+async function buildRedlineCorpus(): Promise<RedlineRun[]> {
+  return [
+    await runFixture(
+      checkAuthWith(async () => ({ status: 200 })),
+      CHECK_AUTH_TOOL,
+      'check_auth · 服务在且认证过了（200）',
+      { port: 3080 },
+    ),
+    await runFixture(
+      checkAuthWith(async () => {
+        throw connectionRefused()
+      }),
+      CHECK_AUTH_TOOL,
+      'check_auth · 连不上（ECONNREFUSED）',
+      { port: 3080 },
+    ),
+    await runFixture(
+      effectModeWith('hmr'),
+      EFFECT_MODE_TOOL,
+      'effect_mode · profile 文件里看得到 hmr',
+      { change: 'config' },
+    ),
+    await runFixture(effectModeWith('no-dsh'), EFFECT_MODE_TOOL, 'effect_mode · dsh 起不来', {
+      change: 'config',
+    }),
+    await runFixture(
+      diagnoseWith('loaded'),
+      DIAGNOSE_PLUGIN_LOAD_TOOL,
+      'diagnose · 清单与产物都在',
+      {},
+    ),
+    await runFixture(
+      diagnoseWith('no-profile'),
+      DIAGNOSE_PLUGIN_LOAD_TOOL,
+      'diagnose · 没有 profile 清单',
+      {},
+    ),
+    await runFixture(
+      dumpConfigWith('clean'),
+      DUMP_CONFIG_TOOL,
+      'dump_config · 两次 dump 都干净',
+      {},
+    ),
+    await runFixture(
+      dumpConfigWith('exit-code'),
+      DUMP_CONFIG_TOOL,
+      'dump_config · --dump-config 退出码非 0',
+      {},
+    ),
+    await runFixture(hotReloadWith('success'), HOT_RELOAD_TOOL, 'hot_reload · 就地换成功', {
+      entryId: 'pkg-a',
+    }),
+    await runFixture(hotReloadWith('throwing'), HOT_RELOAD_TOOL, 'hot_reload · reload 端口抛异常', {
+      entryId: 'pkg-a',
+    }),
+  ]
+}
+
+// ── 五个工具自己的声明（B17 / B20a / B20b 共用） ───────────────────────────
+
+/** 一个工具的形状：描述声明 + 合成文本 + 工具定义。 */
+interface RedlineToolShape {
+  /** 工具名。 */
+  name: string
+  /** 四段声明（原始字段 —— B20a 要判「写了但是空的」）。 */
+  description: ToolDescription
+  /** `composeDescription` 的结果（= 模型看到的 description）。 */
+  text: string
+  /** 工具定义（取 `parameters` 与 `output.render`）。 */
+  tool: ToolDefinition
+}
+
+/** 造形状。 */
+function shapeOf(
+  name: string,
+  description: ToolDescription,
+  tool: ToolDefinition,
+): RedlineToolShape {
+  return { name, description, text: composeDescription(description), tool }
+}
+
+let shapesCache: RedlineToolShape[] | undefined
+
+/** 取五个工具的形状（构造它们不需要真的 IO）。 */
+function toolShapes(): RedlineToolShape[] {
+  if (shapesCache !== undefined) return shapesCache
+  const deps = redlineDeps(redlineConfig('redline-shape-home'))
+  const reload: ReloadHost = {
+    internalAvailable: () => false,
+    cache: () => undefined,
+    resolveEntryUrl: async () => '',
+    importFresh: async () => ({}),
+    candidates: () => [],
+  }
+  shapesCache = [
+    shapeOf(CHECK_AUTH_TOOL, CHECK_AUTH_DESCRIPTION, createCheckAuthTool(deps)),
+    shapeOf(EFFECT_MODE_TOOL, CHECK_EFFECT_MODE_DESCRIPTION, createEffectModeTool(deps)),
+    shapeOf(
+      DIAGNOSE_PLUGIN_LOAD_TOOL,
+      DIAGNOSE_PLUGIN_LOAD_DESCRIPTION,
+      createDiagnosePluginLoadTool(deps),
+    ),
+    shapeOf(DUMP_CONFIG_TOOL, DUMP_CONFIG_DESCRIPTION, createDumpConfigTool(deps)),
+    shapeOf(HOT_RELOAD_TOOL, HOT_RELOAD_DESCRIPTION, createHotReloadTool({ ...deps, reload })),
+  ]
+  return shapesCache
+}
+
+/** 一个值的字符串视图（**字符串与数字**算标识符；布尔不是）。 */
+function seg(value: unknown): string {
+  return typeof value === 'string' ? value : ''
+}
+
+/**
+ * 取 `tool.parameters` 里每个参数的描述。
+ *
+ * ⚠️ **必须点进 `.properties`**（§10.0 口 3）：`defineTool` 把参数**编译**成 JSON schema
+ * （`{ type, properties, required }`），`Object.values(tool.parameters)` 拿到的是 `'object'`
+ * 字符串与 properties 对象本身 → 每条 `description` 都是 `undefined` → **「每个参数描述非空」
+ * 与「合计 > 0」一起被架空**。本仓五个工具的测试里曾有四份是这种写法。
+ *
+ * @param tool 工具定义。
+ */
+function parameterDescriptions(tool: ToolDefinition): Record<string, unknown> {
+  const parameters = tool.parameters as unknown as {
+    properties?: Record<string, { description?: unknown }>
+  }
+  const properties = parameters.properties ?? {}
+  const result: Record<string, unknown> = {}
+  for (const [name, node] of Object.entries(properties)) result[name] = node.description
+  return result
+}
+
+/** 目标工具的「描述 ∪ 参数文本」（B17 的取值面右半边）。 */
+function toolTextOf(shape: RedlineToolShape): string {
+  const params = parameterDescriptions(shape.tool)
+  return [
+    shape.text,
+    ...Object.entries(params).map(([name, text]) => `${name}: ${seg(text)}`),
+  ].join('\n')
+}
+
+/** 一个值里的全部叶子字符串（B17 逐个判）。 */
+function leafStrings(value: unknown): string[] {
+  if (typeof value === 'string') return [value]
+  if (typeof value === 'number') return [String(value)]
+  if (Array.isArray(value)) return value.flatMap((item) => leafStrings(item))
+  if (typeof value === 'object' && value !== null) {
+    return Object.values(value as Record<string, unknown>).flatMap((item) => leafStrings(item))
+  }
+  return []
+}
+
+/** B17 的例外：到处都在的值不算标识符。 */
+function isExemptIdentifier(leaf: string): boolean {
+  return leaf === '' || leaf === '0' || leaf === '1'
+}
+
+/** B20b 的共享串长度下限（与 B16 同一个数：只抓**逐字**复述）。 */
+const B20B_SHARED_MIN_CHARS = 40
+
+/** 找出 `a` 里**逐字出现在 `b` 中**的、长度 ≥`min` 的片段。 */
+function sharedSubstringsRedline(a: string, b: string, min: number): string[] {
+  const hits = new Set<string>()
+  for (let start = 0; start + min <= a.length; start += 1) {
+    const window = a.slice(start, start + min)
+    if (b.includes(window)) hits.add(window)
+  }
+  return [...hits]
+}
+
+// ── B20a 描述四段骨架 + 上限 ──────────────────────────────────────────────
+
+describe('B20a 描述四段骨架 + 上限', () => {
+  it('五个工具：段数 / 行数 / 字符上限 / 每个参数描述非空且合计 > 0', () => {
+    const offenders: string[] = []
+    const measured: string[] = []
+    const shapes = toolShapes()
+
+    for (const shape of shapes) {
+      const segments = [
+        shape.description.what,
+        shape.description.useWhen,
+        shape.description.boundary,
+        shape.description.cost,
+      ]
+      // 口 2：可选段「**写了但是空的**」必须单独判红 —— 它不是「没写」。
+      // `composeDescription` 会把它滤掉，所以只看合成结果看不出这一档。
+      for (const [index, raw] of segments.entries()) {
+        if (typeof raw === 'string' && raw.trim() === '') {
+          offenders.push(
+            `${shape.name}: 第 ${String(index + 1)} 段是空串 / 纯空白 —— 字段本身违规（滤空段会把它藏起来）`,
+          )
+        }
+      }
+      const present = segments.filter((raw) => seg(raw).trim() !== '')
+      if (seg(shape.description.what).trim() === '') offenders.push(`${shape.name}: what 为空`)
+      if (seg(shape.description.useWhen).trim() === '')
+        offenders.push(`${shape.name}: useWhen 为空`)
+
+      const lines = shape.text.split('\n')
+      const blanks = lines.filter((line) => line.trim() === '')
+      if (blanks.length > 0) {
+        offenders.push(`${shape.name}: 合成后的描述里有 ${String(blanks.length)} 条纯空白行`)
+      }
+      // 下界用 `≥ 段数`（不是 `===`）：段内允许折行（useWhen 1–2 行）。
+      if (lines.length < present.length) {
+        offenders.push(
+          `${shape.name}: 行数 ${String(lines.length)} < 段数 ${String(present.length)}（下界）`,
+        )
+      }
+      if (lines.length > DESCRIPTION_MAX_LINES) {
+        offenders.push(
+          `${shape.name}: 行数 ${String(lines.length)} > ${String(DESCRIPTION_MAX_LINES)}`,
+        )
+      }
+      if (shape.text.length > DESCRIPTION_MAX_CHARS) {
+        offenders.push(
+          `${shape.name}: description ${String(shape.text.length)} 字符 > ${String(DESCRIPTION_MAX_CHARS)}`,
+        )
+      }
+      // 连接符必须是 `\n`：段数 ≥2 却合成成一行 ⇒ 有人把连接符换回了空格，
+      // 那时「行数 ≤4」就是恒真断言（§2.1 的 A 方案就白拍了）。
+      if (present.length >= 2 && !shape.text.includes('\n')) {
+        offenders.push(
+          `${shape.name}: ${String(present.length)} 段却合成成了一行 —— 连接符不是 \\n`,
+        )
+      }
+
+      const params = parameterDescriptions(shape.tool)
+      const names = Object.keys(params)
+      // 口 1 + 口 3 的下界：没有参数、或点错层级（`Object.values(tool.parameters)`），
+      // 都会让参数描述这一族判据恒真 —— 现在这两条下界是**唯一的机械守卫**。
+      if (names.length === 0) {
+        offenders.push(`${shape.name}: 一个参数都没有 —— 参数描述的判据会空转（口 3）`)
+      }
+      let total = 0
+      for (const name of names) {
+        const text = seg(params[name])
+        if (text.trim() === '') {
+          offenders.push(`${shape.name}.${name}: 参数描述为空 / 缺失`)
+          continue
+        }
+        total += text.length
+      }
+      if (total === 0) offenders.push(`${shape.name}: 参数描述合计为 0 —— 判据在空转`)
+      // ⚠️ 这里**曾经**有一条上界「参数描述合计 ≤100」（常量 `PARAMETER_DESCRIPTIONS_MAX_CHARS`）。
+      // 维护者 2026-10-13 拍板**删掉上界、只保留下界**：100 是在「还没有第二个轴」时定的，
+      // 而 `dshHome` / `profile` 这类真实新参数需要地方写描述 —— **上界只防啰嗦、下界才防空转**。
+      // 实测留档（上界曾经有多紧）：diagnose 97 / effect_mode 88 / check_auth 86 /
+      // hot_reload 79 / dump_config 55。**这条实测不再被断言**，只作为「上界曾经是紧约束」的证据。
+      // 「某条参数描述该不该留」现在是**人工评审项**（SHAPE §10.1：模型看不到这条会不会填错），
+      // **刻意不在这里断言** —— 语义质量没法机械判，硬凑只会造出一条恒真的假红线（§10.2 那类）。
+      measured.push(
+        `${shape.name}: desc=${String(shape.text.length)}/${String(DESCRIPTION_MAX_CHARS)}` +
+          ` lines=${String(lines.length)}/${String(DESCRIPTION_MAX_LINES)}` +
+          ` segs=${String(present.length)}` +
+          ` params=${String(names.length)}` +
+          ` paramChars=${String(total)}`,
+      )
+    }
+
+    // 五个工具一个都不能少 —— 否则「描述层合规」只在一个子集上成立。
+    expect(shapes).toHaveLength(5)
+    expect(offenders, `B20a 违规：\n${offenders.join('\n')}`).toEqual([])
+    // 实测值随断言带出去：红了能一眼看出是哪一项顶到上限。
+    expect(measured, `B20a 实测：\n${measured.join('\n')}`).toHaveLength(5)
+  })
+})
+
+// ── B20b 描述不许复述输出 ────────────────────────────────────────────────
+
+describe('B20b 描述不许复述输出', () => {
+  it('每个工具的 description 与它自己的 render 输出之间没有 ≥40 字符的共享串', async () => {
+    const runs = await redlineCorpus()
+    const offenders: string[] = []
+    const checked: string[] = []
+
+    for (const shape of toolShapes()) {
+      const run = runs.find((item) => item.tool === shape.name)
+      if (run === undefined) {
+        offenders.push(`${shape.name}: 语料里没有它的运行结果 —— 判据无从下手`)
+        continue
+      }
+      // 下界：**两侧都要有** ≥40 字符的候选，否则「没有共享串」恒真（§10.0）。
+      if (shape.text.length < B20B_SHARED_MIN_CHARS) {
+        offenders.push(
+          `${shape.name}: 描述只有 ${String(shape.text.length)} 字符，构不成 ≥${String(B20B_SHARED_MIN_CHARS)} 的候选 —— 判据空转`,
+        )
+        continue
+      }
+      if (run.text.length < B20B_SHARED_MIN_CHARS) {
+        offenders.push(
+          `${shape.name}: 渲染文本只有 ${String(run.text.length)} 字符，构不成候选 —— 判据空转`,
+        )
+        continue
+      }
+      checked.push(shape.name)
+      const shared = sharedSubstringsRedline(shape.text, run.text, B20B_SHARED_MIN_CHARS)
+      if (shared.length > 0) {
+        offenders.push(
+          `${shape.name}: 描述里逐字抄了输出 → ${shared.slice(0, 3).join(' | ')}（共 ${String(shared.length)} 段）`,
+        )
+      }
+    }
+
+    // 「一条都没真检查」必须判红，不许静默 skip（活跃坑 18）。
+    if (checked.length !== toolShapes().length) {
+      offenders.push(
+        `只有 ${String(checked.length)}/${String(toolShapes().length)} 个工具被真检查 —— 判据没覆盖全`,
+      )
+    }
+    expect(offenders, `B20b 违规：\n${offenders.join('\n')}`).toEqual([])
+  })
+})
+
+// ── B18a nextStep 出现时必须带动作 ────────────────────────────────────────
+
+describe('B18a nextStep 出现时必须带动作', () => {
+  it('语料里每个 nextStep 都落在两支之一，且**两支都真的出现过**', async () => {
+    const runs = await redlineCorpus()
+    const offenders: string[] = []
+    let toolBranch = 0
+    let manualBranch = 0
+    let absent = 0
+
+    for (const run of runs) {
+      const step = (run.value as { nextStep?: unknown }).nextStep
+      if (step === undefined) {
+        absent += 1
+        continue
+      }
+      if (typeof step !== 'object' || step === null || Array.isArray(step)) {
+        offenders.push(`${run.label}: nextStep 不是对象`)
+        continue
+      }
+      const record = step as Record<string, unknown>
+      if (seg(record['why']).trim() === '') {
+        offenders.push(`${run.label}: nextStep.why 不是非空字符串`)
+        continue
+      }
+      const hasTool = record['tool'] !== undefined
+      const hasManual = record['manual'] !== undefined
+      if (hasTool && hasManual) {
+        offenders.push(`${run.label}: 两支同时出现 —— 契约只允许恰有其一`)
+        continue
+      }
+      if (!hasTool && !hasManual) {
+        // 这正是根因那一档：没有动作的 nextStep 在类型上写不出来，运行期也必须是红。
+        offenders.push(`${run.label}: nextStep 没有动作（裸结论伪装成下一步）`)
+        continue
+      }
+      if (hasManual) {
+        if (record['manual'] !== true) {
+          offenders.push(`${run.label}: manual 不是 true`)
+          continue
+        }
+        manualBranch += 1
+        continue
+      }
+      if (seg(record['tool']).trim() === '') {
+        offenders.push(`${run.label}: tool 不是非空字符串`)
+        continue
+      }
+      toolBranch += 1
+    }
+
+    // 下界：两支都要有 fixture，否则这条判据只覆盖一半。
+    if (toolBranch === 0) offenders.push('语料里没有**工具支**的 nextStep —— 判据只覆盖一半')
+    if (manualBranch === 0) offenders.push('语料里没有 **manual 支**的 nextStep —— 判据只覆盖一半')
+    if (absent === runs.length) offenders.push('全部 fixture 都没有 nextStep —— 判据空转')
+    expect(
+      offenders,
+      `B18a 违规：\n${offenders.join('\n')}\n（工具支 ${String(toolBranch)} 条 / manual 支 ${String(manualBranch)} 条 / 无 nextStep ${String(absent)} 条）`,
+    ).toEqual([])
+  })
+})
+
+// ── B17 下一个工具的参数标识符必须出现 ────────────────────────────────────
+
+describe('B17 下一个工具的参数标识符必须出现', () => {
+  it('args 的每个标识符都在 verdict/L2 ∪ 目标工具自己的描述与参数文本里', async () => {
+    const runs = await redlineCorpus()
+    const shapes = toolShapes()
+    const offenders: string[] = []
+    let checkedIdentifiers = 0
+    let emptyArgs = 0
+    let noArgs = 0
+    let manualSteps = 0
+
+    for (const run of runs) {
+      const step = (run.value as { nextStep?: unknown }).nextStep
+      if (step === undefined) continue
+      const record = step as Record<string, unknown>
+      if (record['manual'] === true) {
+        manualSteps += 1
+        continue
+      }
+      const args = record['args']
+      if (args === undefined) {
+        noArgs += 1
+        continue
+      }
+      if (typeof args !== 'object' || args === null || Array.isArray(args)) {
+        offenders.push(`${run.label}: args 不是对象`)
+        continue
+      }
+      const entries = Object.entries(args as Record<string, unknown>)
+      // 例外：`args` 为空对象时**不适用** —— 但要**计数**，不许静默 skip。
+      if (entries.length === 0) {
+        emptyArgs += 1
+        continue
+      }
+
+      const target = shapes.find((shape) => shape.name === record['tool'])
+      if (target === undefined) {
+        // 目标工具不在本仓闭集里 ⇒ 取值面的右半边求不出来。**响亮判红**，
+        // 要求显式扩表或把建议改成 manual —— 不静默放行（活跃坑 18）。
+        offenders.push(
+          `${run.label}: 目标工具 ${seg(record['tool'])} 不在本仓五工具闭集里 —— 取值面无法求值`,
+        )
+        continue
+      }
+
+      // 取值面 = `verdict:` 行 / L2 行 ∪ 目标工具自己的描述与参数文本。
+      // ⚠️ **必须排除 `nextStep:` 行** —— 那一行按格式本来就会把 args 印出来，不排除则恒真。
+      const layers = splitRenderText(run.text)
+      const haystack = [
+        ...(layers.verdict === undefined ? [] : [layers.verdict]),
+        ...layers.l2,
+        toolTextOf(target),
+      ].join('\n')
+      // 自证排除真的成立：取值面里不许出现 nextStep 行本身。
+      if (haystack.includes(RENDER_NEXT_STEP_PREFIX)) {
+        offenders.push(`${run.label}: 取值面里混进了 ${RENDER_NEXT_STEP_PREFIX} 行 —— 判据会恒真`)
+        continue
+      }
+
+      for (const [key, value] of entries) {
+        for (const leaf of leafStrings(value)) {
+          if (isExemptIdentifier(leaf)) continue
+          checkedIdentifiers += 1
+          if (!haystack.includes(leaf)) {
+            offenders.push(
+              `${run.label}: args.${key} = ${leaf} 在模型看得到的地方找不到（verdict/L2 ∪ 目标工具的描述与参数）`,
+            )
+          }
+        }
+      }
+    }
+
+    // 下界：一条可判的标识符都没有 ⇒ 判据空转。空 args 的例外也要被计数。
+    if (checkedIdentifiers === 0) {
+      offenders.push(
+        `一条可判的 args 标识符都没有 —— 判据空转（空 args ${String(emptyArgs)} / 无 args ${String(noArgs)} / manual ${String(manualSteps)}）`,
+      )
+    }
+    expect(
+      offenders,
+      `B17 违规：\n${offenders.join('\n')}\n（可判标识符 ${String(checkedIdentifiers)} 个 / 空 args ${String(emptyArgs)} 条 / 无 args ${String(noArgs)} 条 / manual ${String(manualSteps)} 条）`,
+    ).toEqual([])
+  })
+})
+
+// ── B21 data 外层形状是闭集 ──────────────────────────────────────────────
+
+describe('B21 data 外层形状是闭集', () => {
+  it('每个工具的成功与失败返回值：顶层闭集 + data 恰好三键 + key/audit 是对象', async () => {
+    const runs = await redlineCorpus()
+    const offenders: string[] = []
+    const stats = new Map<string, { ok: number; fail: number }>()
+
+    for (const run of runs) {
+      const record = run.value as Record<string, unknown> | null
+      if (record === null || typeof record !== 'object' || Array.isArray(record)) {
+        offenders.push(`${run.label}: 返回值不是对象`)
+        continue
+      }
+      // 顶层闭集：`ok` / `data` / `error` / `nextStep` 之外不许有第五个键。
+      for (const key of Object.keys(record)) {
+        if (!['ok', 'data', 'error', 'nextStep'].includes(key)) {
+          offenders.push(`${run.label}: 顶层多了一个键 "${key}"`)
+        }
+      }
+      if (typeof record['ok'] !== 'boolean') {
+        offenders.push(`${run.label}: ok 不是布尔`)
+        continue
+      }
+      const data = record['data']
+      if (typeof data !== 'object' || data === null || Array.isArray(data)) {
+        offenders.push(`${run.label}: data 不是对象`)
+        continue
+      }
+      const dataRecord = data as Record<string, unknown>
+      const dataKeys = Object.keys(dataRecord).sort()
+      if (dataKeys.join(',') !== 'audit,key,verdict') {
+        offenders.push(`${run.label}: data 的键是 ${dataKeys.join(',')}（应为 audit,key,verdict）`)
+      }
+      if (seg(dataRecord['verdict']).trim() === '') {
+        offenders.push(`${run.label}: data.verdict 不是非空字符串`)
+      }
+      for (const name of ['key', 'audit'] as const) {
+        const item = dataRecord[name]
+        // 「是对象」按契约字面读：非 null 对象即可（数组也是一种投影目标，契约没禁）。
+        if (typeof item !== 'object' || item === null) {
+          offenders.push(`${run.label}: data.${name} 不是对象`)
+        }
+      }
+      // 判据必须与守卫同意同一套规则：形状非法 / 被守卫换掉，都判红。
+      const problem = toolResultProblem(run.value)
+      if (problem !== undefined) offenders.push(`${run.label}: toolResultProblem 报「${problem}」`)
+      if (ensureToolResult(run.value) !== run.value) {
+        offenders.push(`${run.label}: 没过守卫（ensureToolResult 换掉了它）`)
+      }
+
+      const bucket = stats.get(run.tool) ?? { ok: 0, fail: 0 }
+      if (record['ok'] === true) bucket.ok += 1
+      else bucket.fail += 1
+      stats.set(run.tool, bucket)
+    }
+
+    // 下界：每个工具**至少各一条成功与一条失败**，否则「闭集」只在一条路上被看过。
+    for (const shape of toolShapes()) {
+      const bucket = stats.get(shape.name)
+      if (bucket === undefined) {
+        offenders.push(`${shape.name}: 语料里一条 fixture 都没有`)
+        continue
+      }
+      if (bucket.ok < 1) offenders.push(`${shape.name}: 没有**成功** fixture（下界）`)
+      if (bucket.fail < 1) offenders.push(`${shape.name}: 没有**失败** fixture（下界）`)
+    }
+    if (stats.size !== toolShapes().length) {
+      offenders.push(`语料只覆盖了 ${String(stats.size)}/${String(toolShapes().length)} 个工具`)
+    }
+    expect(offenders, `B21 违规：\n${offenders.join('\n')}`).toEqual([])
+  })
+})
+
+// ── B24 execute 全路径不抛 ───────────────────────────────────────────────
+
+/**
+ * 一个「底层端口抛异常」的注入组。
+ *
+ * ## 为什么每组都自带 `calls()` 计数（实测教训，不是洁癖）
+ *
+ * 本仓第一版 B24 探针在 `probe()` 里**另造了一份 deps**，注入被丢掉 → 六组**全部「通过」**
+ * → 差点得出「B24 今天已经是绿的」这个**反结论**。判据必须能自证「替身真的被走到了」，
+ * 否则它测的是「工具在正常路径上返回了什么」，与 `execute` 抛不抛无关。
+ */
+interface InjectionGroup {
+  /** 报错时点名用。 */
+  label: string
+  /** 造一份**新的**工具 + 替身（每次调用都要新的，替身带状态）。 */
+  build: () => { tool: ToolDefinition; calls: () => number }
+  /** 调用参数。 */
+  args: unknown
+  /** 需要显式钉住的平台（见 `withPlatformRedline`）。 */
+  platform?: NodeJS.Platform
+}
+
+/** `check_auth`：能穿出 `execute` 的是 `resolvePort` 读 `env.DSH_WEB_URL`（它**不碰** `spawn`）。 */
+function checkAuthEnvBomb(): { tool: ToolDefinition; calls: () => number } {
+  let calls = 0
+  const env = {} as NodeJS.ProcessEnv
+  Object.defineProperty(env, 'DSH_WEB_URL', {
+    get() {
+      calls += 1
+      throw new Error('env exploded')
+    },
+    enumerable: true,
+    configurable: true,
+  })
+  const home = makeTempRoot('dsh-redline-b24-auth-')
+  return {
+    tool: createCheckAuthTool(redlineDeps(redlineConfig(home), { env })),
+    calls: () => calls,
+  }
+}
+
+/** `effect_mode`：没有 hmr 时它会去跑 dump，那条路走 `spawn`。 */
+function effectModeSpawnBomb(): { tool: ToolDefinition; calls: () => number } {
+  let calls = 0
+  const home = makeTempRoot('dsh-redline-b24-effect-')
+  const spawn: SpawnImpl = async () => {
+    calls += 1
+    throw new Error('spawn exploded')
+  }
+  return {
+    tool: createEffectModeTool(redlineDeps(redlineConfig(home), { spawn })),
+    calls: () => calls,
+  }
+}
+
+/** `dump_config`：两次 dump 都走 `spawn`。 */
+function dumpConfigSpawnBomb(): { tool: ToolDefinition; calls: () => number } {
+  let calls = 0
+  const home = makeTempRoot('dsh-redline-b24-dump-')
+  const spawn: SpawnImpl = async () => {
+    calls += 1
+    throw new Error('spawn exploded')
+  }
+  return {
+    tool: createDumpConfigTool(redlineDeps(redlineConfig(home), { spawn })),
+    calls: () => calls,
+  }
+}
+
+/** `diagnose`：端口查询那条路走 `spawn` —— 但只在 Windows 上才会起子进程。 */
+function diagnoseSpawnBomb(): { tool: ToolDefinition; calls: () => number } {
+  let calls = 0
+  const home = makeTempRoot('dsh-redline-b24-diag-spawn-')
+  writeProfileFixture(home, ['pkg-a'])
+  const spawn: SpawnImpl = async () => {
+    calls += 1
+    throw new Error('spawn exploded')
+  }
+  return {
+    tool: createDiagnosePluginLoadTool(redlineDeps(redlineConfig(home, { port: 3080 }), { spawn })),
+    calls: () => calls,
+  }
+}
+
+/** `diagnose`：读 Loader 树那条路走 `loader`（**与平台无关**，每次都走到）。 */
+function diagnoseLoaderBomb(): { tool: ToolDefinition; calls: () => number } {
+  let calls = 0
+  const home = makeTempRoot('dsh-redline-b24-diag-loader-')
+  writeProfileFixture(home, ['pkg-a'])
+  const loader = (): never => {
+    calls += 1
+    throw new Error('loader exploded')
+  }
+  return {
+    tool: createDiagnosePluginLoadTool(redlineDeps(redlineConfig(home), { loader })),
+    calls: () => calls,
+  }
+}
+
+/** `hot_reload`：它唯一多要的宿主端口就是 `reload`。 */
+function hotReloadBomb(): { tool: ToolDefinition; calls: () => number } {
+  let calls = 0
+  const home = makeTempRoot('dsh-redline-b24-reload-')
+  const reload: ReloadHost = {
+    internalAvailable: () => true,
+    cache: () => undefined,
+    resolveEntryUrl: async () => '',
+    importFresh: async () => ({}),
+    candidates: () => {
+      calls += 1
+      throw new Error('reload port exploded')
+    },
+  }
+  return {
+    tool: createHotReloadTool({ ...redlineDeps(redlineConfig(home)), reload }),
+    calls: () => calls,
+  }
+}
+
+describe('B24 execute 全路径不抛（契约的承载条件）', () => {
+  it('六组注入：替身**真的被调用**，且返回的是过了守卫的合法结果', async () => {
+    const groups: InjectionGroup[] = [
+      {
+        label: 'check_auth × env（resolvePort 读 DSH_WEB_URL）',
+        build: checkAuthEnvBomb,
+        args: {},
+      },
+      { label: 'effect_mode × spawn', build: effectModeSpawnBomb, args: { change: 'config' } },
+      { label: 'dump_config × spawn', build: dumpConfigSpawnBomb, args: {} },
+      {
+        label: 'diagnose × spawn（端口查询；显式钉 win32）',
+        build: diagnoseSpawnBomb,
+        args: {},
+        platform: 'win32',
+      },
+      { label: 'diagnose × loader', build: diagnoseLoaderBomb, args: {} },
+      { label: 'hot_reload × reload', build: hotReloadBomb, args: { entryId: 'pkg-a' } },
+    ]
+
+    const offenders: string[] = []
+    const trace: string[] = []
+
+    for (const group of groups) {
+      const built = group.build()
+      const invoke = async (): Promise<unknown> => built.tool.execute(group.args, redlineExec())
+      let value: unknown
+      let threw: string | undefined
+      try {
+        value =
+          group.platform === undefined
+            ? await invoke()
+            : await withPlatformRedline(group.platform, invoke)
+      } catch (error) {
+        threw = error instanceof Error ? error.message : String(error)
+      }
+
+      // 下界（实测教训）：替身一次都没被调用 ⇒ 注入没生效 ⇒ 这一组在空转。
+      const calls = built.calls()
+      trace.push(`${group.label}: calls=${String(calls)}${threw === undefined ? '' : ' THREW'}`)
+      if (calls === 0) {
+        offenders.push(`${group.label}: 替身一次都没被调用 —— 注入没生效，这一组在空转`)
+      }
+      if (threw !== undefined) {
+        offenders.push(`${group.label}: execute **抛了**（${threw}）—— 契约的承载条件失效`)
+        continue
+      }
+
+      // 判据是**恒等**：证明这个值**过了守卫**，而不是被守卫合成的兜底（活跃坑 37）。
+      if (ensureToolResult(value) !== value) {
+        offenders.push(`${group.label}: 返回的不是过守卫的值（被 ensureToolResult 换掉了）`)
+      }
+      const problem = toolResultProblem(value)
+      if (problem !== undefined) offenders.push(`${group.label}: 形状非法（${problem}）`)
+      const record = value as { ok?: unknown; data?: Record<string, unknown> }
+      if (record.ok !== false) {
+        offenders.push(`${group.label}: 期望结构化失败，实际 ok=${String(record.ok)}`)
+      }
+      if (
+        record.data === undefined ||
+        Object.keys(record.data).sort().join(',') !== 'audit,key,verdict'
+      ) {
+        offenders.push(`${group.label}: 失败分支的 data 不是三键闭集`)
+      }
+    }
+
+    // 声明边界（写进断言消息，防下一个人以为它管得更多）：
+    // B24 抓不到「异常被吞掉」——`try{…}catch{ return fail({kind:'internal'}) }` 的返回值合法，
+    // 本条照样绿。那是活跃坑 37 的地盘，不在这条红线的声明范围内。
+    expect(
+      offenders,
+      `B24 违规：\n${offenders.join('\n')}\n实测轨迹：\n${trace.join('\n')}\n` +
+        '（声明边界：本条的判据是「返回了过守卫的合法结果」，**抓不到「异常被吞掉」**。）',
+    ).toEqual([])
+  })
+})
+
+/**
  * # 本文件的已知限度
  *
  * 这一节本身是判据的一部分：它让下一个改实现的人知道**哪些红线会跟着失效**。
@@ -2506,6 +3569,16 @@ describe('B23 观察层不许自己写文件', () => {
  * | 19 | B16 的阈值 `CONSTANT_BLOCK_MIN_CHARS = 40` 与「**逐字**相等」的比对 | 阈值是我选的；**不做近似匹配**（§10.2 第 3 条） | 同一句话**同义改写 / 折行** → **漏**（这是**有意**不做的：近似匹配引入假红比漏更贵，见 §10.2）；阈值调大同样只是少抓，不会误红 |
  * | 20 | B18b 用**第一个** ` — ` 切出 `<why>` 正文 | 依赖 §3.1 工具支的分隔符逐字是 ` — ` | `why` 自身含 ` — ` 时**切早** → 正文被判短 → **假绿**（工具支漏报）；分隔符换形状（如 `: `）→ 工具支正文含 `tool(args)` 前缀，该支变**恒真** |
  * | 21 | B22 只查 `audit` 里放进去的**哨兵字符串** | 哨兵是我放的，`auditJsonOf` 用 `JSON.stringify` 读回 | `audit` 以**别的形态**泄漏（渲染时改名 / 编码 / 只印其中一个非哨兵叶子）→ **漏**。本条只覆盖「`audit` 这块或其中这个哨兵进了这段文本」 |
+ * | 22 | B17 的取值面 = `verdict`/L2 ∪ **目标工具自己的描述与参数文本** | 目标工具必须在**本仓五工具闭集**里，否则右半边求不出来 | 建议一个**宿主自己的**工具 → 判红（响亮，要求显式扩表或改成 `manual`）。**这是有意的**：不静默放行；但代价是「合法的宿主工具建议」会被拦下 |
+ * | 23 | B17 的标识符提取（`leafStrings` + `isExemptIdentifier`） | 只把**字符串与数字**当标识符；`''` / `'0'` / `'1'` 例外；布尔**不算**标识符 | 真标识符恰好是 `0` / `1` / 空串时**漏**（与 SHAPE §10 的例外一致，是有意的）；布尔被排除属判断，不是实测 |
+ * | 24 | B20a 的行数判据 | 依赖 `composeDescription` 的 `\n` 连接 + 「先滤空段」 | 连接符换回空格 → **判红**（不是漏，见 M2 变异）；段内折行不会误红（下界写的是 `≥ 段数`） |
+ * | 25 | B20a 的参数描述判据**只有下界**（每个非空 + 合计 > 0） | `PARAMETER_DESCRIPTIONS_MAX_CHARS`（≤100）**已于 2026-10-13 删除** | **上界没了 ⇒ 参数描述写多长都不会红**。质量归**人工评审**（SHAPE §10.1 第 4 项），**刻意不做成红线**：语义没法机械判 |
+ * | 26 | B20b 只抓**逐字**共享串（≥40 字符） | 同 B16：不做近似匹配 | 描述里**同义改写**输出结构 → **漏**（§10.1 / §10.2 第 2 条已明说）。这条只抓「逐字抄」 |
+ * | 27 | B18a / B21 的覆盖面 = `redlineCorpus()` 那 10 条 fixture | 夹具是我造的：每个工具成功/失败各一条 | 工具新增**第三种**返回路径（如新的 `kind`）而语料没覆盖 → 那条路不被这两条红线看见。加分支时**同批加 fixture** |
+ * | 28 | B24 的六个注入组 | 每组自带 `calls()` 计数；`diagnose × spawn` **显式钉 `win32`** | 替身调用 0 次 → **判红**（不是 skip）；`diagnose × spawn` 在别的平台本来就不起子进程，所以必须钉平台（否则 CI 上空转） |
+ * | 29 | 本文件的 `withPlatformRedline` 与 `test/tools/helpers.ts` 的 `withPlatform` **重复** | 那是本仓已知的测试助手重复（见 AGENTS「技术债：收敛重复的测试助手」） | 收敛那笔债时**连它一起收**；两份实现的语义必须一致（`finally` 里按属性描述符还原） |
+ * | 30 | B18a 的**可观测前提**：`toOutput()` 里的 `ensureToolResult` 守卫**在渲染之前**就把「没有动作的 nextStep」换掉了 | 这是 `src/tools/shared.ts` 的现行实现；判据能红，正是因为**红线读的是 `execute` 的返回值、不是渲染文本** | 守卫一旦被挪到渲染之后（或 `toOutput` 被绕过），**B18a 会假绿**：`ensureToolResult` 合成的兜底 `nextStep` 是 `undefined`（缺省 = 合法），坏形状在到达本红线前就消失了。**已用变异实测**：只改工具写法 → 85 全绿（假绿）；**同时旁路守卫 → B18a 红**（另一条 M4 证据） |
+ * | 31 | 上一条的连带：`ensureToolResult` 合成的兜底 `key` 是 `{}`，而 `dsh_check_auth` / `dsh_diagnose_plugin_load` / `dsh_dump_config` 的 `keyText` **会崩**在它上面（`resolvedLine(undefined)`） | 三条 `keyText` 都假定 `key.resolved` 在；`effect_mode` / `hot_reload` 的写法是防御式的（`typeof … === 'string' ? … : 'unknown'`） | **这是已实测的工具侧缺陷**（探针：`ensureToolResult({ok:true})` 的 `key={}` 喂五个 render 表 → 3 抛 / 2 过）。**本文件不断言它**（它属 B21/B24 的邻域，修不修由维护者定）；**只报不改** |
  *
  * **B10 已知未覆盖的写入通道**（明确列出，不静默排除）：
  * `process.binding`、原生 addon、`require()`（本仓纯 ESM）、把 fs 方法先赋给别的变量再调用
