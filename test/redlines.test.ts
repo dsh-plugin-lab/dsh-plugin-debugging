@@ -15,6 +15,9 @@ import { fileURLToPath } from 'node:url'
 
 import { afterAll, describe, expect, it } from 'vitest'
 
+import type { NextStep, ToolData, ToolErrorKind, ToolResult } from '../src/lib/errors.ts'
+import { renderToolResultText, type RenderTable } from '../src/lib/render.ts'
+
 /**
  * 本仓的**红线**：能落成断言的不变量。
  *
@@ -911,14 +914,34 @@ describe('B10 诊断半边只读：不含杀进程 / 写文件 / 走安装面的
     expect(judgeReadOnly([{ path: 'synthetic.ts', text: localHelper }])).toEqual([])
   })
 
-  it('真实源码里的本地 truncate（render.ts）不被误报，而它确实没有 fs 来源', () => {
+  it('真实 render.ts 不被误报（按**来源**判定，不按函数名前缀）', () => {
     const render = readSourcesUnder('src/lib').find((source) => source.path.endsWith('/render.ts'))
     expect(render, 'src/lib/render.ts 不在了 —— 这条防误报的判据要跟着改').toBeDefined()
-    // 前提自证：render.ts 不含 truncate 的 fs 来源（否则下面那条断言没有意义）。
-    expect(render?.text).toContain('function truncate')
-    expect(fsBindingsOf(render?.text ?? '').namespaces).toEqual([])
-    expect([...fsBindingsOf(render?.text ?? '').named].filter((n) => n === 'truncate')).toEqual([])
+
+    // ⚠️ 这里**曾经**写的是 `expect(render.text).toContain('function truncate')` —— 两个毛病：
+    // ① 它是**子串/前缀**判据：W1 把函数改名成 `truncateKeyLines` 之后**照样通过**
+    //    （`'function truncate'` 仍是它的子串），而那个名字**已不再与 fs 的 `truncate` 同名**
+    //    —— 于是这条「防误报」自证**什么都没证明**（假绿）；
+    // ② 反过来，谁把它写紧成 `\bfunction truncate\b`，一次**改名就会假红**。
+    // 所以改成按**来源**判（B10 本来就是按来源判的），并用合成样本做**双向**自证。
+    const bindings = fsBindingsOf(render?.text ?? '')
+    expect(
+      bindings.namespaces,
+      'render.ts 忽然有了 node:fs 来源 —— 那它就不再是「同名本地助手」样本了',
+    ).toEqual([])
+    expect([...bindings.named], 'render.ts 从 node:fs 具名导入了东西 —— 同上').toEqual([])
     expect(judgeReadOnly([render!])).toEqual([])
+
+    // 双向自证（**不依赖 render.ts 里的具体函数名**，改名/换写法都不会让它假红或空转）：
+    // 本地同名助手 → 不报；同一名字但**来源是 node:fs** → 必须报。
+    const localHelper =
+      'function truncateKeyLines(lines: string[], max: number) { return lines.slice(0, max) }'
+    expect(judgeReadOnly([{ path: 'synthetic.ts', text: localHelper }])).toEqual([])
+    const fsSourced = ["import { truncate } from 'node:fs'", 'truncate(p, 0)'].join('\n')
+    expect(
+      judgeReadOnly([{ path: 'synthetic.ts', text: fsSourced }]),
+      '同一名字一旦有 fs 来源就必须报 —— 否则上面那条「不报」是恒真的',
+    ).not.toEqual([])
   })
 
   it('报出的行号是**真实文件行号**（块注释不能把行号带偏）', () => {
@@ -1375,6 +1398,502 @@ describe('B15 写侧工具只许碰进程内树', () => {
       'export function f(p: string) { return readFileSync(p, "utf8") }',
     ].join('\n')
     expect(judgeWriteSide([{ path: 'synthetic.ts', text: source }])).toEqual([])
+  })
+})
+
+/**
+ * # 渲染层三条红线：B16 / B18b / B22
+ *
+ * 三条都只吃 `renderToolResultText` 的**输出文本**，所以合成 fixture 就能钉住形状
+ * （不必 import 任何工具）。等 T2（五个工具的描述与 `data` 全齐）再把夹具换成真实工具。
+ *
+ * 共用**唯一一处**「哪一行是哪一层」的实现 {@link splitRenderText} —— 三条红线共用，
+ * 不许各写一份（各写一份必然漂，而漂出来的形状是「红线绿但模型看到别的」）。
+ */
+
+/** 渲染头行（`[tool] ok` / `[tool] failed (kind)`）。 */
+const RENDER_HEAD_RE = /^\[[\w_]+\] (?:ok|failed \([\w-]+\))$/
+
+/**
+ * 截断模板行（§3.1 规则 3）。
+ *
+ * **恒定模板** ⇒ B16 必须排除它：两份 fixture 若都被截断、且还剩同样的条数，
+ * 这一行就逐字相同 → **假红**（§10 B16 明写）。
+ */
+const RENDER_TRUNCATED_RE = /^\d+ more line\(s\) not shown — the full record is in the session log$/
+
+/** L1 前缀。 */
+const RENDER_VERDICT_PREFIX = 'verdict: '
+/** L3 前缀。 */
+const RENDER_NEXT_STEP_PREFIX = 'nextStep:'
+/** 工具支里 `<tool>(<args>)` 与 `<why>` 之间的分隔符（§3.1 两支逐字形状）。 */
+const NEXT_STEP_TOOL_SEPARATOR = ' — '
+
+/** 渲染文本按层切开的结果。 */
+interface RenderLayers {
+  /** 头行。 */
+  head: string
+  /** L1 正文（`verdict: ` 之后）；没有判定行时 `undefined`。 */
+  verdict: string | undefined
+  /** L2 行（**已剔除截断模板行**）。 */
+  l2: string[]
+  /** L3 正文（`nextStep:` 之后、trim 过）；没有下一步时 `undefined`。 */
+  nextStep: string | undefined
+  /** 形状不合法 → 退化成一行原始 JSON（§3.1 规则 4）。 */
+  degenerate: boolean
+}
+
+/**
+ * 按 §3.1 的冻结格式把渲染文本切成三层。
+ *
+ * @param text `renderToolResultText` 的输出。
+ */
+function splitRenderText(text: string): RenderLayers {
+  const lines = text.split('\n')
+  const head = lines[0] ?? ''
+  const verdictIndex = lines.findIndex((line) => line.startsWith(RENDER_VERDICT_PREFIX))
+  const nextStepIndex = lines.findIndex((line) => line.startsWith(RENDER_NEXT_STEP_PREFIX))
+  const l2End = nextStepIndex < 0 ? lines.length : nextStepIndex
+  return {
+    head,
+    verdict:
+      verdictIndex < 0
+        ? undefined
+        : (lines[verdictIndex] ?? '').slice(RENDER_VERDICT_PREFIX.length),
+    l2: (verdictIndex < 0 ? [] : lines.slice(verdictIndex + 1, l2End)).filter(
+      (line) => !RENDER_TRUNCATED_RE.test(line),
+    ),
+    nextStep:
+      nextStepIndex < 0
+        ? undefined
+        : (lines[nextStepIndex] ?? '').slice(RENDER_NEXT_STEP_PREFIX.length).trim(),
+    degenerate: !RENDER_HEAD_RE.test(head),
+  }
+}
+
+// ── B16 输出里不许有恒定块 ────────────────────────────────────────────────
+
+/** B16 的阈值：只有 ≥40 字符的行才算「恒定块」候选。 */
+const CONSTANT_BLOCK_MIN_CHARS = 40
+
+/**
+ * B16 取候选行：**只看 `verdict:` 行与 L2 行**（§3.1 规则 5）。
+ *
+ * 三处排除各对应一种**假红**（不排除就会误报）：
+ * - `[tool] …` 头行：同一个工具两份 fixture 恒同 → 永远红；
+ * - `nextStep:` 行：两份 fixture 给同一条下一步建议是**合法**的（§3 明说跨工具链里
+ *   不随结果变的那段属于描述②）；
+ * - 截断模板行：恒定模板，同 `n` 时逐字相同。
+ */
+function constantBlockCandidates(text: string): string[] {
+  const layers = splitRenderText(text)
+  const lines = [
+    ...(layers.verdict === undefined ? [] : [`${RENDER_VERDICT_PREFIX}${layers.verdict}`]),
+    ...layers.l2,
+  ]
+  return lines.filter((line) => line.length >= CONSTANT_BLOCK_MIN_CHARS)
+}
+
+/**
+ * B16 下界（§10.0）：**两份 fixture 都**必须真的产出候选行。
+ *
+ * 两份都为空时交集恒为空 → 判据**恒真**；只有一份为空时交集同样恒空 ——
+ * 所以下界要求的是「两份都非空」，不是「一共非空」。
+ *
+ * @param texts 各份 fixture 的渲染文本。
+ */
+function judgeConstantBlockCandidates(texts: readonly string[]): string[] {
+  const offenders: string[] = []
+  texts.forEach((text, index) => {
+    if (constantBlockCandidates(text).length === 0) {
+      offenders.push(
+        `第 ${String(index + 1)} 份 fixture 一条 ≥${String(CONSTANT_BLOCK_MIN_CHARS)} 字符的 verdict/L2 行都没有` +
+          ' —— 「共有行」恒为空，判据在空转',
+      )
+    }
+  })
+  return offenders
+}
+
+/** B16 判据：两份渲染文本之间**逐字相同**的候选行（空 = 通过）。 */
+function judgeConstantBlocks(first: string, second: string): string[] {
+  const secondSet = new Set(constantBlockCandidates(second))
+  return constantBlockCandidates(first).filter((line) => secondSet.has(line))
+}
+
+// ── B18b L3 的 why 不许逐字等于 L1 ────────────────────────────────────────
+
+/**
+ * 取出 L3 的 `<why>` 正文（§3.1「两支的逐字形状」里 B18b 的判定对象）。
+ *
+ * 工具支是 `<tool>(<args>) — <why>`，manual 支是 `<why>`。
+ *
+ * **为什么必须剥掉 `tool(args) — ` 那段前缀**：不剥的话，工具支的正文里恒有
+ * `tool(args)` 在前，就**永远不可能**等于 L1 —— 这条红线对工具支就**恒真**了，
+ * 而它要抓的恰恰是「把结论原样当 why 用」。
+ *
+ * ⚠️ 已知限度：用**第一个** ` — ` 切分。`why` 自己含 ` — ` 时会切早
+ * （合成夹具不会；真实工具若出现，见文末「已知限度」）。
+ *
+ * @param text 渲染文本。
+ */
+function nextStepWhy(text: string): string | undefined {
+  const body = splitRenderText(text).nextStep
+  if (body === undefined) return undefined
+  const at = body.indexOf(NEXT_STEP_TOOL_SEPARATOR)
+  return at < 0 ? body : body.slice(at + NEXT_STEP_TOOL_SEPARATOR.length)
+}
+
+/**
+ * B18b 判据：L3 的 `<why>` 不许逐字等于 L1。
+ *
+ * ⚠️ **这条是防御性症状监控，不是根因判据。** 根因是「没有动作的 `nextStep` 在类型上
+ * 写不出来」，由 **B18a** 守（要等 T2：需要五个工具齐）。与本条拆开的理由见 §10 B18b：
+ * **「结论恰好等于动作描述」是合法的**（由 B18a 排除），**「结论被当下一步复述」是坏的**（本条报警）。
+ */
+function judgeNextStepEchoesVerdict(text: string): string[] {
+  const verdict = splitRenderText(text).verdict
+  const why = nextStepWhy(text)
+  if (verdict === undefined || why === undefined) return []
+  return why === verdict ? [`L3 的 why 逐字等于 L1：${why}`] : []
+}
+
+// ── B22 audit 不进模型文本 ────────────────────────────────────────────────
+
+/** B22 判据：`audit` 的哨兵不许出现在渲染文本里。 */
+function judgeAuditLeak(text: string, sentinel: string): string[] {
+  return text.includes(sentinel) ? [`渲染文本里出现了 audit 的哨兵：${sentinel}`] : []
+}
+
+/**
+ * B22 下界（§10.0）：哨兵必须**真的**在 `data.audit` 里。
+ *
+ * 不查这一条的话，「文本里不含哨兵」在**哨兵压根没放进去**时也成立 —— 判据恒真。
+ *
+ * @param value 夹具的返回值。
+ * @param sentinel 哨兵字符串。
+ */
+function auditJsonOf(value: unknown): string | undefined {
+  const record = value as { data?: { audit?: unknown } }
+  try {
+    return JSON.stringify(record.data?.audit)
+  } catch {
+    return undefined
+  }
+}
+
+// ── 合成夹具 ──────────────────────────────────────────────────────────────
+
+/** 合成工具的 `key` 形状：**同时**含「按输入变」与「按环境变」的字段（§3.1 规则 6）。 */
+interface SyntheticKey {
+  /** 环境（临时 home）—— 两份 fixture 必须各用一份，否则 `resolved:` 恒同 → 假红。 */
+  home: string
+  /** 输入。 */
+  mode: string
+  /** 输入。 */
+  port: number
+}
+
+/** 合成工具的 `RenderTable`：L2 三行，其中一行来自**环境**。 */
+const SYNTHETIC_TABLE: RenderTable<SyntheticKey> = {
+  key: (data) => [
+    `resolved: dshHome=${data.key.home}`,
+    `change=${data.key.mode}`,
+    `port=${String(data.key.port)}`,
+  ],
+}
+
+/** 造一份合成的**成功** fixture。 */
+function okFixture<T>(
+  verdict: string,
+  key: T,
+  options: { audit?: unknown; nextStep?: NextStep } = {},
+): ToolResult<T> {
+  return {
+    ok: true,
+    data: { verdict, key, audit: (options.audit ?? {}) as ToolData<T>['audit'] },
+    ...(options.nextStep === undefined ? {} : { nextStep: options.nextStep }),
+  }
+}
+
+/** 造一份合成的**失败** fixture。 */
+function failFixture<T>(
+  kind: ToolErrorKind,
+  message: string,
+  verdict: string,
+  key: T,
+  options: { audit?: unknown; nextStep?: NextStep } = {},
+): ToolResult<T> {
+  return {
+    ok: false,
+    error: { kind, message },
+    data: { verdict, key, audit: (options.audit ?? {}) as ToolData<T>['audit'] },
+    ...(options.nextStep === undefined ? {} : { nextStep: options.nextStep }),
+  }
+}
+
+/** 渲染一份合成 fixture。 */
+function renderSynthetic(value: ToolResult<SyntheticKey>, toolName = 'dsh_synth'): string {
+  return renderToolResultText(toolName, value, SYNTHETIC_TABLE)
+}
+
+describe('B16 输出里不许有恒定块', () => {
+  it('两份 fixture（**输入与环境各不同**）之间没有 ≥40 字符的共有行', () => {
+    // 规则 6：**各用一份不同的临时 home**。这不是随便挑两份 —— `resolved:` 这类行
+    // 按**环境**恒定、不按输入恒定；共用同一个 home 时它必然逐字相同 → 假红。
+    const homeA = makeTempRoot('dsh-b16-a-')
+    const homeB = makeTempRoot('dsh-b16-b-')
+    const textA = renderSynthetic(
+      okFixture('the change applies live: hot reload is watching this profile', {
+        home: homeA,
+        mode: 'config',
+        port: 3080,
+      }),
+    )
+    const textB = renderSynthetic(
+      okFixture('a restart is required before the new code can take effect', {
+        home: homeB,
+        mode: 'host-code',
+        port: 3101,
+      }),
+    )
+
+    // 先立下界：任一fixture 产不出候选行，下面的「共有行」就是恒真的空转。
+    const unusable = judgeConstantBlockCandidates([textA, textB])
+    expect(unusable, `B16 判据空转 —— 「共有行」会恒为空：\n${unusable.join('\n')}`).toEqual([])
+    // 自证：两份的环境行确实不同（否则这条用例证明不了「环境也变了」）。
+    expect(textA).not.toContain(homeB)
+    expect(textB).not.toContain(homeA)
+
+    const offenders = judgeConstantBlocks(textA, textB)
+    expect(
+      offenders,
+      describeOffenders('输出里出现了恒定块', offenders) +
+        '\n恒定知识应当写在**描述层**（写一次），而不是每次输出都印一遍。',
+    ).toEqual([])
+  })
+
+  it('判据可被否证：注入一条恒定 ≥40 字符的 L2 行 → 红', () => {
+    const constant = 'resolved: dshHome=THIS_LINE_IS_IDENTICAL_IN_BOTH_FIXTURES'
+    const leakyTable: RenderTable<SyntheticKey> = { key: () => [constant] }
+    const textA = renderToolResultText(
+      'dsh_synth',
+      okFixture('first conclusion that differs from the second one', {
+        home: 'a',
+        mode: 'config',
+        port: 1,
+      }),
+      leakyTable,
+    )
+    const textB = renderToolResultText(
+      'dsh_synth',
+      okFixture('second conclusion that also differs from the first', {
+        home: 'b',
+        mode: 'host-code',
+        port: 2,
+      }),
+      leakyTable,
+    )
+    // 下界先过（两份都产出了候选行），所以下面的命中是真命中，不是空转。
+    expect(judgeConstantBlockCandidates([textA, textB])).toEqual([])
+    expect(judgeConstantBlocks(textA, textB)).toEqual([constant])
+  })
+
+  it('下界本身可被否证：候选行为空（含「只有一份为空」）→ 判红，不许 skip', () => {
+    const emptyTable: RenderTable<SyntheticKey> = { key: () => [] }
+    const key: SyntheticKey = { home: 'x', mode: 'config', port: 1 }
+    const shortA = renderToolResultText('dsh_synth', okFixture('short a', key), emptyTable)
+    const shortB = renderToolResultText('dsh_synth', okFixture('short b', key), emptyTable)
+
+    // 恒真：交集为空 —— 这正是必须补下界的那一类。
+    expect(judgeConstantBlocks(shortA, shortB)).toEqual([])
+    expect(judgeConstantBlockCandidates([shortA, shortB])).not.toEqual([])
+
+    // 「只有一份为空」同样让交集恒空，下界必须也抓住它。
+    const rich = renderSynthetic(
+      okFixture('a conclusion long enough to become a candidate line here', {
+        home: 'x',
+        mode: 'config',
+        port: 1,
+      }),
+    )
+    expect(judgeConstantBlocks(rich, shortA)).toEqual([])
+    expect(judgeConstantBlockCandidates([rich, shortA])).not.toEqual([])
+  })
+
+  it('别误伤：两份 fixture 共有的头行 / nextStep 行 / 截断模板行都不算恒定块', () => {
+    // 三处排除各对着一种假红。这里把三种**真的共有**的东西同时摆出来：
+    // ① 头行：工具名取得长到 ≥40 字符；② nextStep：两份给同一条（合法）；③ 截断模板行：同 n。
+    const longToolName = 'dsh_a_deliberately_very_long_synthetic_tool_name'
+    const shared = {
+      tool: 'dsh_dump_config',
+      why: 'read the composed tree to see which row is actually missing',
+    }
+    const truncatingTable: RenderTable<SyntheticKey> = {
+      maxKeyLines: 1,
+      key: (data) => [
+        `resolved: dshHome=${data.key.home}`,
+        'second line that is long enough to be a candidate here',
+        'third line that is also long enough to be a candidate',
+      ],
+    }
+    const textA = renderToolResultText(
+      longToolName,
+      okFixture(
+        'first conclusion long enough to be a candidate line',
+        {
+          home: 'a',
+          mode: 'config',
+          port: 1,
+        },
+        { nextStep: shared },
+      ),
+      truncatingTable,
+    )
+    const textB = renderToolResultText(
+      longToolName,
+      okFixture(
+        'second conclusion long enough to be a candidate too',
+        {
+          home: 'b',
+          mode: 'host-code',
+          port: 2,
+        },
+        { nextStep: shared },
+      ),
+      truncatingTable,
+    )
+
+    // 自证：这三样**真的**在文本里且**真的**两份共有 —— 否则「不报」是空转。
+    expect(textA.split('\n')[0]!.length).toBeGreaterThanOrEqual(CONSTANT_BLOCK_MIN_CHARS)
+    expect(textA.split('\n')[0]).toBe(textB.split('\n')[0])
+    expect(textA).toContain('2 more line(s) not shown')
+    expect(textB).toContain('2 more line(s) not shown')
+    expect(textA).toContain(shared.why)
+    expect(textB).toContain(shared.why)
+
+    // 判据：一个都不报。
+    expect(judgeConstantBlocks(textA, textB)).toEqual([])
+    // 而候选行确实非空（判据没在空转）。
+    expect(judgeConstantBlockCandidates([textA, textB])).toEqual([])
+  })
+})
+
+describe('B18b L3 的 why 不许逐字等于 L1', () => {
+  const VERDICT = 'the entry is mounted but its fiber never reached the active phase'
+
+  it('两支都覆盖：工具支与 manual 支的 why 都不等于 L1，且**两条都真的适用**', () => {
+    const cases: ReadonlyArray<{ label: string; nextStep: NextStep }> = [
+      {
+        label: '工具支',
+        nextStep: {
+          tool: 'dsh_dump_config',
+          args: { profile: 'web' },
+          why: 'read the composed tree to see which row is actually missing',
+        },
+      },
+      {
+        label: 'manual 支',
+        nextStep: { manual: true, why: 'rebuild the client bundle and refresh the page' },
+      },
+    ]
+
+    let applicable = 0
+    for (const item of cases) {
+      const text = renderSynthetic(
+        okFixture(VERDICT, { home: 'h', mode: 'config', port: 3080 }, { nextStep: item.nextStep }),
+      )
+      // 计数而不是静默 skip：`nextStep` 缺席时这条不适用，但**数量必须对得上**。
+      if (nextStepWhy(text) === undefined) continue
+      applicable += 1
+      const offenders = judgeNextStepEchoesVerdict(text)
+      expect(offenders, describeOffenders(`${item.label} 的 why 复述了 L1`, offenders)).toEqual([])
+    }
+    expect(applicable, '两条支一条都没适用 —— 判据空转（不许静默 skip）').toBe(cases.length)
+  })
+
+  it('判据可被否证：manual 支的 why 逐字等于 L1 → 红', () => {
+    // 这正是今天 `diagnose` 的形状：`ok({...data, verdict}, { why: verdict })` —— 同一个 const 绑两次。
+    const text = renderSynthetic(
+      okFixture(
+        VERDICT,
+        { home: 'h', mode: 'config', port: 3080 },
+        {
+          nextStep: { manual: true, why: VERDICT },
+        },
+      ),
+    )
+    expect(judgeNextStepEchoesVerdict(text)).not.toEqual([])
+  })
+
+  it('判据可被否证：**工具支**的 why 逐字等于 L1 也要红（证明剥掉了 `tool(args) — ` 前缀）', () => {
+    // 不剥前缀的话，工具支正文恒含 `tool(args)`，永远不可能等于 L1 → 这条对工具支恒真。
+    const text = renderSynthetic(
+      okFixture(
+        VERDICT,
+        { home: 'h', mode: 'config', port: 3080 },
+        {
+          nextStep: { tool: 'dsh_dump_config', why: VERDICT },
+        },
+      ),
+    )
+    expect(text).toContain(`${NEXT_STEP_TOOL_SEPARATOR}${VERDICT}`)
+    expect(judgeNextStepEchoesVerdict(text)).not.toEqual([])
+  })
+
+  it('别误伤：没有 nextStep 时本条不适用（而不是判红）', () => {
+    const text = renderSynthetic(okFixture(VERDICT, { home: 'h', mode: 'config', port: 3080 }))
+    expect(splitRenderText(text).nextStep).toBeUndefined()
+    expect(judgeNextStepEchoesVerdict(text)).toEqual([])
+  })
+})
+
+describe('B22 audit 不进模型文本', () => {
+  /** 足够独特，不会与描述/格式里的词撞。 */
+  const SENTINEL = 'SENTINEL_B22_9f3a1c_audit_must_not_reach_the_model'
+
+  it('成功与失败两档：哨兵真的在 audit 里，而渲染文本不含它', () => {
+    const key: SyntheticKey = { home: 'h', mode: 'config', port: 3080 }
+    const cases: ReadonlyArray<{ label: string; value: ToolResult<SyntheticKey> }> = [
+      {
+        label: '成功档',
+        value: okFixture('ok verdict line', key, { audit: { deep: [SENTINEL] } }),
+      },
+      {
+        label: '失败档',
+        value: failFixture('internal', 'something went wrong', 'failed verdict line', key, {
+          audit: { deep: [SENTINEL] },
+        }),
+      },
+    ]
+
+    for (const item of cases) {
+      // 下界：哨兵**真的**被放进去了（否则「不含它」恒真 —— §10.0）。
+      expect(
+        auditJsonOf(item.value),
+        `${item.label} 的哨兵没放进 audit —— 这条判据会恒真`,
+      ).toContain(SENTINEL)
+
+      const text = renderSynthetic(item.value)
+      const offenders = judgeAuditLeak(text, SENTINEL)
+      expect(
+        offenders,
+        describeOffenders(`${item.label} 把 audit 印进了模型文本`, offenders),
+      ).toEqual([])
+    }
+  })
+
+  it('判据非空转：把哨兵放进渲染文本（模拟旧版整块 JSON）→ 必须照出来', () => {
+    // 旧 render.ts 是 `stableJson(result.data)` —— 整块 JSON 进上下文，audit 必然在里面。
+    const leaking = `[dsh_synth] ok\nverdict: v\n${JSON.stringify({ audit: { deep: [SENTINEL] } })}`
+    expect(judgeAuditLeak(leaking, SENTINEL)).not.toEqual([])
+  })
+
+  it('下界本身可被否证：哨兵没放进 audit 时，文本当然不含它 —— 这正是必须查下界的理由', () => {
+    const value = okFixture('v', { home: 'h', mode: 'config', port: 1 }, { audit: {} })
+    expect(auditJsonOf(value)).not.toContain(SENTINEL)
+    // 「文本不含哨兵」照样成立 —— 所以只有下界能把这种空转拦下来。
+    expect(judgeAuditLeak(renderSynthetic(value), SENTINEL)).toEqual([])
   })
 })
 
@@ -1984,6 +2503,9 @@ describe('B23 观察层不许自己写文件', () => {
  * | 16 | B19 / B23 的 import 闭包 | 自写解析器：正则认 `import … from '<spec>'` 与副作用 `import '<spec>'`；只跟**相对**说明符；`.js` → `.ts` | **动态 `import()` 不跟**（写法 `await import('./x.js')` 会**漏**，属已知未覆盖）；**包名 import 不跟**（本仓零运行时依赖，且观察层不 import 官方包的值路径）；解析器靠文本，不用 TS 的模块图 —— 语法写法一换（`export … from`、重导出）可能漏。【已探明：闭包 18 文件 / 0 未解析】 |
  * | 17 | B19 的「允许清单」`ALLOWED_CREDENTIALS_VALUES` | 手写的**单一名字** `readCredentialsPresence` | `credentials.ts` 改名/新增别的**存在性**扫描函数会**误报**（红，需同步改这张表）；反过来，把一个取值函数**改名成** `readCredentialsPresence` 会绕过（那是刻意伪装，红线本来也防不住） |
  * | 18 | B23 的项目内写 helper 名单 `LOCAL_WRITE_HELPER_NAMES` | 手抄的 6 个名字 | **开放名单，必然漏**：换个名字（`persist()` / `emit()`）就绕过去了。它只挡「顺手抄了测试里的 `writeText`」这一种真实失误。**fs 那部分不是这条的功劳**（那是 B10） |
+ * | 19 | B16 的阈值 `CONSTANT_BLOCK_MIN_CHARS = 40` 与「**逐字**相等」的比对 | 阈值是我选的；**不做近似匹配**（§10.2 第 3 条） | 同一句话**同义改写 / 折行** → **漏**（这是**有意**不做的：近似匹配引入假红比漏更贵，见 §10.2）；阈值调大同样只是少抓，不会误红 |
+ * | 20 | B18b 用**第一个** ` — ` 切出 `<why>` 正文 | 依赖 §3.1 工具支的分隔符逐字是 ` — ` | `why` 自身含 ` — ` 时**切早** → 正文被判短 → **假绿**（工具支漏报）；分隔符换形状（如 `: `）→ 工具支正文含 `tool(args)` 前缀，该支变**恒真** |
+ * | 21 | B22 只查 `audit` 里放进去的**哨兵字符串** | 哨兵是我放的，`auditJsonOf` 用 `JSON.stringify` 读回 | `audit` 以**别的形态**泄漏（渲染时改名 / 编码 / 只印其中一个非哨兵叶子）→ **漏**。本条只覆盖「`audit` 这块或其中这个哨兵进了这段文本」 |
  *
  * **B10 已知未覆盖的写入通道**（明确列出，不静默排除）：
  * `process.binding`、原生 addon、`require()`（本仓纯 ESM）、把 fs 方法先赋给别的变量再调用
