@@ -6,7 +6,7 @@
 
 - 版本以 [package.json](package.json) 的 `version` 为准
 - **已发布到 npm**（当前版本见 [package.json](package.json)；`latest` 与 dist-tags 以 registry 为准）。**`0.2.0` 是第一个由 `release.yml` 发出的版本**（带 provenance）；`0.1.0` 是手动发的、**没有** provenance。SLSA 徽章的真实性判据写在 [README.md](README.md) 的徽章注释里（对**具体版本**查 attestations 端点）。版本线与判例见 [docs/PUBLISHING.md](docs/PUBLISHING.md)
-- **能力面 = 1 个技能 + 5 个工具**：4 个只读（`dsh_check_effect_mode` / `dsh_diagnose_plugin_load` / `dsh_check_auth` / `dsh_dump_config`）+ **1 个写侧** `dsh_hot_reload`（已实现、已真机验证；算法与关键语义见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §5）。`dsh_restart` **有意推迟**（方案见 [docs/RESTART-PLAN.md](docs/RESTART-PLAN.md)）
+- **能力面 = 1 个技能 + 5 个工具**：4 个只读（`dsh_check_effect_mode` / `dsh_diagnose_plugin_load` / `dsh_check_auth` / `dsh_dump_config`）+ **1 个写侧** `dsh_hot_reload`（已实现、已真机验证；算法与关键语义见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §5）。**目标形态与后续工具的归属见 [docs/SHAPE.md](docs/SHAPE.md)**（`dsh_restart` 有意推迟，排在最后）
 - **「只读」纪律只覆盖诊断半边**：写侧改动必须先落决策 —— 见 [.agents/notes/2026-10-13-write-side-tool-boundaries.md](.agents/notes/2026-10-13-write-side-tool-boundaries.md)；**边界由 `test/redlines.test.ts` 的 B10（诊断半边）与 B15（写侧只许碰进程内树）守着**
 
 ## 全局规则
@@ -56,19 +56,19 @@ git diff --check
 - 对外说明 → [README.md](README.md)（English）· [README_zh.md](README_zh.md)（中文）
 - 设计说明（**为什么这样分层**）→ [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - **宿主契约台账（已核 / 已实测的宿主事实，调宿主 API 前先查）** → [docs/HOST-CONTRACTS.md](docs/HOST-CONTRACTS.md)
-- **未做的工具的方案**（`dsh_restart`）+ 参考实现索引 → [docs/RESTART-PLAN.md](docs/RESTART-PLAN.md)
+- **插件形态方案（工具怎么分、JSON 怎么管、双通道、未做工具的归属、红线清单）** → [docs/SHAPE.md](docs/SHAPE.md)
 - 发布流程与判例 → [docs/PUBLISHING.md](docs/PUBLISHING.md)
 - 决策与依据 → [.agents/notes/](.agents/notes/)
 - 展示元数据 → `locale/en.json` · `locale/zh.json`（只住这里，别处只留指针）
 - 真机红线（**本机跑，不进 CI**）→ [test/integration/README.md](test/integration/README.md)
 - 发布态不变量 → [scripts/check-release.mjs](scripts/check-release.mjs)
 
-**四份文档的分工（别混）**：ARCHITECTURE 答「我们为什么这么设计」，HOST-CONTRACTS 答「宿主实际上是什么样」，
-RESTART-PLAN 答「还没做的那件事怎么做」，AGENTS（本文）答「在这个仓里怎么干活」。
+**五份文档的分工（别混）**：SHAPE 答「最终长什么样、接下来怎么改」，ARCHITECTURE 答「现在为什么这么设计、代价是什么」，
+HOST-CONTRACTS 答「宿主实际上是什么样」，PUBLISHING 答「怎么发」，AGENTS（本文）答「在这个仓里怎么干活」。
 
 ## 待办
 
-- [ ] **`dsh_restart`（唯一还没做的工具）**：方案见 [docs/RESTART-PLAN.md](docs/RESTART-PLAN.md)，
+- [ ] **`dsh_restart`（有意推迟，排在最后）**：方案见 [docs/SHAPE.md](docs/SHAPE.md) §6.1，
       动手前先读 [docs/HOST-CONTRACTS.md](docs/HOST-CONTRACTS.md) §2（拉起与恢复的契约）。
       **先 dry-run**；`danger-full-access` 档下 `ask` 会被确定性拒绝，语义要先定。
       （`dsh_hot_reload` 已完成并真机验证，已从本清单移除 —— 设计与宿主事实分别见
@@ -83,17 +83,16 @@ RESTART-PLAN 答「还没做的那件事怎么做」，AGENTS（本文）答「�
 - [ ] **`SkillReport.scoped` 真机不可观测**（`state.skill` 没有对外暴露面，pluginInventory 也不含插件内部状态）
       → v1.1 可考虑让本仓自己的某个工具报出「技能半边注册成了没有、几个 agent」，
       这样「注册了但没生效」这类问题不必靠 winner 反推。
-- [ ] `SKILL.md` §3.8 的「Fiber 级状态没有查询入口」已被证伪（见活跃坑 19）；正文是逐字复制的
-      v2.1.4 本体，**修正与否待用户拍板**。
+- [ ] **`SKILL.md` 已解冻**（维护者 2026-10-13 拍板）：技能**跟着插件一起演化**，不再逐字冻结在 v2.1.4。
+      要做两件：① **新增「干预」一节**，纳入写侧（`hot_reload` / `restart`）与派生（`sign_cookie`）工具
+      —— 原 SKILL 定位是「排障」、只含诊断，写侧与派生工具在原文里**没有家**；② 顺带修正 §3.8 前半句
+      「Fiber 级状态没有查询入口」（**已被证伪**，见活跃坑 19）。排期与形态见
+      [docs/SHAPE.md](docs/SHAPE.md) §9。**红线连带**：SHAPE §10 拟补 **B12b**（断言「干预」一节存在且非空），
+      否则「解冻了却没写」是静默的（现有 B12 **不比对 v2.1.4 原件**，只查 frontmatter 合规与正文长度 → 解冻不会让它变红）。
 - [ ] **非 Windows 的端口识别**（v1 只在 Windows 上查监听端口，见 `src/lib/ports.ts` 的早返回）。
       实现方向：Linux 用 `ss -ltnp`、macOS 用 `lsof -i`。
       **注意这事有个便宜可占**：CI 就在 ubuntu 上跑，所以这层**能被 CI 真正验证** ——
       与「只能本机红线」的那几项不同。做完要把 README 的「平台支持」一节同批改。
-- [ ] **两个真机红线脚本里硬编码的宿主 pid 已过期**（`leak-fix.ps1` 的 `-HostPid` 默认值、`bench-s1.ps1` 的
-      内联判断里那个数）：宿主重启过多次，写死的值不再指向宿主 → **保护实际失效**。
-      改法：按端口 3080 现查 pid（查不到就**什么都不杀**，fail-safe），别写常数。
-      （本轮只改了 [test/integration/README.md](test/integration/README.md) 的措辞 —— 见「不抄会漂的值」；
-      脚本本身按维护者边界「不改代码逻辑」未动。）
 - [ ] **CI 与本地平台不同**：本机是 Windows，CI 是 ubuntu。**任何写死平台行为的断言都会在 CI 上红**
       （首次推送就踩过：`probed === true` 那一条）。新增与平台相关的判据时，
       要么按平台分支断言，要么让两种平台的行为都被钉住。
@@ -285,3 +284,9 @@ RESTART-PLAN 答「还没做的那件事怎么做」，AGENTS（本文）答「�
     **基于源码的强推断**（它自己标了「没做变异测试」）。把 `summarize?.(result.evidence)` 摘掉复跑 →
     **2 条红**（`oldFiberUntouched=true` 那条 + 契约测试那条），还原 → 全绿。
     **推断不算钉死，变异才算。**
+38. **`edit` 工具会剥掉 `.ps1` 的 BOM**：本仓两个真机脚本改完 BOM 就没了（实测：改前 `EF BB BF`，
+    改后同一份文件 BOM=False）。同族于坑 32 —— **`prettier` 跳过 `.ps1`、CI 也不解析它**，
+    所以「本机全绿 + CI 全绿」照不出来，只有真拿 `powershell.exe`（5.1）parse 一次才现形
+    （无 BOM 时实测报 `PARSE-FAIL x14 :: Unexpected token '}'`）。
+    处置：用 `[IO.File]::WriteAllText($p, $txt, (New-Object Text.UTF8Encoding($true)))` 写回并复核头三字节。
+    **谁再改这两个 `.ps1`，改完必须重补 BOM。**

@@ -1,7 +1,7 @@
 # 宿主契约台账（已核事实）
 
 **本文职责**：把「我们在宿主上**核过什么、怎么核的**」集中在这里 —— 每条事实都带真源（宿主源码 `文件:行`）或实测证据（进程 / 端口 / 日志 / 时间）。
-**不负责**：我们自己的分层与设计取舍 → [ARCHITECTURE.md](ARCHITECTURE.md)；**未做的**工具的方案 → [RESTART-PLAN.md](RESTART-PLAN.md)；在这里怎么干活 → [AGENTS.md](../AGENTS.md)。
+**不负责**：我们自己的分层与设计取舍 → [ARCHITECTURE.md](ARCHITECTURE.md)；**插件最终形态与未做工具的方案** → [SHAPE.md](SHAPE.md)；在这里怎么干活 → [AGENTS.md](../AGENTS.md)。
 
 **读者**：任何要调宿主 API 的人、任何要判断「这条结论还能不能信」的人。**改代码前先来这里查，不要凭推断。**
 
@@ -115,5 +115,5 @@
 - `ctx.skills.register()` 的注册时机与 catalog 缓存失效是否正确配对（源码有实现，耦合读不出来）。
 - 审批门在真实 UI/策略下的表现（`danger-full-access` 档下 `ask` 会被确定性拒绝）。
 - `schemastery` 两个版本间的行为差异（运行时比检出新一个预发布号）。
-- 「重启后启动即唤醒」的时序（参考实现实测「启动后 3 秒 `agents.get()` 还取不到」）—— 见 [RESTART-PLAN.md](RESTART-PLAN.md) §9。
+- 「重启后启动即唤醒」的时序（参考实现实测「启动后 3 秒 `agents.get()` 还取不到」）—— 见 [SHAPE.md](SHAPE.md) §6.1。
 

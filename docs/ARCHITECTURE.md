@@ -1,7 +1,7 @@
 # dsh-plugin-debugging — 设计说明
 
 **本文职责**：这个插件**为什么这样分层**、每条设计的理由与代价。
-**不负责**：**宿主侧已核 / 未核的事实** → [HOST-CONTRACTS.md](HOST-CONTRACTS.md)（本文只引用结论，不重述证据）；**没做的工具的方案** → [RESTART-PLAN.md](RESTART-PLAN.md)；怎么在这个仓里干活 → [AGENTS.md](../AGENTS.md)；发布流程 → [PUBLISHING.md](PUBLISHING.md)；决策快照 → [.agents/notes/](../.agents/notes/)。
+**不负责**：**宿主侧已核 / 未核的事实** → [HOST-CONTRACTS.md](HOST-CONTRACTS.md)（本文只引用结论，不重述证据）；**插件最终长什么样、接下来怎么改** → [SHAPE.md](SHAPE.md)；怎么在这个仓里干活 → [AGENTS.md](../AGENTS.md)；发布流程 → [PUBLISHING.md](PUBLISHING.md)；决策快照 → [.agents/notes/](../.agents/notes/)。
 **读者纪律**：本文里的宿主行为结论都标了真源。**在跑的宿主**与**源码检出**常常不是同一个版本 —— 引用之前先确认哪一份。
 
 ---
