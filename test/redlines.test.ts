@@ -600,6 +600,33 @@ function collectMentionedToolNames(markdown: string): string[] {
   return [...markdown.matchAll(/\bdsh_[a-z0-9_]+/g)].map((match) => match[0])
 }
 
+/**
+ * 从一份 Markdown 里收集「**宣称存在**」的 `dsh_*` 记号。
+ *
+ * ## 为什么要在 B9 的基础上再窄一层
+ *
+ * B9 的原判据是「文档里出现闭集外的名字 = 文档在宣称一个不存在的工具」——
+ * 这个方向是对的，`dsh_restart` 那类**规划中**的工具名本不该被当成已存在。
+ *
+ * 但它**没有区分两种出现**：宣称它有，和**明确说它没有**。
+ * 而技能正文里「重启类动作有意排在最后、本插件不提供它」是**必须写**的 ——
+ * 不写，模型会去调一个不存在的工具（SHAPE §1 对「未做工具」的处置正是这一条）。
+ *
+ * ⇒ 处置：**按行判定**，只在同一行明确说了「不提供 / 尚未 / 没有」时放行。
+ * 措辞必须贴着那一行判定，所以这句话写在哪一行、在不在，都影响判据 ——
+ * 这是有意的：把「本插件没有这个工具」挪到别的段落，就不再算数。
+ *
+ * @param markdown 整份文档。
+ */
+function collectClaimedToolNames(markdown: string): string[] {
+  const denied = /不提供|尚未实现|尚未提供|还没有(这个)?工具|有意推迟|不在本仓/
+  return [...markdown.matchAll(/\bdsh_[a-z0-9_]+/g)]
+    .filter(
+      (match) => !denied.test(markdown.slice(match.index, markdown.indexOf('\n', match.index))),
+    )
+    .map((match) => match[0])
+}
+
 /** `src/tools/` 下的全部源码。 */
 const ALL_TOOL_SOURCES = readSourcesUnder('src/tools')
 
@@ -698,7 +725,7 @@ describe('B9 工具名是闭集', () => {
     const offenders: string[] = []
     let mentions = 0
     for (const corpus of corpora) {
-      for (const name of collectMentionedToolNames(corpus.text)) {
+      for (const name of collectClaimedToolNames(corpus.text)) {
         mentions += 1
         if (!EXPECTED_TOOLS.includes(name as (typeof EXPECTED_TOOLS)[number])) {
           offenders.push(`${corpus.path} 提到 ${name}，它不在闭集里`)
@@ -709,6 +736,21 @@ describe('B9 工具名是闭集', () => {
     expect(mentions, '四份语料里一个 dsh_* 记号都没扫到 —— 扫描器坏了').toBeGreaterThan(0)
 
     expect(offenders, describeOffenders('出现了闭集外的工具名', offenders)).toEqual([])
+  })
+
+  it('「说明尚不存在」才放行：换个说法就又变成宣称存在', () => {
+    // 窄的那一层**建立在那条宽的之上**：被放行的记号，全集里必须真的出现过。
+    // 否则「什么都没扫到」也能通过 —— 那正是坑 18 说的静默失败。
+    const denied = '本插件**不提供**它'
+    const sample = (text: string) =>
+      collectClaimedToolNames(`- 重启类动作（\`dsh_restart\`）${text}。\n`)
+    const deniedLine = `- 重启类动作（\`dsh_restart\`）${denied}。\n`
+    expect(collectMentionedToolNames(deniedLine)).toEqual(['dsh_restart'])
+    expect(sample(denied)).toEqual([])
+    // 中性措辞（「有意排在最后」没说不提供）⇒ 判它宣称存在。
+    expect(sample('**有意排在最后**')).toEqual(['dsh_restart'])
+    // 空集口径（什么都不放行）必须判红 —— 否则「工具尚未落地」那条正当用法也过不去。
+    expect(() => expect(sample(denied)).toEqual(['dsh_restart'])).toThrow()
   })
 
   it.skipIf(!toolHalfImplemented)('实现侧：文件在却提不出名字 = 红（不许降级成 skip）', () => {
@@ -1129,6 +1171,182 @@ describe('B12 技能文件本体', () => {
     const raw = readRepo(SKILL_REL)
     const body = raw.slice(raw.indexOf('\n---', 4) + 4).trim()
     expect(body.length).toBeGreaterThan(500)
+  })
+})
+
+/**
+ * B12b 判据：`SKILL.md` 里的「干预」一节**存在，且不是占位标题**。
+ *
+ * **为什么值得一条红线**：SKILL 正文已解冻（不再逐字冻结在 v2.1.4），
+ * 而**现有 B12 照不到这件事** —— 它只查 frontmatter 合规与正文长度，
+ * 「解冻了却没写」在它那里**看不出来**（正文只会变长，`>500` 照样成立）。
+ * 于是有一个真实且静默的缺口：写侧 `dsh_hot_reload` 与派生 `dsh_sign_cookie` **实现了、
+ * 却没进正文** —— 而模型读不到正文就等于没有这两个工具，于是它会去调一个不存在的东西、
+ * 或者退回重启那条更贵的路。
+ *
+ * **钉的是「这一节在、有实质内容」，不是「内容不许变」**：
+ * 正文会跟着插件一起演化，所以本判据**只认三件事** —— 标题在、正文不是占位、
+ * 写侧与派生两个工具都被提到。任何**逐字比对**都不写在这里：
+ * 那是解冻之前的东西，写回来等于把刚解开的冻又结上（SHAPE §9 / §10 的 B12 修订注）。
+ *
+ * 纯函数 + 断言两层：判定吃 Markdown 文本、返回违规清单，于是**反例在内存里造**
+ * （删掉那一节 / 只留占位标题 / 只写一半），不必去动真文件。
+ */
+
+/** 该节标题里必须出现的那个词。取前缀匹配，所以标题改措辞不必同批改判据。 */
+const INTERVENTION_HEADING_WORD = '干预'
+
+/** 该节正文的字符数下界（占位标题只有十来个字；真的一节是若干条结论）。 */
+const INTERVENTION_MIN_BODY_CHARS = 200
+
+/**
+ * 该节**必须**提到的工具：写侧与派生各一个。
+ *
+ * 写成字面量而不是从 `EXPECTED_TOOLS` 里筛：筛出来的那份会随闭集变化而自动变短 ——
+ * 工具被移除时判据跟着一起失效，于是「该节不再覆盖写侧」会静默通过。
+ * 这里要的是「删掉工具就有人来看」的方向，所以它是一个**必须同批维护**的点。
+ *
+ * ⚠️ **只列已实现的那两个**：重启类工具**有意排在最后、现在不存在**，
+ * 正文里写不写它由那时的形态决定，判据不该替它预设。
+ */
+const INTERVENTION_REQUIRED_TOOLS = ['dsh_hot_reload', 'dsh_sign_cookie'] as const
+
+/** 该节至少要有这么多条要点（拆成列表的那几条 `-`），否则「有内容」判据太松。 */
+const INTERVENTION_MIN_BULLETS = 4
+
+/**
+ * 切出「干预」这一节的正文。
+ *
+ * 只认**标题行**（`#{1,6}` 开头且含那个词），到**下一个同级或更高级标题**为止。
+ * 两条刻意的取舍：
+ * - **不认正文里出现的那个词**：否则 §二、§五 里「见 §3.9」这种指针会被当成小节起点，
+ *   切出来的「正文」只剩一行指针 —— 判据看着在跑，量的是指针。
+ * - **切到同级标题为止**，不是切到下一个标题：子标题属于这一节，切早了会少算内容。
+ *
+ * @param markdown 整份 Markdown。
+ * @returns 标题行（没找到时为空串）与正文（不含标题行）。
+ */
+function interventionSectionOf(markdown: string): { heading: string; body: string } {
+  const lines = markdown.replace(/\r\n/g, '\n').split('\n')
+  const body: string[] = []
+  let heading = ''
+  let level = 0
+  for (const line of lines) {
+    const found = new RegExp(`^(#{1,6})\\s+.*${INTERVENTION_HEADING_WORD}`).exec(line)
+    if (found?.[1] !== undefined) {
+      heading = line
+      level = found[1].length
+      continue
+    }
+    if (heading === '') continue
+    const next = /^(#{1,6})\s/.exec(line)
+    if (next?.[1] !== undefined && next[1].length <= level) break
+    body.push(line)
+  }
+  return { heading, body: body.join('\n') }
+}
+
+/**
+ * B12b 的判定：返回违规清单（空 = 通过）。
+ *
+ * @param markdown 整份 `SKILL.md`。
+ */
+function judgeInterventionSection(markdown: string): string[] {
+  const { heading, body } = interventionSectionOf(markdown)
+  if (heading === '') {
+    return [`没有以「${INTERVENTION_HEADING_WORD}」为标题的小节 —— 写侧与派生工具在正文里没有家`]
+  }
+
+  const text = body.trim()
+  const offenders: string[] = []
+  if (text.length < INTERVENTION_MIN_BODY_CHARS) {
+    offenders.push(
+      `「${INTERVENTION_HEADING_WORD}」一节的正文只有 ${text.length} 字符` +
+        `（下界 ${INTERVENTION_MIN_BODY_CHARS}）：是占位标题，不是内容`,
+    )
+  }
+  const bullets = text.split('\n').filter((line) => /^\s*[-*]\s+\S/.test(line))
+  if (bullets.length < INTERVENTION_MIN_BULLETS) {
+    offenders.push(
+      `「${INTERVENTION_HEADING_WORD}」一节只有 ${bullets.length} 条要点` +
+        `（下界 ${INTERVENTION_MIN_BULLETS}）：内容还没拆开写`,
+    )
+  }
+  for (const tool of INTERVENTION_REQUIRED_TOOLS) {
+    if (!new RegExp(`\\b${tool}\\b`).test(text)) {
+      offenders.push(`「${INTERVENTION_HEADING_WORD}」一节没提到 ${tool} —— 该工具在正文里没有家`)
+    }
+  }
+  return offenders
+}
+
+describe('B12b 技能正文的「干预」一节存在且非空（否则「解冻了却没写」是静默的）', () => {
+  const SKILL_REL = 'skills/dsh-plugin-debugging/SKILL.md'
+
+  it('提取器本身有效：找得到那一节、找不到也照实说', () => {
+    const withSection = [
+      '# T',
+      '',
+      '### 3.9 干预 —— 判断之后的动作',
+      '',
+      '- 一条',
+      '- 两条',
+      '',
+    ].join('\n')
+    expect(interventionSectionOf(withSection).heading).toBe('### 3.9 干预 —— 判断之后的动作')
+    // 正文里提到「干预」不算数 —— 指针会被误当成小节起点，切出来只剩一行（见函数注释）。
+    const withPointerOnly = [
+      '# T',
+      '',
+      '先判断，再动手（见 §3.9 干预）。',
+      '',
+      '### 3.8 别的一节',
+    ].join('\n')
+    expect(interventionSectionOf(withPointerOnly).heading).toBe('')
+  })
+
+  it('判据可被否证：删掉那一节 / 只留占位标题 / 只写一半，三种都会被照出来', () => {
+    const full = [
+      '---',
+      'name: x',
+      '---',
+      '',
+      '### 3.9 干预',
+      '',
+      '**写侧 `dsh_hot_reload`**：换代码，不重启宿主。',
+      '',
+      '- 什么时候用：刚改完插件宿主端代码，进程不动。',
+      '- 给目标的方式：`entryId` / `module` / `serverName` 恰好给一个。',
+      '- 第一次先带 `dryRun: true` 预览。',
+      '- 失败会放回旧版本，L2 里的 `rolledBack` 说明树被碰过没有。',
+      '',
+      '**派生 `dsh_sign_cookie`**：让脚本带上凭证。',
+      '',
+      '- 401 之后用它，让脚本与命令行客户端带上凭证。',
+      '- cookie 值刻意不进返回值，报的是签成了、绑在哪个 authority。',
+      '',
+      '### 3.10 下一节',
+    ].join('\n')
+
+    // ① 完整的一份要过 —— 否则下面三条「会红」就毫无意义。
+    expect(judgeInterventionSection(full)).toEqual([])
+
+    // ② 整节删掉（解冻了却没写的那一种）。
+    expect(
+      judgeInterventionSection(full.replace(/### 3\.9 干预[\s\S]*?(?=### 3\.10)/, '')),
+    ).not.toEqual([])
+    // ③ 只留标题 —— 这正是本条要挡的「占位标题看起来像写了」。
+    const placeholder = '### 3.9 干预\n\n待补。\n\n### 3.10 下一节\n'
+    expect(judgeInterventionSection(placeholder)).not.toEqual([])
+    // ④ 同一节的正文在，但只覆盖写侧、漏了派生。
+    expect(judgeInterventionSection(full.replace(/`dsh_sign_cookie`/g, '（不写了）'))).not.toEqual(
+      [],
+    )
+  })
+
+  it('SKILL.md 里有这一节，写侧与派生两个工具都在里面', () => {
+    const offenders = judgeInterventionSection(readRepo(SKILL_REL))
+    expect(offenders, describeOffenders('「干预」一节的判据没过', offenders)).toEqual([])
   })
 })
 
@@ -4160,6 +4378,7 @@ function nullPrototypeToPlain(value: unknown): unknown {
  * | 34 | B26 的覆盖面 = `redlineCorpus()` 那 10 条 + **本文件自带的 1 条带启动日志的夹具** | 夹具是我造的；诊断工具的**第三种**返回路径（如某条新的失败分支）不在语料里 → 那条路不被本条看见。加分支时**同批加 fixture** | 同 #27，与 B21 共用同一个语料源 |
  * | 35 | B26 用 `isDeepStrictEqual` 比往返结果（**不是** `toEqual`） | `toEqual` 忽略值为 `undefined` 的属性 —— 恰好放过本条要抓的头号违规 | 换成 `toEqual` → 本条只剩 `isGuardFallback` 那一半在起作用（**已实测**：换掉之后 M3 变异不红了）。**别换** |
  * | 36 | B26 的 `isGuardFallback` 认的是 `data.audit.received` 这个键 | 它是 `src/lib/errors.ts` 的 `malformedResult` 独有的字段 | 某个工具自己开始往 `audit` 里写 `received` → **误报**（红，需同步改这一条）；反过来，`malformedResult` 改了合成形状而不再写 `received` → 本条对兜底**失明**（假绿）。改 `malformedResult` 时必须同批看 B26。【已探明】 |
+ * | 37 | B12b 的**四条下界**（正文 ≥200 字符 / ≥4 条要点 / 提到 `dsh_hot_reload` / 提到 `dsh_sign_cookie`）与「标题里含『干预』」 | 阈值与**工具名清单**都是我定的：它们把「解冻了却没写」这一种缺口挡住，但**不是**「内容不许变」 | 那三个阈值是**量级**而非合同：正文明显更短（拆得更碎）→ **红**（响亮，人来看）；工具名清单是**手抄的一份**，写侧 / 派生出第二个工具而没加进 `INTERVENTION_REQUIRED_TOOLS` → **漏**（假绿），加工具时必须同批改它。**刻意不做的**：与任何原文的逐字比对 —— 那会把解冻又变成冻结 |
  *
  * **B10 已知未覆盖的写入通道**（明确列出，不静默排除）：
  * `process.binding`、原生 addon、`require()`（本仓纯 ESM）、把 fs 方法先赋给别的变量再调用

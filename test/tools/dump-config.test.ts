@@ -25,12 +25,7 @@ import {
   DESCRIPTION_MAX_CHARS,
   DESCRIPTION_MAX_LINES,
 } from '../../src/tools/describe.ts'
-import {
-  ensureToolResult,
-  TOOL_ERROR_KINDS,
-  toolResultProblem,
-  type JsonValue,
-} from '../../src/lib/errors.ts'
+import { ensureToolResult, TOOL_ERROR_KINDS, toolResultProblem } from '../../src/lib/errors.ts'
 import {
   cmdResult,
   configFor,
@@ -39,7 +34,10 @@ import {
   expectFail,
   expectOk,
   recordingSpawn,
+  renderText,
   run,
+  sharedSubstrings,
+  splitRender,
   tempDshHome,
 } from './helpers.ts'
 import type { CommandResult, RunCommandOptions } from '../../src/lib/exec.ts'
@@ -88,59 +86,6 @@ function dumpSpawn(
       stderr: configDump.stderr ?? '',
     })
   })
-}
-
-/**
- * 走**工具自己的声明**取模型可见文本（不直接调 `renderToolResultText`）。
- *
- * @param tool 工具定义。
- * @param value 工具的返回值。
- */
-function renderText(tool: ToolDefinition, value: unknown): string {
-  const blocks = tool.output.render({}, value as JsonValue) as unknown as { text?: string }[]
-  return blocks.map((block) => block.text ?? '').join('\n')
-}
-
-/** 按 §3.1 的冻结逐行格式切分渲染文本。 */
-function splitRender(text: string): {
-  head?: string
-  verdict?: string
-  l2: string[]
-  l3?: string
-} {
-  const headPattern = /^\[[\w_]+\] (ok|failed \([\w-]+\))$/
-  const truncPattern = /^\d+ more line\(s\) not shown — the full record is in the session log$/
-  const lines = text.split('\n')
-  const verdictIndex = lines.findIndex((line) => line.startsWith('verdict: '))
-  const nextStepIndex = lines.findIndex((line) => line.startsWith('nextStep:'))
-  return {
-    ...(lines.find((line) => headPattern.test(line)) === undefined
-      ? {}
-      : { head: lines.find((line) => headPattern.test(line)) }),
-    ...(verdictIndex < 0 ? {} : { verdict: lines[verdictIndex]?.slice('verdict: '.length) }),
-    l2: lines
-      .slice(verdictIndex + 1, nextStepIndex < 0 ? lines.length : nextStepIndex)
-      .filter((line) => !truncPattern.test(line)),
-    ...(nextStepIndex < 0
-      ? {}
-      : { l3: (lines[nextStepIndex] ?? '').slice('nextStep:'.length).trim() }),
-  }
-}
-
-/**
- * 找出 `a` 里**逐字出现在 `b` 中**的、长度 ≥`min` 的片段（B20b 的取交集手法）。
- *
- * @param a 描述文本。
- * @param b 渲染文本。
- * @param min 长度下限。
- */
-function sharedSubstrings(a: string, b: string, min: number): string[] {
-  const hits = new Set<string>()
-  for (let start = 0; start + min <= a.length; start += 1) {
-    const window = a.slice(start, start + min)
-    if (b.includes(window)) hits.add(window)
-  }
-  return [...hits]
 }
 
 /** 形状自检：`data` 恰好三键、结果过守卫（B21 的判据）。 */
@@ -304,7 +249,7 @@ describe('dsh_dump_config', () => {
       expect(resolved['dshHome']).toBe(dshHome)
       expect(resolved['dshHomeSource']).toBe('config')
       // 而且它必须出现在 L2 里（B17：下一步的 profile 参数得是模型见过的东西）。
-      const parts = splitRender(renderText(tool, await run(tool, { profile: 'tui' })))
+      const parts = splitRender(renderText(tool, {}, await run(tool, { profile: 'tui' })))
       expect(parts.l2.some((line) => line.includes('profile=tui'))).toBe(true)
     })
 
@@ -377,7 +322,7 @@ describe('dsh_dump_config', () => {
       // 这条 actionabel 与已知误报不是一回事 —— 结论必须说清。
       expect(String(failure.data.verdict)).toContain('not the preset-* false positive')
       // 模型要拿 path / entryId 去定位那一行 → 必须印在 L2。
-      const parts = splitRender(renderText(tool, result))
+      const parts = splitRender(renderText(tool, {}, result))
       expect(
         parts.l2.some((line) => line.startsWith('actionable:') && line.includes('entryId=entry-2')),
       ).toBe(true)
@@ -393,7 +338,7 @@ describe('dsh_dump_config', () => {
       const failure = expectFail(await run(tool, {}))
       expectSubstantiveVerdict(failure.data.verdict)
       // 渲染出来的 `verdict:` 行必须与 data.verdict 逐字一致（L1 唯一来源）。
-      const rendered = renderText(tool, await run(tool, {}))
+      const rendered = renderText(tool, {}, await run(tool, {}))
       const parts = splitRender(rendered)
       expect(parts.verdict).toBe(failure.data.verdict)
       expect(parts.head).toBe(`[${DUMP_CONFIG_TOOL}] failed (command-failed)`)
@@ -455,7 +400,7 @@ describe('dsh_dump_config', () => {
         why: expect.stringContaining('retry'),
       })
       // B17：args 里的 profile 必须出现在 L1/L2 里。
-      const parts = splitRender(renderText(tool, result))
+      const parts = splitRender(renderText(tool, {}, result))
       const haystack = [parts.verdict ?? '', ...parts.l2].join('\n')
       expect(haystack).toContain('profile=web')
     })
@@ -472,7 +417,7 @@ describe('dsh_dump_config', () => {
       expectSubstantiveVerdict(failure.data.verdict)
       expect(failure.nextStep).toEqual({ manual: true, why: expect.stringContaining('caller') })
       // manual 支在文本里不印 `— `、不印空括号。
-      const text = renderText(tool, result)
+      const text = renderText(tool, {}, result)
       expect(text).not.toContain('nextStep: — ')
       expect(splitRender(text).l3?.startsWith('(')).toBe(false)
     })
@@ -532,7 +477,7 @@ describe('dsh_dump_config', () => {
       expectShape(result)
       expect((failure.data.key['actionable'] as unknown[]).length).toBe(20)
 
-      const text = renderText(tool, result)
+      const text = renderText(tool, {}, result)
       const parts = splitRender(text)
       // 默认上限 15 行。
       expect(parts.l2).toHaveLength(15)
@@ -543,7 +488,7 @@ describe('dsh_dump_config', () => {
     it('形状不合法的值退化成一行，不抛', async () => {
       const dshHome = await tempDshHome()
       const tool = createDumpConfigTool(depsFor(configFor(dshHome)))
-      const text = renderText(tool, { nonsense: true })
+      const text = renderText(tool, {}, { nonsense: true })
       expect(text).toBe(`[${DUMP_CONFIG_TOOL}] {"nonsense":true}`)
     })
 
@@ -565,7 +510,7 @@ describe('dsh_dump_config', () => {
       // 直接 `for…of` / `.length` 会当场抛。
       let text = ''
       expect(() => {
-        text = renderText(tool, fallback)
+        text = renderText(tool, {}, fallback)
       }, '守卫合成的兜底把渲染层打崩了').not.toThrow()
       expect(text).toContain('verdict:')
       expect(text).toContain('resolved: unknown (the guard synthesized this result)')
@@ -585,7 +530,7 @@ describe('dsh_dump_config', () => {
         ...(result as unknown as Record<string, unknown>),
         data: { ...(raw.data ?? {}), audit: { deep: { secret: sentinel } } },
       }
-      const text = renderText(tool, patched)
+      const text = renderText(tool, {}, patched)
       expect(text).toContain('verdict:')
       expect(text).not.toContain(sentinel)
       // 也不许有整块 pretty JSON（两空格缩进的块）。
@@ -606,7 +551,7 @@ describe('dsh_dump_config', () => {
       const hasTool = typeof step.tool === 'string' && step.tool !== ''
       const hasManual = step.manual === true
       expect(hasTool !== hasManual).toBe(true)
-      const parts = splitRender(renderText(tool, result))
+      const parts = splitRender(renderText(tool, {}, result))
       expect(parts.l3).not.toBe(parts.verdict)
       expect(parts.l3).not.toBe('')
     })
@@ -615,7 +560,7 @@ describe('dsh_dump_config', () => {
       const dshHome = await tempDshHome()
       const { spawn } = dumpSpawn({ exitCode: 0, stdout: schemaOut([]) })
       const tool = createDumpConfigTool(depsFor(configFor(dshHome), { spawn }))
-      const text = renderText(tool, await run(tool, {}))
+      const text = renderText(tool, {}, await run(tool, {}))
       const parts = splitRender(text)
       expect(parts.head).toBe(`[${DUMP_CONFIG_TOOL}] ok`)
       expect(parts.verdict).not.toBeUndefined()
@@ -648,7 +593,7 @@ describe('dsh_dump_config', () => {
       const secondResult = await run(secondTool, {})
 
       const candidates = (tool: ToolDefinition, value: unknown): string[] => {
-        const parts = splitRender(renderText(tool, value))
+        const parts = splitRender(renderText(tool, {}, value))
         return [parts.verdict ?? '', ...parts.l2].filter((line) => line.length >= 40)
       }
       const a = candidates(first, firstResult)
@@ -657,8 +602,8 @@ describe('dsh_dump_config', () => {
       // 下界：两份都要真的吐出候选行，否则「交集为空」是空转。
       expect(a.length, '第一份 fixture 没有 ≥40 字符的行 —— 判据空转').toBeGreaterThan(0)
       expect(b.length, '第二份 fixture 没有 ≥40 字符的行 —— 判据空转').toBeGreaterThan(0)
-      expect(splitRender(renderText(first, firstResult)).verdict).not.toBe(
-        splitRender(renderText(secondTool, secondResult)).verdict,
+      expect(splitRender(renderText(first, {}, firstResult)).verdict).not.toBe(
+        splitRender(renderText(secondTool, {}, secondResult)).verdict,
       )
       const shared = a.filter((line) => b.includes(line))
       expect(shared, `两份 fixture 共有的恒定行：${shared.join(' | ')}`).toEqual([])
@@ -683,7 +628,7 @@ describe('dsh_dump_config', () => {
 
       const description = composeDescription(DUMP_CONFIG_DESCRIPTION)
       for (const tool of [clean, falsePositive]) {
-        const text = renderText(tool, await run(tool, {}))
+        const text = renderText(tool, {}, await run(tool, {}))
         const shared = sharedSubstrings(description, text, 40)
         expect(shared, `描述里逐字抄了输出：${shared.join(' | ')}`).toEqual([])
       }

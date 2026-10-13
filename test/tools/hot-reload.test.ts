@@ -61,7 +61,17 @@ import {
   type JsonValue,
   type NextStep,
 } from '../../src/lib/errors.ts'
-import { configFor, depsFor, execWith, expectFail, expectOk, run, tempDshHome } from './helpers.ts'
+import {
+  configFor,
+  depsFor,
+  execWith,
+  expectFail,
+  expectOk,
+  renderText,
+  run,
+  splitRender,
+  tempDshHome,
+} from './helpers.ts'
 
 const ENTRY_URL = 'file:///repo/pkg-a/lib/index.js'
 const DEP_URL = 'file:///repo/pkg-a/lib/dep.js'
@@ -1032,46 +1042,6 @@ describe('dsh_hot_reload · 工具层', () => {
     expect(toolStep(failed.nextStep).tool).toBe('dsh_diagnose_plugin_load')
   })
 })
-
-/**
- * 从工具自己的 `output.render` 取模型可见文本。
- *
- * 不直接调 `renderToolResultText`：`toolOutput()` 已经绑好了工具名与输出表，
- * 直接调渲染函数就多一个「红线自己拼装」的漂移点。
- *
- * @param tool 工具定义。
- * @param args 调用参数（渲染用）。
- * @param value 工具的返回值。
- */
-function renderText(tool: ToolDefinition, args: unknown, value: unknown): string {
-  const blocks = tool.output.render(args, value as JsonValue) as unknown as { text?: string }[]
-  return blocks.map((block) => block.text ?? '').join('\n')
-}
-
-/**
- * 按 §3.1 的冻结逐行格式切分渲染文本（与红线实现同源的取数口）。
- *
- * @param text 渲染文本。
- */
-function splitRender(text: string): { head?: string; verdict?: string; l2: string[]; l3?: string } {
-  const headPattern = /^\[[\w_]+\] (ok|failed \([\w-]+\))$/
-  const truncPattern = /^\d+ more line\(s\) not shown — the full record is in the session log$/
-  const lines = text.split('\n')
-  const verdictIndex = lines.findIndex((line) => line.startsWith('verdict: '))
-  const nextStepIndex = lines.findIndex((line) => line.startsWith('nextStep:'))
-  return {
-    ...(lines.find((line) => headPattern.test(line)) === undefined
-      ? {}
-      : { head: lines.find((line) => headPattern.test(line)) }),
-    ...(verdictIndex < 0 ? {} : { verdict: lines[verdictIndex]?.slice('verdict: '.length) }),
-    l2: lines
-      .slice(verdictIndex + 1, nextStepIndex < 0 ? lines.length : nextStepIndex)
-      .filter((line) => !truncPattern.test(line)),
-    ...(nextStepIndex < 0
-      ? {}
-      : { l3: (lines[nextStepIndex] ?? '').slice('nextStep:'.length).trim() }),
-  }
-}
 
 describe('dsh_hot_reload · 形状（SHAPE §2.1 / §3.1 / §4.1）', () => {
   /** 造工具 + 依赖。 */

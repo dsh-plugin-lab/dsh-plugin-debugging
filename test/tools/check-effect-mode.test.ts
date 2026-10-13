@@ -26,12 +26,7 @@ import {
   DESCRIPTION_MAX_CHARS,
   DESCRIPTION_MAX_LINES,
 } from '../../src/tools/describe.ts'
-import {
-  ensureToolResult,
-  TOOL_ERROR_KINDS,
-  toolResultProblem,
-  type JsonValue,
-} from '../../src/lib/errors.ts'
+import { ensureToolResult, TOOL_ERROR_KINDS, toolResultProblem } from '../../src/lib/errors.ts'
 import { decideEffectMode, type EffectChangeKind, type EffectInput } from '../../src/lib/effect.ts'
 import {
   cmdResult,
@@ -42,7 +37,10 @@ import {
   expectOk,
   jumpingClock,
   recordingSpawn,
+  renderText,
   run,
+  sharedSubstrings,
+  splitRender,
   tempDshHome,
   writeProfile,
 } from './helpers.ts'
@@ -65,61 +63,6 @@ const CONFIG_WITHOUT_HMR = [
 
 /** hmr 所在的官方包名（放进 profile 的 `bundles` 就会被文件层探到）。 */
 const HMR_BUNDLE = '@deepseek-ai/dsh-hmr'
-
-/**
- * 走**工具自己的声明**取模型可见文本（不直接调 `renderToolResultText`）。
- *
- * 为什么：`toolOutput()` 已经绑好了工具名与输出表，直接调渲染函数就多一个「红线自己
- * 拼装」的漂移点；走 `tool.output.render` 才是宿主真正的取数口。
- *
- * @param tool 工具定义。
- * @param args 调用参数（渲染用）。
- * @param value 工具的返回值。
- */
-function renderText(tool: ToolDefinition, args: unknown, value: unknown): string {
-  const blocks = tool.output.render(args, value as JsonValue) as unknown as { text?: string }[]
-  return blocks.map((block) => block.text ?? '').join('\n')
-}
-
-/**
- * 按 §3.1 的冻结逐行格式切分渲染文本（与红线实现同源的取数口）。
- *
- * @param text 渲染文本。
- */
-function splitRender(text: string): { head?: string; verdict?: string; l2: string[]; l3?: string } {
-  const headPattern = /^\[[\w_]+\] (ok|failed \([\w-]+\))$/
-  const truncPattern = /^\d+ more line\(s\) not shown — the full record is in the session log$/
-  const lines = text.split('\n')
-  const verdictIndex = lines.findIndex((line) => line.startsWith('verdict: '))
-  const nextStepIndex = lines.findIndex((line) => line.startsWith('nextStep:'))
-  const head = lines.find((line) => headPattern.test(line))
-  return {
-    ...(head === undefined ? {} : { head }),
-    ...(verdictIndex < 0 ? {} : { verdict: lines[verdictIndex]?.slice('verdict: '.length) }),
-    l2: lines
-      .slice(verdictIndex + 1, nextStepIndex < 0 ? lines.length : nextStepIndex)
-      .filter((line) => !truncPattern.test(line)),
-    ...(nextStepIndex < 0
-      ? {}
-      : { l3: (lines[nextStepIndex] ?? '').slice('nextStep:'.length).trim() }),
-  }
-}
-
-/**
- * 找出 `a` 里**逐字出现在 `b` 中**的、长度 ≥`min` 的片段（B20b 的取交集手法）。
- *
- * @param a 描述文本。
- * @param b 渲染文本。
- * @param min 长度下限。
- */
-function sharedSubstrings(a: string, b: string, min: number): string[] {
-  const hits = new Set<string>()
-  for (let start = 0; start + min <= a.length; start += 1) {
-    const window = a.slice(start, start + min)
-    if (b.includes(window)) hits.add(window)
-  }
-  return [...hits]
-}
 
 /**
  * 断言一条 `verdict` 是**实质句子**，不是 `failed` 这种占位。
