@@ -868,8 +868,8 @@ describe('lib/hot-reload · 真机 LoadCache 形状（回归）', () => {
     return { get: (name: string) => (name === 'loader' ? loader : undefined) }
   }
 
-  it('import 期失败：kind 是 **reload-failed**（不是 internal），message 带真原因，hint 含 never touched', async () => {
-    const { loadCache } = makeRealisticLoadCache()
+  it('import 期失败：kind 是 **reload-failed**（不是 internal），message 带真原因，hint 含 never touched，且**缓存真的放回了**', async () => {
+    const { loadCache, has } = makeRealisticLoadCache()
     const ctx = makeCtx(loadCache, {
       importThrows: new Error('SyntaxError: Unexpected token on disk'),
     })
@@ -887,18 +887,17 @@ describe('lib/hot-reload · 真机 LoadCache 形状（回归）', () => {
       expect(outcome.failure.hint).toContain('never touched')
       // **这一条正是真机红的核心**：绝不能再把 Node 内部文案当原因。
       expect(outcome.failure.message).not.toContain('must be of type string')
+      // ⚠️ 只断言「没变成 internal」是**不够的**：`write` 只要把异常吞掉并返回 false，
+      // 症状就消失了 —— 但缓存其实**没放回**，那是另一种静默坏（下次 import 会重新求值）。
+      // 真正的根因判据是「放回**成功**」：`set` 必须用对那个 type。
+      expect(outcome.failure.hint).not.toContain('could not be fully restored')
     }
-    const result = outcomeToToolResult(outcome)
-    expect(result.ok).toBe(false)
-    if (!result.ok) {
-      expect(result.error.kind).toBe('reload-failed')
-      expect(result.error.kind).not.toBe('internal')
-    }
+    expect(has(ENTRY_URL)).toBe(true)
   })
 
-  it('工具层同样：真机失败签名不再出现 internal', async () => {
+  it('工具层同样：真机失败签名不再出现 internal，且缓存放回成功', async () => {
     const dshHome = await tempDshHome()
-    const { loadCache } = makeRealisticLoadCache()
+    const { loadCache, has } = makeRealisticLoadCache()
     const ctx = makeCtx(loadCache, { importThrows: new Error('boom from disk') })
     const tool = createHotReloadTool({
       ...depsFor(configFor(dshHome)),
@@ -911,6 +910,9 @@ describe('lib/hot-reload · 真机 LoadCache 形状（回归）', () => {
     expect(error.hint).toContain('never touched')
     expect(error.message).not.toContain('must be of type string')
     expect(TOOL_ERROR_KINDS).toContain(error.kind)
+    // 根因判据：缓存放回**成功**（不是「把异常吞掉」）。
+    expect(error.hint).not.toContain('could not be fully restored')
+    expect(has(ENTRY_URL)).toBe(true)
   })
 
   it('`include:<id>` 能匹配（诊断的输出必须能直接喂回重载）', async () => {
