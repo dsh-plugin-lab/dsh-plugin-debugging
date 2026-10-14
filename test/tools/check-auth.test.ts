@@ -7,7 +7,9 @@
  * 分四块：
  *
  * 1. **行为**：两档核心区分（`not-running` / `auth`）+ 其余可达 kind（按新契约取数，
- *    `hint` 已不存在）；
+ *    `hint` 已不存在）。**401 那条另有本文件的头号判据**：本工具**不发送凭据**，
+ *    所以它拿到的 401 是匿名 401 —— 判定与下一步**不许**随「凭证文件里有没有条目」变
+ *    （旧文案正是拿凭据解释它，已删）；
  * 2. **形状**（SHAPE §2.1 / §3.1 / §4.1）：四段描述、三层文本、`data` 恰好三键、
  *    `nextStep` 必须带动作、恒定块不许进输出、`audit` 不许进模型文本；
  * 3. **凭证形状**（缺 C 的回归守卫）：`records:` 段下的**合体键**
@@ -177,6 +179,30 @@ describe('dsh_check_auth', () => {
       // 旧 `credentials.note` 那句逐字不许再出现在任何一段描述里（它已不存在于输出层）。
       expect(text).not.toContain('does not read values or sign cookies')
     })
+
+    it('描述层不许把 401 说成「authority 变了」（本工具发不出凭据）', () => {
+      const text = composeDescription(CHECK_AUTH_DESCRIPTION)
+
+      // 上界（断语义、不断词）：凡把 **401 与 authority 连起来**的那一行，都必须把结论
+      // **限定给浏览器页面**。理由就是 L1 的理由：本工具的探测不带凭据，它那条 401 是
+      // 匿名 401，推不出「authority 变了」；只有「带着 cookie 的页面」才适用这条机制。
+      // 旧文案 `A 401 usually means the authority changed: cookies are bound to host:port.`
+      // 没有这层限定 —— 把它改回去，这条必须红（本轮变异实测：红在这条断言上）。
+      const linking = text
+        .split('\n')
+        .filter((line) => line.includes('401') && line.includes('authority'))
+      expect(linking.length, '描述里没有一行同时提到 401 与 authority —— 判据空转').toBeGreaterThan(
+        0,
+      )
+      for (const line of linking) {
+        expect(line, `这一行把 401 与 authority 连起来了，却没限定给浏览器页面：${line}`).toContain(
+          'page',
+        )
+      }
+
+      // 下界：边界段必须点明「不发送凭据」这条事实 —— 没有它，「不说错」可能只是没说。
+      expect(text).toContain('signed or sent')
+    })
   })
 
   describe('成功路径', () => {
@@ -264,7 +290,8 @@ describe('dsh_check_auth', () => {
       expect(failure.message).toContain('401')
       expect(failure.message).toContain('not "not running"')
       // 失败分支也有实质 L1（`error.message` 不进模型文本，判定只能靠它）。
-      expect(failure.data.verdict).toContain('answered 401')
+      // ⚠️ 判据点的是「服务在、要鉴权」这个事实，不是旧文案里那句「answered 401 even though …」。
+      expect(failure.data.verdict).toContain('requires authentication (401)')
       expect(failure.data.verdict).not.toBe('failed')
 
       // 观测事实的家：`data.key.credentials`（四个字段全在）。
@@ -346,6 +373,65 @@ describe('dsh_check_auth', () => {
       const step = result.nextStep as { tool?: string; args?: Record<string, unknown> } | undefined
       expect(step?.tool).toBe(CHECK_AUTH_TOOL)
       expect(step?.args).toEqual({ port: 3080, host: '127.0.0.1' })
+    })
+
+    /**
+     * **本文件最重要的一条新判据**：未发送凭据时，401 **不得**被解释成凭据问题。
+     *
+     * 语义（不是词表）：`dsh_check_auth` 的探测**不带凭据**，所以 401 是**匿名 401**
+     * （服务在、要鉴权），对「存的凭据还有没有效 / authority 对不对」**零信息**。
+     * 因此「同一份 401 探测 + 不同的凭证文件」必须给出**逐字相同**的判定与下一步 ——
+     * 只要结论随凭据变，就是在拿凭据解释一条它根本没参与的探测（旧文案正是如此：
+     * `… answered 401 even though a browser-session grant is stored, so the authority is
+     * the likely mismatch …`）。
+     *
+     * 两条一起才是完整判据（坑 18 / 37）：
+     * ① **根因**：结论不随凭据变（把旧文案改回去 → 逐字不同 → 红）；
+     * ② **下界**：结论必须**明说自己答不了**凭据问题 —— 否则「写死一句与凭据无关的空话」
+     *    也能满足 ①。
+     */
+    it('401 的判定与凭据无关：条目在 / 不在都给同一句，且明说「答不了凭据问题」', async () => {
+      const withGrantHome = await tempDshHome()
+      await writeText(join(withGrantHome, '.credentials.yaml'), REAL_SHAPE)
+      const withGrant = createCheckAuthTool(
+        depsFor(configFor(withGrantHome), { fetch: fetchWithStatus(401) }),
+      )
+      const withoutGrantHome = await tempDshHome()
+      const withoutGrant = createCheckAuthTool(
+        depsFor(configFor(withoutGrantHome), { fetch: fetchWithStatus(401) }),
+      )
+
+      const first = await run(withGrant, { port: 3080 })
+      const second = await run(withoutGrant, { port: 3080 })
+      const failureA = expectFail(first)
+      const failureB = expectFail(second)
+
+      // 下界（坑 18）：两份都要真走到 401，而且**观测到的凭据确实不同** ——
+      // 否则「两句话相同」可能只是两次都没读到文件的空转。
+      expect(failureA.kind).toBe('auth')
+      expect(failureB.kind).toBe('auth')
+      expect(
+        (failureA.data.key['credentials'] as Record<string, unknown>)['browserSessionPresent'],
+      ).toBe(true)
+      expect(
+        (failureB.data.key['credentials'] as Record<string, unknown>)['browserSessionPresent'],
+      ).toBe(false)
+
+      // ① 根因判据：判定与下一步都**不许**随凭据变。
+      expect(failureA.data.verdict, '401 的 L1 随凭据变了 —— 等于拿凭据解释匿名 401').toBe(
+        failureB.data.verdict,
+      )
+      const whyA = (first.nextStep as { why?: string } | undefined)?.why
+      const whyB = (second.nextStep as { why?: string } | undefined)?.why
+      expect(whyA, '401 的 nextStep 随凭据变了').toBe(whyB)
+
+      // ② 下界：判定必须自己说清「这条 401 答不了凭据问题」，而不是含糊或编一个结论。
+      expect(failureA.data.verdict).toContain('requires authentication (401)')
+      expect(failureA.data.verdict).toContain('sends no credentials')
+      expect(failureA.data.verdict).toContain('cannot tell')
+      // 下一步指向**真能区分的那条路**（浏览器），不是旧文案那条编出来的「去改 authority」。
+      expect(whyA).toContain('browser')
+      expect(whyA).not.toContain('make the authority match')
     })
   })
 
@@ -591,26 +677,12 @@ describe('dsh_check_auth', () => {
       expect(serialized).not.toContain('fake-key-value')
     })
 
-    it('401 + 条目在 → 判定按「授权记录在，最可能是 authority 不匹配」分叉', async () => {
-      const dshHome = await tempDshHome()
-      await writeText(join(dshHome, '.credentials.yaml'), REAL_SHAPE)
-      const tool = createCheckAuthTool(depsFor(configFor(dshHome), { fetch: fetchWithStatus(401) }))
-
-      const failure = expectFail(await run(tool, { port: 3080 }))
-      expect(failure.data.verdict).toContain('a browser-session grant is stored')
-      const step = failure.nextStep as { manual?: boolean; why?: string } | undefined
-      expect(step?.why).toContain('browser address bar')
-    })
-
-    it('401 + 条目不在（文件根本没有）→ 判定按「得重新登录」分叉', async () => {
+    it('401 + 条目不在（文件根本没有）→ `key.credentials` 照实报 exists=false', async () => {
       const dshHome = await tempDshHome()
       const tool = createCheckAuthTool(depsFor(configFor(dshHome), { fetch: fetchWithStatus(401) }))
 
       const failure = expectFail(await run(tool, { port: 3080 }))
       expect((failure.data.key['credentials'] as Record<string, unknown>)['exists']).toBe(false)
-      expect(failure.data.verdict).toContain('no browser-session grant is stored')
-      const step = failure.nextStep as { manual?: boolean; why?: string } | undefined
-      expect(step?.why).toContain('sign in again')
     })
 
     /**

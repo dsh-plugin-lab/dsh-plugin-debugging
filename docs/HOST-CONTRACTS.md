@@ -213,6 +213,46 @@
 | C13 | **notice「太早投不到」**：`agents.get()` 只查 live（C5），客户端没重开就没有 agent | C5 + `dsh-agent/lib/index.js` | `[已核]` | 投递必须**轮询等待**；`dsh-restart` 的 60s 超时后**清 marker** ⇒ 清了就永久不恢复 |
 | C14 | ⚠️ **重启耗时只有下界，别当等待时长用**：启动器 pwsh 创建 → 新宿主 node 创建 ≈ **6.0 s**（`Win32_Process.CreationDate`）；**「端口可服务」那一刻没抓到** | 真机观察一次真实重启 | `[已实测]` | 6 s 是「启动器 → node 进程存在」的下界，**不是** helper 该等的时间；冷/热区间仍未测（要新起实例采样） |
 
+#### 2.4.1 冷会话的「自动激活」：`resolveAgent` 在没有客户端时**真的会 resume**（实测）
+
+**结论：会。** 在一个**新起的宿主进程**里、**没有任何客户端**（没开浏览器、没有任何 HTTP 调用）的情况下，`ctx.sessionController.resolveAgent(sessionId)` 会把一个**只有持久化日志、本进程尚未 attach** 的会话**真正拉起来**并返回 `{agent}`；紧接着 `agent.followup(...)` 能**立刻**投出 notice 并唤醒一个真实 turn。
+⇒ **这就是 `dsh_restart` 恢复半的「自动激活」通道**：新进程读 marker → 对名单里的每个会话调 `resolveAgent` → 成功就 `followup` 投 notice。**不需要人重开浏览器。**
+⚠️ **但不会自己回来**（C24）：没有任何东西在启动时自动激活会话 —— **不显式调 `resolveAgent`，会话就一直是冷的**。
+
+**实测环境**：隔离台（独立 `DSH_HOME` + 空闲端口 + junction，配方见 [test/integration/README.md](../test/integration/README.md) §0）；宿主 = 本机安装树那一份（见本文开头的版本锚点），`node v24.18.0`。探针是一个插进隔离 profile 的**插件**（走 `--patch`），因此它调用 `resolveAgent` 的上下文与 `dsh_restart` 恢复半**同一层**。会话由探针走 `sessionController.create` 造出（**那是 Web 客户端走的同一个宿主 API**，不是真浏览器 —— 见本节末尾的限度）。
+
+| # | 事实 | 证据（文件 + 检索串 / 实测读数） | 分级 | 影响 |
+|---|---|---|---|---|
+| C15 | **`resolveAgent` 对冷会话真的 resume**（不是只查 live） | 新进程 B 里：`before` 读数 `targetLive=false`、`otherLive=false`、`attachedSession=false`，而 `sessionPersistence.stat` 得 `found=true` / `formatStatus="current"`；随后 `resolveAgent(<真 id>)` → `hasError=false`、`hasAgent=true`、`agentId===target`、`status="idle"`，耗时 **62–85 ms** | `[已实测]` | 「无客户端时能不能拉起来」= **能** |
+| C16 | ⚠️ **负对照有效**：不存在的 id ⇒ `session/not-found`，从不「成功」 | 同一进程、同一调用面：`resolveAgent('session-<random-uuid>')` → `{error}`、`name=RemoteError`、`code=session/not-found`、`hasAgent=false`，耗时 **3–4 ms** | `[已实测]` | 判据不恒真；失败要按 `{error}` 分支判（同 C4） |
+| C17 | **不碰别的会话**（逐个唤醒是安全的） | 同一 `DSH_HOME` 下两个冷会话：只 resolve 其中一个后，另一个 `ctx.agents.get(...)` 仍是 `undefined`；两次单独 resolve 各自成功 | `[已实测]` | 按 marker 名单逐个 `resolveAgent` 不会把别的会话一起带起来 |
+| C18 | **会话按自己的原预设恢复** | 会话 A 建时 `agentPreset='standard'`、会话 B 建时 `agentPreset='ptc'`；重启后各自 resolve，`sessionProjections.snapshot(...).values.agentPreset` 分别读回 `"standard"` / `"ptc"` | `[已实测]` | 与 C4「按会话原预设」一致；恢复**不会**把预设换成当前默认 |
+| C19 | **权限 / 沙箱 / 审批档也来自会话日志，不是新进程的默认** | 恢复后会话日志里 `permission/preset={preset:"workspace-write"}`、`sandbox/mode={mode:"workspace-write"}`、`approval/policy={policy:"ask"}`；`projections.values.permissions.currentValue="workspace-write"` | `[已实测]` | `dsh_restart` 的两道门（审批档 / 文件沙箱档）在恢复后的会话上**仍是它原来那一档** |
+| C20 | **返回的 `{agent}` 可以立刻 `followup`**（无需等就绪窗口） | resolve 返回时 `status="idle"`；`agent.followup(notice)` **不抛**（29–33 ms），调用后立刻 `status="running"`；随后日志出现 `turn/start → step/start → user/message → request/header → assistant/attempt → step/end → turn/end`，`inbox.hasPending=false` | `[已实测]` | 「先 resolve 再 followup」这一串可以紧挨着做 |
+| C21 | **notice 落成一条持久的 user-role 消息；`form:'notice'` 与插件自定义 `source.kind` 都被接受** | 逐帧解压 `$DSH_HOME/sessions/<projectKey>/<sessionId>/session.v4.jsonl.zstd`：`agent/inbox/spliced` 的 `inserted[0]` 与随后的 `user/message` 都带 `source={kind:"dsh-plugin-debugging", form:"notice", summary:"…"}` | `[已实测]` | 投递通道（C12）在**冷恢复**这条路上同样成立 |
+| C22 | ⚠️ **`form:'notice'` 人看不看得见，取决于 `summary`**：客户端把 `summary` 放在**折叠行**上；`summary` 缺失或为空 ⇒ 退回 opaque | `dsh-client-ui-chat/lib/client.js` 的 `contextBody` 的 `case "notice"`（`noticeSummary` 为 null ⇒ opaque）与 `NoticeBody`；`CONTEXT_SUMMARY_MAX_CHARS = 120` | `[已核]` | notice **必须**带**非空** `summary`（≤120 字符），否则人看不见它是一行 notice |
+| C23 | ⚠️ **`followup` 是「唤醒」，不是「显示」**：它会真的开一个 turn | 同 C20 的事件序列；隔离台没有 API key，该 turn 以 `turn/end.reason={kind:"error", error:{code:"MISSING_CREDENTIAL"}}` 结束 | `[已实测]` | 自动激活的代价 = 每个被唤醒的会话**跑一个真实 turn**（模型会被调用） |
+| C24 | ⚠️ **不会自己回来**：启动后没有任何东西自动激活会话 | 进程起来后**等 5 秒**再观察：`targetLive=false`、`otherLive=false`、`attachedSession=false` —— 即使期间已经调过一次 `sessionController.list()`（客户端会调的那个面） | `[已实测]` | **恢复必须由我们显式调 `resolveAgent`**；不调就一直是冷的 |
+| C25 | **对 `resolveAgent` 没有「就绪窗口」**：服务一可用就能 resolve | 探针在 `ctx.get('sessionController')` 第一次返回非 `undefined` 的那一刻就调 `resolveAgent`（apply 后 **151–157 ms**），多次运行**全部成功**、**没有一次需要重试** | `[已实测]` | 与 C13 的「3 秒取不到 agent」**不是一回事**：那是对 `agents.get`；`resolveAgent` 按需 resolve |
+| C26 | ⚠️ **但 `sessionController` 在插件 `apply` 的第一刻取不到** | 同一探针在 apply 后的第一次 `ctx.get('sessionController')` 得到 `undefined`，要等到 **138–157 ms** 后才有（`-DelayMs 1500` 时读到 138 / 143 ms，服务那时早已在） | `[已实测]` | 启动期恢复**不能假设**服务已就绪：要**轮询等待**（或 inject），但**不需要** C13 那种秒级等待 |
+| C27 | **副作用（小、幂等）：resume 会给日志追加一条 `session/end-seed`，且仅当末条不是它** | 实测：末条为 `turn/end` 时 **53→54 行**；末条已是 `session/end-seed` 时 **65→65 行**（进程**存活中**隔 8 秒两次计数相同 ⇒ 不是收尾期写的）。机制见 `dsh-session/lib/index.js` 的 `session/end-seed` 追加分支（条件含 `this.log.at(-1)?.type !== "session/end-seed"`） | `[已实测]` + `[已核]` | 反复重启**不会**让日志无限增长；只有「上次结束在 turn 之后」的恢复会 +1 行 |
+| C28 | ✅ **闭环成立（端到端）**：新进程 + 旧会话日志 + 一份 `armed` 的 marker ⇒ 恢复半读 marker → `resolveAgent` → `followup` ⇒ **notice 真的落进那个会话的日志**，并且真的跑了一个 turn | 隔离实例：apply 时 marker `state="armed"`；**+3.0 s 采样（apply 后 3004 ms）仍读到 `armed`**，而 `trace` 里写下的 `consumed at` 是 apply 后 **2990 ms** ⇒ **判定已做出、那次写还没可见**；**+5.0 s 采样（5008 ms）已是 `consumed`**。逐帧解压该会话日志（**6 帧 / 20 行，只解第一帧得 1 行**）得 1 条 `user/message`，`source={kind:"dsh-plugin-debugging", form:"notice", summary:"host restarted at … - marker consumed"}`，正文含 `call dsh_check_effect_mode`；随后 `turn/start → … → turn/end` | `[已实测]` |
+| C29 | ✅ **幂等：已消费的 marker 不会再投一次**（否则每次开机都给发起者重投 notice、白跑一个 turn） | 再起一个进程：marker 从 apply 起就是 `consumed`、全程不变；同一会话日志里 notice 条数**不变**（3 → 3），按本次 marker 的 `at` 精确匹配仍是 **1** 条 | `[已实测]` |
+| C30 | ⚠️ **负对照有效：名单里有一个不存在的会话 ⇒ 整份 marker 保留 `armed`**（`trace` 里没有 `consumed` 行，+16 s 采样仍是 `armed`），**但已成功唤醒的那个会话照样收到 notice** ⇒ 「部分失败 ⇒ 整份保留、下次重投」在真机上成立 | marker 的 `sessions` = [真 id, `session-00000000-0000-4000-8000-000000000000`]：+1.5 / +3.0 / +5.0 / +8.0 / +12 / +16 s 六个采样点**全部** `armed`；同一会话日志里 notice 由 1 条增到 **2** 条 | `[已实测]` |
+| C31 | ⚠️ **但那一次 notice 的 `summary` 与盘上状态不符**：marker 留在 `armed` 的同时，投出去的 notice `summary` 仍是 `host restarted at <at> - marker consumed` | C30 那一次的两个读数并列：marker 文件 `state:"armed"`（无 `consumed` trace 行）↔ 会话日志里那条 `user/message` 的 `source.summary` 以 `- marker consumed` 结尾 | `[已实测]` |
+| C32 | ⚠️ **服务可用窗口与 C26 对不上（组合 / 行序相关，别混用）**：同一组合里 `fs` 在探针 apply 后 **2.2–2.5 s** 才可用、`sessionController` **2.4–2.8 s**；而 C26 记的是 **138–157 ms**。`include:dsh-plugin-debugging` 那一行的 `fiber.state` 变 `2`（active）也落在 **+2.5 s** 附近 —— 恢复半的 1 s 延迟是**从那一行 apply 起算**的，所以这两个数不能混着用 | 同一组合 3 次 observe 运行（探针每 25 ms 轮询 `ctx.get(...)`，并按 `Symbol.iterator` 读 `loader.entries()` 的 `fiber.state`） | `[已实测]`（读数）· **`[无法判定]`**（差异成因：C26 那次是另一套探针 / 另一个采样点，未插桩宿主的 apply 时刻） |
+
+⚠️ **本节取代 §5「还没核过的」里那两条**（「重启后启动即唤醒」的时序、「按会话原有预设」的语义）—— 它们现在都已实测，见 C15–C32。
+
+**未做 / 无法判定（如实记）**：
+
+- **闭环是把「退出之后的状态」与恢复半串起来跑的，不是 `dsh_restart` 整条链**：marker 由探针**手工复现**（内容用本仓自己的 `buildRestartMarker` / `serializeMarker` / `restartMarkerPath`，落盘由探针写），**没有**经过工具壳的「四道闸 → 审批门 → 写 marker → 计划任务拉起 → `appExit`」那一段。⇒ 「真工具触发 → 恢复」**仍未串起来跑**；被复现的只是「新进程 + 旧会话日志 + armed marker」这个**恢复半的输入状态**（marker 的写入路径本身由 §2.6 / `restart-fs.ts` 单独实测）。
+- **会话是探针用 `sessionController.create` 造的**（Web 客户端走的同一个宿主 API），**不是真浏览器建的** ⇒ 「真实客户端建的会话能否同样冷恢复」**没有单独实测**。但冷恢复读的只有持久化日志（`found=true` / `formatStatus="current"`），路径同一条；本次 C28 的 notice 也确实落进了它。
+- **Web UI 里的确切样子**：没有开浏览器 ⇒ 只能给 `[已核]`（客户端源码把 `notice` 渲染成带 `summary` 的 context 行），**不是** `[已实测]`。
+- **有 API key 时那个被唤醒的 turn 会怎样**（notice 被模型消费后还留不留痕）：隔离台没有凭据 ⇒ **`[无法判定]`**。
+- **日志读法本身踩过一个坑**（供复验者用）：`session.v4.jsonl.zstd` 是**多帧 zstd**（C15–C27 那轮实测 `magicCount=14`），而 `zlib.zstdDecompressSync` **只解第一帧**、`createZstdDecompress` 流式读在这里**也只吐出第一帧** ⇒ 会得出「日志里只有一个 session 头、没有事件」的**错结论**。正解是**自己按魔数 `28 b5 2f fd` 切帧逐帧解**（C15–C27 那轮 14 帧全解出、42 行事件；本轮闭环复验再测一次：同一份日志**只解第一帧得 1 行、逐帧解得 6 行 / 10 行**，见 C28 / C29）。**切帧要校验每一帧都解得开**（切错会抛，不会静默变短）。
+  ⚠️ **同一族的第二个坑**：事件里的消息字段在 `event.data` 下（`user/message` 的 `dataKeys` = `id` / `role` / `content` / `source`），**不在 `event.message` 下**；只读后者会把 `noticeCount` 读成 **0**（本轮第一版提取器就是这样，**差点据此得出「notice 没落地」的反结论** —— 与坑 18 同族）。
+
 ### 2.5 marker 的落盘通道（两条并列记；**落点选择不是本文的事**）
 
 #### 通道①：会话日志（`appendPluginRecord`）是**合法的持久通道**
@@ -251,11 +291,21 @@
 | E7 | ⚠️ **我们不能照抄那个 throw**：本仓 `execute` 全路径不抛（B24）⇒ 取不到要**转成结构化失败** | 由 E6 + B24 得出 | `[已核]` |
 | E8 | ⚠️ **另有一条 `exitOnStdinEnd(ctx, label)`**：把 stdio app 的寿命绑到 stdin EOF —— **不是我们的场景**（我们是 web） | `dsh-cmdline/lib/index.js` 的 `exitOnStdinEnd` | `[已核]` |
 | E9 | ⚠️ **别直接 `process.exit`**：源码注释明确点出那条路「bypassing `ctx.appExit`」 | 同文件注释 | `[已核]` |
-| E10 | ⚠️ **可达性未实测**：E4 证明启动器**提供了**，但**本插件（挂在 profile bundle 里）这一层能不能 `ctx.get` 到、以及在哪个生命周期点取得到**（apply 期？之后？）**未实测** | —— | **`[无法判定]`** |
+| E10 | ✅ **可达性已实测：本插件这一层在 `apply` 的**第一刻**就取得到** —— 与 `fs` / `sessionController` **相反**（那两个在 apply 期是 `undefined`，要等宿主把那一行挂上才有）。探针插件（`--patch` 插进隔离 profile，因此与 `dsh_restart` 的壳**同一层**）在 `apply` 内第一次采样（apply 后 **1–2 ms**）即得 `ctx.get('appExit')` → `typeof "function"`；`apply` / +200 / +500 / +1000 / +2000 / +3000 ms 六个采样点读数不变 | 隔离实例 4 次运行；读数见下方「§2.6 实测读数」 | `[已实测]` |
+| E11 | ✅ **调用它真的干净退出，且顺序就是 E2 说的那条**：`exit(0)` → 探针自己的 `ctx.effect` disposer 被调用（树开始 dispose）→ Node `beforeExit`（事件循环**自然排空**）→ `process.exit` 事件，**退出码 0**、端口释放 | 三次仪器化运行：调用 → disposer **+102 / +112 / +114 ms**；disposer → `beforeExit` **+19 / +21 / +25 ms**；`beforeExit` → `process.exit` **0–1 ms** | `[已实测]` |
+| E12 | ⚠️ **宿主给树 dispose 的上限是 5000 ms，超时就 `process.exit(code)`** —— 所以「等树 dispose 完再退」**有上限**，不是无条件 | `dsh/lib/profile-boot-*.js` 的 `PROCESS_SHUTDOWN_TIMEOUT_MS = 5e3` 与 `createProcessShutdown`（`timeout = setTimeout(() => forceExitOnce(code), timeoutMs)`；`forceExit` 默认就是 `process.exit`） | `[已核]` |
+| E13 | ⚠️ **实测撞到过那道上限一次**：4 次运行里 **1 次**「调用 → 进程退出」= **5005 ms**（恰等于 E12 的上限），另外 3 次是 **122 / 134 / 139 ms**。那一次**没挂 `beforeExit` 探针** ⇒ 它走的是自然 drain 还是超时强制退出 **`[无法判定]`**（时序吻合，但**推断不是等级**，故不写成结论） | 同 E10 的探针日志（4 次运行） | `[已实测]`（读数）· **`[无法判定]`**（那一次的路径） |
+| E14 | **负对照（同一次运行内，证明判据不恒真）**：① `ctx.get('e10-no-such-service')` → `undefined`（`ctx.get` 不是「问什么都给」）；② `ctx.appExit` **直接属性**同样可读，且 `ctx.get('appExit') === ctx.appExit`（`sameAsProperty=true`）—— 这正是 E1 那句「provided by a launcher **before the tree mounts**」的可观测后果 | ① ② 都是本轮探针读数；**与 `fs` 的分界**（`ctx.fs` 直取抛 `cannot get property "fs" without inject`）**是 `task-31` 的实测**（见 `src/lib/restart-fs.ts` 文件头），**本卡未复测** | `[已实测]`（① ②）· `[已实测]`（他轮，转引） |
 
-**顺序保证（由 E2 直接得出，不是推断）**：`appExit` 的语义是「**等树 dispose 完**再退」⇒ **marker 的写必须在调用它之前 `await` 完成**；`ctx.fs.writeText` 返回 Promise，所以「写完了才退」= **先 await 写、再调 `appExit`**。**不许**先调 `appExit` 再写（树都拆了，写还在飞）。
+**§2.6 实测读数（供复验用）**
 
-⚠️ **E10 是 `task-30` 落壳前必须先钉的一条**（照 `task-31` 的做法：隔离实例 + 负对照），**别把它当已成立**。
+- **哪一份宿主**：本机安装树那一份 `@deepseek-ai/dsh`（版本见本文开头的版本锚点，**现查**），`node v24.18.0`。
+- **环境**：隔离实例（独立 `DSH_HOME` + 空闲端口 + junction，配方见 [test/integration/README.md](../test/integration/README.md) §0）。探针是一个**插件**（`--patch` 插入，`insert.name` 用绝对路径 ⇒ loader 转成 file URL），所以它的上下文与 `dsh_restart` **同一层**。**活宿主（3080）全程只查 pid、未发任何信号。**
+- **可达性（E10）**：4 次运行 × 6 个采样点，`getType` **全部** `"function"`、`getDefined` **全部** `true`、`sameAsProperty` **全部** `true`。同一批采样里 `fs` 与 `sessionController` 在 apply 期都是 `undefined`（这就是对照面：`appExit` 不是「宿主服务晚到」那一类）。
+- **干净退出（E11 / E13）**：4 次运行**全部** `exit code 0` + 端口已释放；其中 3 次「调用 → 进程退出」= **122 / 134 / 139 ms**（依次经过 disposer → `beforeExit` → `process.exit`），1 次 = **5005 ms**。
+- **怎么读这些数**：`beforeExit` 只在事件循环**自然排空**时触发 ⇒ 「它出现过」= 走的是 E2 那条路；`5005 ms` 那一次**没有**这个探针，所以**不**把它写成结论。
+
+**顺序保证（由 E2 直接得出，不是推断）**：`appExit` 的语义是「**等树 dispose 完**再退」⇒ **marker 的写必须在调用它之前 `await` 完成**；`ctx.fs.writeText` 返回 Promise，所以「写完了才退」= **先 await 写、再调 `appExit`**。**不许**先调 `appExit` 再写（树都拆了，写还在飞）。E11 实测的顺序与之一致（disposer 先跑、`beforeExit` 在后）。⚠️ **但别把它当「保证跑完所有异步收尾」**：E12 那 5 秒是硬上限，超了就强制退出。
 
 ---
 
@@ -288,6 +338,8 @@
 - **`plugin:` 记录的长度 / 频次限制**：`appendPluginRecord` 的读取侧放行已核（D2/D3），但**有没有长度或频次上限未核**。
 - **按类型索引的读入口**：`sessionQuery.listSessions()` 能列会话，但**能不能按事件类型直接取**未核 ⇒ 若不能，就要逐会话读日志，代价随会话数增长。
 - **`exec.ts` 孩子进 `0x3C00` job 与受控复现的冲突**（J15）—— **未解释**，待插件内实测钉死。
+- **`dsh_restart` 的整条链仍未串起来跑**：恢复半的**输入状态**（新进程 + 旧会话日志 + 一份 `armed` marker）已实测闭环（C28–C32），但「工具壳：四道闸 → 审批门 → 写 marker → 计划任务拉起 → `appExit`」那一段与恢复半**没有在同一次真机上串过** —— 本轮 marker 是探针**手工复现**的。⇒ 「真工具触发 → 重启 → 恢复」**仍待实测**。
+- **`appExit` 的 5 秒上限在真实重启里够不够**：E12/E13 只测到「调用后进程确实退出」；**dispose 慢过 5 s 时**那一次到底是谁收的尾、有没有丢收尾工作，**未测**（本轮 4 次里只有 1 次逼近该上限，且没有可分类的探针）。
 
 **此前就留着的**：
 
@@ -295,6 +347,5 @@
 - `ctx.skills.register()` 的注册时机与 catalog 缓存失效是否正确配对（源码有实现，耦合读不出来）。
 - 审批门在真实 UI/策略下的表现：⚠️ **`never` 档（= `danger-full-access`）下主动 `request()` 会被确定性拒绝**（`decide()` 的 `never` 分支），而 `ask` 档会弹窗 —— **「先读策略再决定问不问」这条在真机 UI 上还没跑过**。
 - `schemastery` 两个版本间的行为差异（运行时比检出新一个预发布号）。
-- 「重启后启动即唤醒」的时序（参考实现实测「启动后 3 秒 `agents.get()` 还取不到」）—— 见 [SHAPE.md](SHAPE.md) §6.1。
-- **`UserMessage` 字段逐个**；**`job.status` 完整枚举**；**「按会话原有预设」的语义**（参考实现自述如此，未在本机验）。
-- **会话日志里 resume 的痕迹**：`sessions/**/session.v4.jsonl.zstd` 用 `zlib.zstdDecompressSync` 与 `createZstdDecompress` 两种读法都只解出**单个无换行 JSON**，读不到事件流 ⇒ **无法判定**，未试第二形态。
+- **`UserMessage` 字段逐个**；**`job.status` 完整枚举**（「按会话原有预设」的语义已在 §2.4.1 C18 实测，不再列在此处）。
+- **会话日志里 resume 的痕迹**：✅ **已解决** —— 原先「两种读法都只解出单个无换行 JSON、读不到事件流」是**读法错**：该文件是**多帧 zstd**，那两种读法都只解第一帧。按魔数切帧逐帧解即可读到完整事件流（方法与实测见 §2.4.1 末尾；冷恢复的事件序列见 C20/C21）。

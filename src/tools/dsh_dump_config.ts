@@ -82,7 +82,7 @@ export const DUMP_CONFIG_TOOL = 'dsh_dump_config'
  *
  * 它跑的 `--dump-config-schema` 是 CPU 密集且随 profile 规模增长的活（实测见
  * `lib/timeouts.ts` 里那张表），与本仓其余工具的活差一个数量级 —— 所以它必须走慢档，
- * 而不是跟大家一起分那个 15 s 的全局数。
+ * 而不是跟大家一起分快档那个兜底数。
  */
 const WORKLOAD: Workload = 'schemaDump'
 

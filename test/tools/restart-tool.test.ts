@@ -1,0 +1,1382 @@
+/**
+ * `dsh_restart` 工具壳的判据 —— **不依赖真机**，全部用注入端口。
+ *
+ * ## 这一份要钉住的是「顺序」与「三值」，不是「跑通了」
+ *
+ * 1. **顺序是判据**（SHAPE §6.1）：四道确定性闸门**全过之后**才轮到审批门 ——
+ *    反了就是「先弹窗让用户同意、再告诉他闸③不过」。所以有一条用例专门断言
+ *    「闸门拒绝时审批替身零调用」。
+ * 2. **marker 必须在拉起之前 `await` 完成**：拉起替身在**被调用的那一刻**回看
+ *    写次数，退出替身同样回看 —— 这比「返回值里写了 markerWritten: true」强得多。
+ * 3. **`ask` 档只有 `allowed-once` 算允许**，`rejected` / `cancelled` / `unavailable`
+ *    一律当拒绝（`unavailable` 是最容易被写成放行的那一格）；**`never` 档不问**。
+ * 4. **三值纪律**：档位读不出来 ⇒ fail-closed；`decideRecovery` 的两个 `none`
+ *    （`absent` / `consumed`）必须给出**不同**的重启历史（合并它们 = 静默丢掉一次冷却）。
+ *
+ * ## 替身必须「真的被接上」且「真的被调用过」（本仓坑 40）
+ *
+ * 每条用例都断言**调用计数**（写次数 / 拉起次数 / 退出次数 / 审批请求次数）。
+ * 「替身没生效」与「替身生效了」在绿的时候长得一样 —— 只数次数才分得开。
+ */
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { Context } from '@deepseek-ai/cordis'
+import { describe, expect, it } from 'vitest'
+import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
+
+import { ensureToolResult, toolResultProblem, type ToolResult } from '../../src/lib/errors.ts'
+import type { CommandResult, RunCommandOptions, SpawnImpl } from '../../src/lib/exec.ts'
+import type {
+  BusySource,
+  LaunchCommand,
+  Observed,
+  RestartFsPort,
+  RestartPorts,
+  TextRead,
+} from '../../src/lib/restart.ts'
+import {
+  createRestartTool,
+  keyText,
+  launchCommandFrom,
+  relaunchViaTaskScheduler,
+  restartHistoryFrom,
+  busySourcesFrom,
+  appExitOf,
+  approvalPolicyOf,
+  approvalRequestOf,
+  RESTART_DESCRIPTION,
+  SCHTASKS_TR_MAX_CHARS,
+  type RelaunchRequest,
+  type RelaunchResult,
+  type RestartApprovalOutcome,
+  type RestartHost,
+} from '../../src/tools/dsh_restart.ts'
+import {
+  composeDescription,
+  DESCRIPTION_MAX_CHARS,
+  DESCRIPTION_MAX_LINES,
+} from '../../src/tools/describe.ts'
+import {
+  cmdResult,
+  configFor,
+  depsFor,
+  expectFail,
+  expectOk,
+  recordingSpawn,
+  renderText,
+  run,
+  tempDshHome,
+  withPlatform,
+} from './helpers.ts'
+
+const NOW = Date.UTC(2026, 9, 14, 6, 0, 0)
+const CALLER = 'session-caller'
+
+/** 仓根：本文件在 `test/tools/` 下。 */
+const REPO_ROOT = fileURLToPath(new URL('../../', import.meta.url))
+const LAUNCH: LaunchCommand = {
+  command: 'node',
+  args: ['bin.js', '--profile', 'web'],
+  cwd: 'C:/repo',
+}
+
+/** 一个**记调用**的 marker IO 替身。 */
+interface FsRecorder {
+  port: RestartFsPort
+  reads: string[]
+  writes: { path: string; text: string }[]
+  /** 当前内容（`undefined` = 文件不在）。 */
+  content(): string | undefined
+  seed(text: string): void
+}
+
+/**
+ * 造 marker 的 IO 替身。
+ *
+ * @param options `seed` = 预置内容；`failWriteWith` = 每次写都抛这个错误（沙箱拒绝那条路）。
+ */
+function makeFs(
+  options: { seed?: string; failWriteWith?: { code: string; message: string } } = {},
+): FsRecorder {
+  const reads: string[] = []
+  const writes: { path: string; text: string }[] = []
+  let stored: string | undefined = options.seed
+  const port: RestartFsPort = {
+    read: async (path): Promise<TextRead> => {
+      reads.push(path)
+      return stored === undefined ? { status: 'absent' } : { status: 'text', text: stored }
+    },
+    write: async (path, text) => {
+      if (options.failWriteWith !== undefined) {
+        throw Object.assign(new Error(options.failWriteWith.message), {
+          code: options.failWriteWith.code,
+        })
+      }
+      writes.push({ path, text })
+      stored = text
+    },
+  }
+  return {
+    port,
+    reads,
+    writes,
+    content: () => stored,
+    seed: (text) => {
+      stored = text
+    },
+  }
+}
+
+/** 一个「调用方自己」的 exec（`dsh_restart` 要从 `agent` 取会话 id）。 */
+function execFor(sessionId = CALLER): ToolRunContext {
+  return {
+    signal: new AbortController().signal,
+    agent: { id: sessionId, session: { id: sessionId } },
+  } as unknown as ToolRunContext
+}
+
+/** 造一份合法 marker 文本。 */
+function markerText(overrides: Record<string, unknown> = {}): string {
+  return `${JSON.stringify({
+    version: 1,
+    reason: 'the plugin code changed',
+    at: new Date(NOW).toISOString(),
+    sessions: [CALLER],
+    state: 'armed',
+    trace: ['restart-loop=pass'],
+    ...overrides,
+  })}\n`
+}
+
+/** 夹具的覆盖面。 */
+interface HarnessOptions {
+  /** 审批档位；`undefined` = 读不出来（fail-closed 那一格）。 */
+  policy?: 'ask' | 'never' | undefined
+  /** `ask` 档下 `request` 的返回值。 */
+  outcome?: RestartApprovalOutcome
+  history?: Observed<readonly number[]>
+  busy?: Observed<readonly BusySource[]>
+  bundles?: Observed<readonly string[]>
+  launch?: Observed<LaunchCommand>
+  fs?: FsRecorder
+  relaunch?: RelaunchResult
+  /** `exit()` 返回的通道；`undefined` = 取不到。 */
+  exitChannel?: ((code: number) => void) | undefined
+  /** 让某个端口抛异常（B24 的注入组）。 */
+  portThrows?: 'history' | 'busy' | 'bundles' | 'launch'
+  /** `policyOf` 自己抛。 */
+  policyThrows?: boolean
+  /** `request` 自己抛（宿主在「没有打开的回合」上就是这样）。 */
+  requestThrows?: boolean
+  /** 拉起端口自己抛（用来钉「兜底分支的 `key.stage` 按调用点报」）。 */
+  relaunchThrows?: boolean
+}
+
+/** 一套夹具。 */
+interface Harness {
+  tool: ToolDefinition
+  fs: FsRecorder
+  /** 每次 `policyOf` 的实参。 */
+  policyCalls: unknown[]
+  /** 每次 `request` 的实参（次数就是「问了几次」）。 */
+  requestCalls: { reason: string }[]
+  /** 每次拉起的请求。 */
+  launchCalls: RelaunchRequest[]
+  /** 拉起**被调用的那一刻**，marker 已经写了几次。 */
+  writesAtLaunch: number[]
+  /** 退出通道被调用的参数。 */
+  exitCalls: number[]
+  /** 退出**被调用的那一刻**，marker 已经写了几次。 */
+  writesAtExit: number[]
+  ports: RestartPorts
+}
+
+/**
+ * 造一套夹具。
+ *
+ * 默认四道闸全绿、审批档 `never`（不问）、拉起成功、退出通道在场。
+ *
+ * @param home 临时 `$DSH_HOME`。
+ * @param options 覆盖项。
+ */
+function harnessFor(home: string, options: HarnessOptions = {}): Harness {
+  const fs = options.fs ?? makeFs()
+  const policyCalls: unknown[] = []
+  const requestCalls: { reason: string }[] = []
+  const launchCalls: RelaunchRequest[] = []
+  const writesAtLaunch: number[] = []
+  const exitCalls: number[] = []
+  const writesAtExit: number[] = []
+
+  const maybeThrow = (name: HarnessOptions['portThrows']): void => {
+    if (options.portThrows === name) throw new Error(`${name} port exploded`)
+  }
+
+  const ports: RestartPorts = {
+    fs: fs.port,
+    restartHistory: async () => {
+      maybeThrow('history')
+      return options.history ?? { known: true, value: [] }
+    },
+    busySessions: async () => {
+      maybeThrow('busy')
+      return options.busy ?? { known: true, value: [] }
+    },
+    bundles: async () => {
+      maybeThrow('bundles')
+      return options.bundles ?? { known: true, value: ['dsh-plugin-debugging'] }
+    },
+    launchCommand: async () => {
+      maybeThrow('launch')
+      return options.launch ?? { known: true, value: LAUNCH }
+    },
+    now: () => NOW,
+  }
+
+  const host: RestartHost = {
+    ports,
+    approval: {
+      policyOf: (agent) => {
+        policyCalls.push(agent)
+        if (options.policyThrows === true) throw new Error('approval policy read exploded')
+        // 没给 `policy` 与显式给 `undefined` 都是「读不出来」（fail-closed 那一格）。
+        return options.policy
+      },
+      request: async (_agent, reason) => {
+        requestCalls.push({ reason })
+        if (options.requestThrows === true) throw new Error('approval request exploded')
+        return options.outcome ?? 'allowed-once'
+      },
+    },
+    launch: {
+      relaunch: async (request) => {
+        launchCalls.push(request)
+        writesAtLaunch.push(fs.writes.length)
+        if (options.relaunchThrows === true) throw new Error('relaunch port exploded')
+        return options.relaunch ?? { ok: true, detail: 'schtasks /run exited 0' }
+      },
+    },
+    exit: {
+      exit: () => {
+        const channel =
+          'exitChannel' in options
+            ? options.exitChannel
+            : (code: number) => {
+                exitCalls.push(code)
+              }
+        if (channel === undefined) return undefined
+        return (code: number) => {
+          writesAtExit.push(fs.writes.length)
+          channel(code)
+        }
+      },
+    },
+  }
+
+  const config = configFor(home)
+  const deps = depsFor(config, {})
+  // ⚠️ 显式对象构造（不是往窄类型的形参里塞多余字段）：替身被静默丢掉是本仓踩过的坑 40。
+  const tool = createRestartTool({ ...deps, restart: host })
+  return {
+    tool,
+    fs,
+    policyCalls,
+    requestCalls,
+    launchCalls,
+    writesAtLaunch,
+    exitCalls,
+    writesAtExit,
+    ports,
+  }
+}
+
+/** 一份默认参数。 */
+const ARGS = { reason: 'the plugin code changed and only a restart picks it up' }
+
+// ── 1. 三键形状 + 全路径不抛 ────────────────────────────────────────────────
+
+describe('dsh_restart · 形状与不抛', () => {
+  it('成功与失败两条路都是顶层闭集 + data 恰好三键，且都过了守卫', async () => {
+    const home = await tempDshHome()
+    const cases: Array<{ label: string; options: HarnessOptions; args: unknown }> = [
+      { label: '成功（闸门全过 + 拉起 + 退出）', options: {}, args: ARGS },
+      {
+        label: '失败（审批档读不出来）',
+        options: { policy: undefined },
+        args: ARGS,
+      },
+      {
+        label: '失败（端口抛异常）',
+        options: { portThrows: 'busy' },
+        args: ARGS,
+      },
+    ]
+    for (const item of cases) {
+      const h = harnessFor(home, item.options)
+      const result = await run(h.tool, item.args, execFor())
+      expect(toolResultProblem(result), `${item.label}: 形状非法`).toBeUndefined()
+      expect(ensureToolResult(result), `${item.label}: 没过守卫`).toBe(result)
+      const data = (result as unknown as { data: Record<string, unknown> }).data
+      expect(Object.keys(data).sort(), `${item.label}: data 不是三键闭集`).toEqual([
+        'audit',
+        'key',
+        'verdict',
+      ])
+      expect(typeof data['verdict']).toBe('string')
+      expect((data['verdict'] as string).length).toBeGreaterThan(0)
+    }
+  })
+
+  it('端口抛异常 / 审批替身抛异常 / 读档位抛异常：`execute` **一次都不抛**，全部收敛成 internal', async () => {
+    const home = await tempDshHome()
+    const cases: Array<{ label: string; options: HarnessOptions }> = [
+      { label: 'history 抛', options: { portThrows: 'history' } },
+      { label: 'busy 抛', options: { portThrows: 'busy' } },
+      { label: 'bundles 抛', options: { portThrows: 'bundles' } },
+      { label: 'launchCommand 抛', options: { portThrows: 'launch' } },
+      { label: 'policyOf 抛', options: { policyThrows: true } },
+      { label: 'request 抛（没有打开的回合）', options: { policy: 'ask', requestThrows: true } },
+    ]
+    for (const item of cases) {
+      const h = harnessFor(home, item.options)
+      let threw: unknown
+      let result: ToolResult<unknown> | undefined
+      try {
+        result = await run(h.tool, ARGS, execFor())
+      } catch (error) {
+        threw = error
+      }
+      expect(threw, `${item.label}: execute 抛了 —— B24 的承载条件失效`).toBeUndefined()
+      expect(result?.ok, `${item.label}: 期望结构化失败`).toBe(false)
+      expect(ensureToolResult(result), `${item.label}: 没过守卫`).toBe(result)
+      // 拉起与退出一次都不许发生（失败必须发生在动任何东西之前）。
+      expect(h.launchCalls, `${item.label}: 失败路径拉起过`).toHaveLength(0)
+      expect(h.exitCalls, `${item.label}: 失败路径退出过`).toHaveLength(0)
+    }
+  })
+
+  it('没有 agent（取不到调用方会话）⇒ 结构化失败，**不是**默默当成「没人忙」', async () => {
+    const home = await tempDshHome()
+    const h = harnessFor(home)
+    const result = await run(h.tool, ARGS, {
+      signal: new AbortController().signal,
+    } as unknown as ToolRunContext)
+    const failure = expectFail(result)
+    expect(failure.data.verdict).toContain('no session id')
+    expect(h.launchCalls).toHaveLength(0)
+  })
+})
+
+// ── 2. `ask` 档的映射表 ────────────────────────────────────────────────────
+
+describe('dsh_restart · `ask` 档：只有 allowed-once 算允许', () => {
+  it('allowed-once ⇒ 继续：写一次 marker、拉起一次、退出一次', async () => {
+    const home = await tempDshHome()
+    const h = harnessFor(home, { policy: 'ask', outcome: 'allowed-once' })
+    const result = await run(h.tool, ARGS, execFor())
+    const data = expectOk(result)
+    expect(h.requestCalls, '没有走审批门').toHaveLength(1)
+    expect(h.fs.writes, 'marker 没写').toHaveLength(1)
+    expect(h.launchCalls).toHaveLength(1)
+    expect(h.exitCalls).toEqual([0])
+    expect(data.key['approval']).toBe('allowed-once')
+  })
+
+  it('rejected / cancelled / unavailable 三种**都**当拒绝（unavailable 最容易被写成放行）', async () => {
+    const home = await tempDshHome()
+    for (const outcome of ['rejected', 'cancelled', 'unavailable'] as const) {
+      const h = harnessFor(home, { policy: 'ask', outcome })
+      const result = await run(h.tool, ARGS, execFor())
+      const failure = expectFail(result)
+      expect(h.requestCalls, `${outcome}: 没问审批`).toHaveLength(1)
+      expect(failure.data.verdict, `${outcome}: verdict 没说清为什么拒绝`).toContain(outcome)
+      expect(h.fs.writes, `${outcome}: 拒绝了却写了 marker`).toHaveLength(0)
+      expect(h.launchCalls, `${outcome}: 拒绝了却拉起了`).toHaveLength(0)
+      expect(h.exitCalls, `${outcome}: 拒绝了却退出了`).toHaveLength(0)
+      // 防空转：三种必须给出**互不相同**的机器码，否则「映射表」只是同一个值的三个名字。
+      expect(failure.data.key['approval']).toBe(outcome)
+    }
+    // 三者的 kind 也要分开：`unavailable` 是「这一档根本问不到人」，不是「用户拒绝」。
+    const unavailable = harnessFor(home, { policy: 'ask', outcome: 'unavailable' })
+    expect(expectFail(await run(unavailable.tool, ARGS, execFor())).kind).toBe('not-configured')
+    const rejected = harnessFor(home, { policy: 'ask', outcome: 'rejected' })
+    expect(expectFail(await run(rejected.tool, ARGS, execFor())).kind).toBe('cancelled')
+  })
+})
+
+// ── 3. `never` 档 ─────────────────────────────────────────────────────────
+
+describe('dsh_restart · `never` 档：不问，直接执行', () => {
+  it('零次 request，且继续走到位（写、拉起、退出各一次）；输出里有 not-required (policy=never)', async () => {
+    const home = await tempDshHome()
+    const h = harnessFor(home, { policy: 'never' })
+    const result = await run(h.tool, ARGS, execFor())
+    const data = expectOk(result)
+    // 判据是**计数**：在 `never` 档主动去问必然被拒，那会把「你什么都授权了」变成「什么都不许做」。
+    expect(h.requestCalls, '`never` 档去问审批了 —— 那一档问了必然被拒').toHaveLength(0)
+    expect(h.policyCalls, '没读档位就决定了问不问').toHaveLength(1)
+    expect(h.fs.writes).toHaveLength(1)
+    expect(h.launchCalls).toHaveLength(1)
+    expect(h.exitCalls).toEqual([0])
+    expect(data.key['approval']).toBe('not-required (policy=never)')
+    expect(renderText(h.tool, ARGS, result)).toContain('not-required (policy=never)')
+  })
+})
+
+// ── 4. 档位读不出来 ⇒ fail-closed ──────────────────────────────────────────
+
+describe('dsh_restart · 档位读不出来 ⇒ fail-closed', () => {
+  it('拒绝（不是「当成已授权」），且零写零拉起零退出', async () => {
+    const home = await tempDshHome()
+    const h = harnessFor(home, { policy: undefined })
+    const failure = expectFail(await run(h.tool, ARGS, execFor()))
+    expect(failure.data.verdict).toContain('could not be determined')
+    expect(failure.data.key['approval']).toBe('unreadable')
+    expect(h.requestCalls, '档位读不出来还去问审批了').toHaveLength(0)
+    expect(h.fs.writes).toHaveLength(0)
+    expect(h.launchCalls).toHaveLength(0)
+    expect(h.exitCalls).toHaveLength(0)
+  })
+})
+
+// ── 5. dryRun ─────────────────────────────────────────────────────────────
+
+describe('dsh_restart · dryRun 零写零拉起零退出（配一条反空转）', () => {
+  it('dryRun ⇒ 三个计数都是 0；同一组端口去掉 dryRun ⇒ 恰好各一次', async () => {
+    const home = await tempDshHome()
+    const dry = harnessFor(home, { policy: 'never' })
+    const dryResult = await run(dry.tool, { ...ARGS, dryRun: true }, execFor())
+    expectOk(dryResult)
+    expect(dry.fs.writes, 'dryRun 写了 marker').toHaveLength(0)
+    expect(dry.launchCalls, 'dryRun 拉起了').toHaveLength(0)
+    expect(dry.exitCalls, 'dryRun 退出了').toHaveLength(0)
+    expect(dry.requestCalls, 'dryRun 弹了审批窗').toHaveLength(0)
+
+    // 反空转：同一组端口在 dryRun: false 下**必须**真的动 —— 否则上面那三个 0
+    // 可能只是因为这条路径根本不碰那些端口。
+    const real = harnessFor(home, { policy: 'never' })
+    expectOk(await run(real.tool, ARGS, execFor()))
+    expect(real.fs.writes).toHaveLength(1)
+    expect(real.launchCalls).toHaveLength(1)
+    expect(real.exitCalls).toHaveLength(1)
+  })
+
+  it('dryRun 仍然报出「会跑哪条命令」（演练的全部价值就在这里）', async () => {
+    const home = await tempDshHome()
+    const h = harnessFor(home, { policy: 'never' })
+    const result = await run(h.tool, { ...ARGS, dryRun: true }, execFor())
+    const data = expectOk(result)
+    expect(data.key['dryRun']).toBe(true)
+    expect(data.key['markerWritten']).toBe(false)
+    expect(String(data.key['relaunch'])).toContain('bin.js')
+  })
+})
+
+// ── 6. `force` 只覆盖闸② ──────────────────────────────────────────────────
+
+describe('dsh_restart · `force` 只覆盖闸②', () => {
+  it('闸②：默认拒绝（含调用方自己的作业），force 才放行', async () => {
+    const home = await tempDshHome()
+    // 契约 §2.3 原话：**只**排除「调用方自己那个回合」，后台作业与定时提醒照旧全算
+    // —— 包括属于调用方自己的那些。这一条正是「别漏成只查 running agents」的判据。
+    const busy: Observed<readonly BusySource[]> = {
+      known: true,
+      value: [
+        { kind: 'turn', sessionId: CALLER },
+        { kind: 'job', jobId: 'job-1', ownerSession: CALLER },
+      ],
+    }
+    const refused = harnessFor(home, { policy: 'never', busy })
+    const failure = expectOk(await run(refused.tool, ARGS, execFor()))
+    expect(failure.key['code']).toBe('busy')
+    expect(refused.launchCalls, '闸②拒了却拉起了').toHaveLength(0)
+
+    const forced = harnessFor(home, { policy: 'never', busy })
+    const data = expectOk(await run(forced.tool, { ...ARGS, force: true }, execFor()))
+    expect(data.key['forced']).toBe(true)
+    expect(forced.launchCalls, 'force 没有放行闸②').toHaveLength(1)
+    // 覆盖必须留痕：marker 里要有 force: true 与那条 override trace。
+    expect(forced.fs.writes[0]?.text).toContain('"force": true')
+  })
+
+  it('①③④ 在 force: true 下**仍然**拒绝（签名里根本没有 force）', async () => {
+    const home = await tempDshHome()
+    const cases: Array<{ label: string; code: string; options: HarnessOptions }> = [
+      {
+        label: '闸① 冷却窗口内',
+        code: 'restart-loop',
+        options: { history: { known: true, value: [NOW - 1_000] } },
+      },
+      {
+        label: '闸③ bundle 表解析不了',
+        code: 'bad-composition',
+        options: { bundles: { known: false, reason: 'no readable profile manifest' } },
+      },
+      {
+        label: '闸④ 拿不到启动命令',
+        code: 'no-launch-command',
+        options: { launch: { known: false, reason: 'no relaunch route has been verified' } },
+      },
+    ]
+    for (const item of cases) {
+      const h = harnessFor(home, { policy: 'never', ...item.options })
+      const result = await run(h.tool, { ...ARGS, force: true }, execFor())
+      const data = expectOk(result)
+      expect(data.key['code'], `${item.label}: force 把不可绕过的闸也绕过了`).toBe(item.code)
+      expect(h.fs.writes, `${item.label}: 被拒却写了 marker`).toHaveLength(0)
+      expect(h.launchCalls, `${item.label}: 被拒却拉起了`).toHaveLength(0)
+      // 拒绝是**设计的一部分**：`ok: true`（工具完成了它的判定），但结论是「不许做」。
+      expect(result.ok, `${item.label}: 闸门拒绝应当是 ok:true（拒绝不是失败）`).toBe(true)
+    }
+  })
+
+  it('闸门拒绝**不是**失败：`ok: true` + 带动作的 nextStep + 原样报出 remedy', async () => {
+    const home = await tempDshHome()
+    const h = harnessFor(home, {
+      history: { known: true, value: [NOW - 1_000] },
+    })
+    const result = await run(h.tool, ARGS, execFor())
+    const data = expectOk(result)
+    expect(data.verdict).toContain('restart-loop')
+    expect(result.nextStep, '拒绝必须给出下一步（否则模型只能干等）').toBeDefined()
+    const step = result.nextStep as { manual?: unknown; why?: string }
+    expect(step.manual).toBe(true)
+    expect(step.why).toBeTruthy()
+  })
+})
+
+// ── 7. 沙箱被拒要可诊断 ────────────────────────────────────────────────────
+
+describe('dsh_restart · 文件沙箱拒绝要可诊断', () => {
+  it('FS_SANDBOX_DENIED ⇒ 结构化失败，且说清「要 danger-full-access」', async () => {
+    const home = await tempDshHome()
+    const fs = makeFs({
+      failWriteWith: {
+        code: 'FS_SANDBOX_DENIED',
+        message: 'FS_SANDBOX_DENIED: cannot write outside the writable roots',
+      },
+    })
+    const h = harnessFor(home, { policy: 'never', fs })
+    const failure = expectFail(await run(h.tool, ARGS, execFor()))
+    expect(failure.kind).toBe('not-configured')
+    expect(failure.data.verdict).toContain('FS_SANDBOX_DENIED')
+    expect(failure.data.verdict).toContain('file sandbox')
+    expect(String((failure.nextStep as { why?: string } | undefined)?.why)).toContain(
+      'danger-full-access',
+    )
+    // 沙箱拒了 ⇒ 绝不许拉起（否则就是「没有 marker 的重启」）。
+    expect(h.launchCalls).toHaveLength(0)
+    expect(h.exitCalls).toHaveLength(0)
+  })
+})
+
+// ── 8. `decideRecovery` 的两个 `none` 必须分开 ─────────────────────────────
+
+describe('dsh_restart · 重启历史：absent 与 consumed 必须给出不同的取值', () => {
+  it('absent ⇒ 空历史；consumed ⇒ 仍是**一条**重启记录（合并它 = 静默丢掉一次冷却）', async () => {
+    const absent = makeFs()
+    const absentHistory = await restartHistoryFrom(absent.port, 'C:/home')
+    expect(absentHistory).toEqual({ known: true, value: [] })
+
+    const consumed = makeFs({ seed: markerText({ state: 'consumed' }) })
+    const consumedHistory = await restartHistoryFrom(consumed.port, 'C:/home')
+    expect(consumedHistory.known).toBe(true)
+    expect(consumedHistory.known && consumedHistory.value).toEqual([NOW])
+    // 防空转：两者必须**取值不同** —— 把 `switch (action)` 写成不看 `reason` 就会在这里红。
+    expect(JSON.stringify(consumedHistory)).not.toBe(JSON.stringify(absentHistory))
+
+    // `armed` 那份同样是历史（还没消费 ≠ 没发生过）。
+    const armed = makeFs({ seed: markerText() })
+    const armedHistory = await restartHistoryFrom(armed.port, 'C:/home')
+    expect(armedHistory).toEqual({ known: true, value: [NOW] })
+  })
+
+  it('读不到 / 格式坏 / 版本不认识 ⇒ known:false（**不是**空历史：那会把「取不到」印成「没重启过」）', async () => {
+    const cases: Array<{ label: string; seed: string }> = [
+      { label: '格式坏', seed: 'not json at all' },
+      { label: '版本不认识', seed: markerText({ version: 99 }) },
+    ]
+    for (const item of cases) {
+      const history = await restartHistoryFrom(makeFs({ seed: item.seed }).port, 'C:/home')
+      expect(history.known, `${item.label}: 被当成了「没有重启历史」`).toBe(false)
+      expect(JSON.stringify(history)).not.toBe(JSON.stringify({ known: true, value: [] }))
+    }
+    // 读失败（端口抛）同样不是空历史。
+    const throwing: RestartFsPort = {
+      read: async () => {
+        throw new Error('FS_PERMISSION_DENIED')
+      },
+      write: async () => undefined,
+    }
+    expect((await restartHistoryFrom(throwing, 'C:/home')).known).toBe(false)
+  })
+})
+
+// ── 9. 顺序：先过闸门，再问审批 ────────────────────────────────────────────
+
+describe('dsh_restart · 顺序：闸门全过之后才轮到审批门', () => {
+  it('闸③ / 闸④ 拒绝时，审批替身**零调用**', async () => {
+    const home = await tempDshHome()
+    const cases: Array<{ label: string; options: HarnessOptions }> = [
+      { label: '闸③', options: { bundles: { known: false, reason: 'unreadable' } } },
+      { label: '闸④', options: { launch: { known: false, reason: 'unknown route' } } },
+      { label: '闸①', options: { history: { known: false, reason: 'unreadable' } } },
+      { label: '闸②', options: { busy: { known: false, reason: 'services missing' } } },
+    ]
+    for (const item of cases) {
+      // 档位是 `ask` —— 若实现「先问审批」，这里就会弹窗。
+      const h = harnessFor(home, { policy: 'ask', ...item.options })
+      expectOk(await run(h.tool, ARGS, execFor()))
+      expect(h.requestCalls, `${item.label} 拒绝时却弹了审批窗（顺序反了）`).toHaveLength(0)
+      expect(h.policyCalls, `${item.label} 拒绝时却读了审批档`).toHaveLength(0)
+    }
+  })
+})
+
+// ── 10. 拉起命令可复核 ─────────────────────────────────────────────────────
+
+describe('dsh_restart · 拉起的命令可复核', () => {
+  it('`key.relaunch` 里能看到那条命令，且与真正交给拉起端口的**逐字相同**', async () => {
+    const home = await tempDshHome()
+    const h = harnessFor(home, { policy: 'never' })
+    const result = await run(h.tool, ARGS, execFor())
+    const data = expectOk(result)
+    const relaunch = String(data.key['relaunch'])
+    expect(relaunch).toContain('bin.js')
+    expect(relaunch).toContain('--profile web')
+    // 新宿主必须看到**同一个** home（计划任务不继承本进程的环境变量）。
+    expect(relaunch).toContain(home)
+    expect(h.launchCalls).toHaveLength(1)
+    expect(h.launchCalls[0]?.commandLine).toBe(relaunch)
+    // 渲染文本里也要有（L2 才是模型真正读的那一层）。
+    expect(renderText(h.tool, ARGS, result)).toContain('bin.js')
+  })
+
+  it('命令行是**纯粹可执行的**：设 home → 进工作目录 → 等待 → 起宿主，不含说明性文字', async () => {
+    const home = await tempDshHome()
+    const h = harnessFor(home, { policy: 'never' })
+    await run(h.tool, ARGS, execFor())
+    const line = String(h.launchCalls[0]?.commandLine)
+    // 逐段钉住形状：这串会**逐字**交给计划任务去执行，掺一句给人看的说明就会被真的执行。
+    expect(line.startsWith(`cmd /c set "DSH_HOME=${home}" && cd /d C:/repo && ping -n 11`)).toBe(
+      true,
+    )
+    expect(line.endsWith('& node bin.js --profile web')).toBe(true)
+    expect(line, '命令行里掺了说明性文字 —— 那串会被真的执行').not.toContain('(cwd')
+    expect(line, '命令行里出现了给人看的 home 括注').not.toContain('home ')
+  })
+
+  it('delayMs 进命令行；预算经 budgetFor 取（拉起端口拿到的预算 > 0）', async () => {
+    const home = await tempDshHome()
+    const h = harnessFor(home, { policy: 'never' })
+    await run(h.tool, { ...ARGS, delayMs: 30_000 }, execFor())
+    expect(h.launchCalls[0]?.delayMs).toBe(30_000)
+    expect(String(h.launchCalls[0]?.commandLine)).toContain('ping -n 31')
+    expect(h.launchCalls[0]?.budgetMs).toBeGreaterThan(0)
+  })
+})
+
+// ── 11. 接线：走完整入口 ───────────────────────────────────────────────────
+
+describe('dsh_restart · 接线断言（坑 42）', () => {
+  it('走完整入口一遍：真实 marker 读写 → 拉起 → 退出，且顺序被钉住', async () => {
+    const home = await tempDshHome()
+    const fs = makeFs()
+    // 用**真的** `restartHistoryFrom`（它读的就是这份 fs），而不是再给一个常量历史。
+    const h = harnessFor(home, { policy: 'never', fs })
+    const wired: RestartPorts = {
+      ...h.ports,
+      restartHistory: async () => await restartHistoryFrom(fs.port, home),
+    }
+    const deps = depsFor(configFor(home), {})
+    const tool = createRestartTool({
+      ...deps,
+      restart: {
+        ports: wired,
+        approval: { policyOf: () => 'never', request: async () => 'allowed-once' },
+        launch: {
+          relaunch: async (request) => {
+            h.launchCalls.push(request)
+            h.writesAtLaunch.push(fs.writes.length)
+            return { ok: true, detail: 'stub' }
+          },
+        },
+        exit: {
+          exit: () => (code: number) => {
+            h.writesAtExit.push(fs.writes.length)
+            h.exitCalls.push(code)
+          },
+        },
+      },
+    })
+
+    const result = await run(tool, ARGS, execFor())
+    const data = expectOk(result)
+    expect(data.key['stage']).toBe('exit')
+    expect(fs.writes).toHaveLength(1)
+    // 顺序是判据：拉起与退出**被调用时**，marker 已经写完（各 1 次）。
+    expect(h.writesAtLaunch).toEqual([1])
+    expect(h.writesAtExit).toEqual([1])
+    expect(h.exitCalls).toEqual([0])
+    // 落盘的那份 marker 真的是一份能被读回来的 marker（不是「看着写了」）。
+    const written = fs.content() ?? ''
+    expect(written).toContain('"version": 1')
+    expect(written).toContain('"state": "armed"')
+    expect(await restartHistoryFrom(fs.port, home)).toEqual({ known: true, value: [NOW] })
+  })
+})
+
+// ── 12. 拉起端口：计划任务（显式钉平台） ───────────────────────────────────
+
+describe('dsh_restart · 计划任务拉起（平台显式钉住）', () => {
+  it('win32：/create（含那条命令行）→ /run，两条都 exit 0 才算成功', async () => {
+    const calls: RunCommandOptions[] = []
+    const spawn: SpawnImpl = async (options) => {
+      calls.push(options)
+      return { code: 0, stdout: '', stderr: '', timedOut: false, aborted: false }
+    }
+    const request: RelaunchRequest = {
+      command: 'node',
+      args: ['bin.js', '--profile', 'web'],
+      cwd: 'C:/repo',
+      commandLine: 'cmd /c set "DSH_HOME=C:/home" && ping -n 11 127.0.0.1 & node bin.js',
+      delayMs: 10_000,
+      budgetMs: 5_000,
+    }
+    // ⚠️ **构造 + 执行**整段都在 withPlatform 里（本仓刚在 CI 上踩过：只包构造等于没钉）。
+    const result = await withPlatform(
+      'win32',
+      async () => await relaunchViaTaskScheduler(spawn, request),
+    )
+    expect(result.ok).toBe(true)
+    expect(calls.map((call) => call.command)).toEqual(['schtasks', 'schtasks'])
+    expect(calls[0]?.args).toContain('/create')
+    expect(calls[0]?.args).toContain(request.commandLine)
+    expect(calls[1]?.args).toEqual(['/run', '/tn', 'dsh-plugin-debugging-restart'])
+    expect(calls.every((call) => call.timeoutMs === request.budgetMs)).toBe(true)
+  })
+
+  it('win32：非零退出 / spawn 失败 / 超时 ⇒ 可诊断的失败（不抛）', async () => {
+    const cases: Array<{ label: string; answer: CommandResult; expect: string }> = [
+      {
+        label: '非零退出',
+        answer: {
+          code: 1,
+          stdout: '',
+          stderr: 'ERROR: access denied',
+          timedOut: false,
+          aborted: false,
+        },
+        expect: 'access denied',
+      },
+      {
+        label: 'spawn 失败',
+        answer: {
+          code: null,
+          stdout: '',
+          stderr: '',
+          timedOut: false,
+          aborted: false,
+          spawnError: 'spawn: ENOENT',
+        },
+        expect: 'ENOENT',
+      },
+      {
+        label: '超时',
+        answer: { code: null, stdout: '', stderr: '', timedOut: true, aborted: false },
+        expect: 'timed out',
+      },
+    ]
+    const request: RelaunchRequest = {
+      command: 'node',
+      args: [],
+      cwd: 'C:/repo',
+      commandLine: 'node bin.js',
+      delayMs: 0,
+      budgetMs: 5_000,
+    }
+    for (const item of cases) {
+      const spawn: SpawnImpl = async () => item.answer
+      const result = await withPlatform(
+        'win32',
+        async () => await relaunchViaTaskScheduler(spawn, request),
+      )
+      expect(result.ok, `${item.label}: 竟然成功了`).toBe(false)
+      expect(result.ok === false && result.reason, `${item.label}: 失败原因不可诊断`).toContain(
+        item.expect,
+      )
+    }
+  })
+
+  it('别的平台：没有已实测的路线 ⇒ 不拉起、不抛（并说出是哪个平台）', async () => {
+    let spawned = 0
+    const spawn: SpawnImpl = async () => {
+      spawned += 1
+      return { code: 0, stdout: '', stderr: '', timedOut: false, aborted: false }
+    }
+    const result = await withPlatform(
+      'linux',
+      async () =>
+        await relaunchViaTaskScheduler(spawn, {
+          command: 'node',
+          args: [],
+          cwd: '/repo',
+          commandLine: 'node bin.js',
+          delayMs: 0,
+          budgetMs: 5_000,
+        }),
+    )
+    expect(result.ok).toBe(false)
+    expect(result.ok === false && result.reason).toContain('linux')
+    expect(spawned, 'linux 上竟然起了子进程').toBe(0)
+  })
+
+  it('闸④ 的取值面也按平台分：win32 定得出命令，别的平台判「拿不到」（构造 + 执行都在钉住的平台里）', async () => {
+    const config = configFor('C:/home', { profile: 'web' })
+    const win = await withPlatform('win32', () => launchCommandFrom(config))
+    expect(win.known).toBe(true)
+    expect(win.known && win.value.args).toContain('--profile')
+
+    const linux = await withPlatform('linux', () => launchCommandFrom(config))
+    expect(linux.known, 'linux 上竟然定出了启动命令 —— 那条路线没有实测过').toBe(false)
+    expect(linux.known === false && linux.reason).toContain('linux')
+  })
+
+  it('预算已耗尽（budgetMs = 0）⇒ 直接失败，不起子进程', async () => {
+    let spawned = 0
+    const spawn: SpawnImpl = async () => {
+      spawned += 1
+      return { code: 0, stdout: '', stderr: '', timedOut: false, aborted: false }
+    }
+    const result = await withPlatform(
+      'win32',
+      async () =>
+        await relaunchViaTaskScheduler(spawn, {
+          command: 'node',
+          args: [],
+          cwd: 'C:/repo',
+          commandLine: 'node bin.js',
+          delayMs: 0,
+          budgetMs: 0,
+        }),
+    )
+    expect(result.ok).toBe(false)
+    expect(spawned).toBe(0)
+  })
+})
+
+// ── 13. 忙闲收集：三个来源一个都不许漏 ─────────────────────────────────────
+
+describe('dsh_restart · 闸②的忙闲收集覆盖 turn / job / schedule', () => {
+  /** 一个结构化的宿主上下文替身。 */
+  function busyCtx(
+    options: {
+      agents?: boolean
+      jobs?: boolean
+      waterfall?: boolean
+      /**
+       * `workspace/session-activity` 的监听者数。
+       *
+       * 默认 1（有提供方）；`0` = 组合里没有监听者；`null` = **连监听者表都读不出来**
+       * （不提供 `events`）。后两格都必须判 `known:false` —— 这正是复核抓到的那个缺口。
+       */
+      activityListeners?: number | null
+      /** `agents.list()` 的返回值（默认两个会话，一个 running）。 */
+      liveAgents?: readonly Record<string, unknown>[]
+      /** `jobs.list()` 的返回值（默认一个在跑的无属主作业）。 */
+      jobRecords?: readonly Record<string, unknown>[]
+      /** 让 waterfall **答空**（用来钉「有监听者 + 确实没有活动 ⇒ known:true」）。 */
+      emptyActivity?: boolean
+    } = {},
+  ): unknown {
+    const includeAgents = options.agents !== false
+    const includeJobs = options.jobs !== false
+    const includeWaterfall = options.waterfall !== false
+    const listenerCount = options.activityListeners === undefined ? 1 : options.activityListeners
+    return {
+      get: (name: string) => {
+        if (name === 'agents' && includeAgents) {
+          return {
+            list: () =>
+              options.liveAgents ?? [
+                { id: 'session-a', status: 'running' },
+                { id: 'session-b', status: 'idle' },
+              ],
+          }
+        }
+        if (name === 'jobs' && includeJobs) {
+          return {
+            list: () => options.jobRecords ?? [{ id: 'job-unowned', status: 'running' }],
+          }
+        }
+        return undefined
+      },
+      ...(includeWaterfall
+        ? {
+            waterfall: async (_name: string, request: { sessionId: string }) =>
+              options.emptyActivity === true
+                ? []
+                : request.sessionId === 'session-b'
+                  ? [{ kind: 'schedule', items: [{ id: 'sched-1' }] }]
+                  : [{ kind: 'job', items: [{ id: 'job-a' }] }],
+          }
+        : {}),
+      // ⚠️ 真实形状里 `ctx.events._hooks` 就是**监听者表**（`waterfallOf` 靠它分
+      // 「没组合提供方」与「提供方答空」）。夹具不给它 = 第三源恒判 known:false
+      // —— 与坑 40 同族：夹具与真实形状不一致，判据测的就不是那条路。
+      ...(listenerCount === null
+        ? {}
+        : {
+            events: {
+              _hooks: {
+                'workspace/session-activity': Array.from({ length: listenerCount }, () => ({})),
+              },
+            },
+          }),
+    }
+  }
+
+  it('三类来源都在：回合 / 作业（含属主）/ 定时提醒 / 无属主作业', async () => {
+    const observed = await busySourcesFrom(busyCtx())
+    expect(observed.known).toBe(true)
+    if (!observed.known) throw new Error('期望 known')
+    const labels = observed.value.map((source) =>
+      source.kind === 'turn'
+        ? `turn:${source.sessionId}`
+        : source.kind === 'job'
+          ? `job:${source.jobId}${source.ownerSession === undefined ? '' : `@${source.ownerSession}`}`
+          : `schedule:${source.scheduleId}@${source.ownerSession ?? ''}`,
+    )
+    expect(labels).toContain('turn:session-a')
+    expect(labels).toContain('job:job-a@session-a')
+    expect(labels).toContain('schedule:sched-1@session-b')
+    expect(labels).toContain('job:job-unowned')
+  })
+
+  it('无属主作业按 C6 过滤 `status`：跑完的（completed）**不算忙**，running / stopping 才算', async () => {
+    // 这是「合法重启被永久拒到用户手填 force」那条真缺陷的护栏：`jobs.list()` 返回**全部**
+    // 记录（删除只发生在 remove 族），跑完的会一直留着。
+    const observed = await busySourcesFrom(
+      busyCtx({
+        jobRecords: [
+          { id: 'job-running', status: 'running' },
+          { id: 'job-stopping', status: 'stopping' },
+          { id: 'job-done', status: 'completed' },
+          { id: 'job-killed', status: 'killed' },
+          { id: 'job-failed', status: 'failed' },
+        ],
+      }),
+    )
+    expect(observed.known).toBe(true)
+    if (!observed.known) throw new Error('期望 known')
+    const jobIds = observed.value.flatMap((source) => (source.kind === 'job' ? [source.jobId] : []))
+    expect(jobIds).toContain('job-running')
+    expect(jobIds).toContain('job-stopping')
+    // 防空转：这三条**必须**被滤掉，否则上面两条对「一个不过滤的实现」也是绿的。
+    expect(jobIds, '跑完的作业被当成忙 —— 合法重启会被永久拒').not.toContain('job-done')
+    expect(jobIds).not.toContain('job-killed')
+    expect(jobIds).not.toContain('job-failed')
+  })
+
+  it('subagent 后代经 `agents.list()` 就可见（复核那条「对闸②不可见」**已证伪**）', async () => {
+    // 复核当时是推断。宿主源码（`[已核]`）：`dsh-agent` 的注册表服务名就是 `agents`，
+    // `list()` 返回**全部** `store.values()`（不按 owner 过滤）；`dsh-subagent` 建后代走
+    // `ctx.agents.create({ parentAgent })`，所以后代在同一个 store 里；后代的 `status`
+    // 在回合内就是 'running'（`dsh-agent-loop` 的 `get status()`）—— 与 `dsh-subagent`
+    // 自己算 `runningDescendants` 用的是**同一个判据**。
+    const observed = await busySourcesFrom(
+      busyCtx({
+        // 只有那个 subagent 后代在跑；其余会话都是 idle。
+        liveAgents: [
+          { id: 'session-parent', status: 'idle' },
+          { id: 'session-child', status: 'running' },
+        ],
+        jobRecords: [],
+        emptyActivity: true,
+      }),
+    )
+    expect(observed.known).toBe(true)
+    if (!observed.known) throw new Error('期望 known')
+    const labels = observed.value.map((source) =>
+      source.kind === 'turn' ? `turn:${source.sessionId}` : source.kind,
+    )
+    expect(labels, '正在跑的 subagent 后代没有被计成阻塞者').toContain('turn:session-child')
+  })
+
+  it('第三源是三值的：没有监听者 / 监听者表读不出来 ⇒ known:false；有监听者但答空 ⇒ known:true', async () => {
+    // 「没组合那个提供方」与「确实没有活动」必须分得开（复核抓到的缺口）。
+    const noListener = await busySourcesFrom(busyCtx({ activityListeners: 0 }))
+    expect(noListener.known, '没有监听者却被当成「不忙」').toBe(false)
+    expect(JSON.stringify(noListener)).not.toBe(JSON.stringify({ known: true, value: [] }))
+
+    const unreadable = await busySourcesFrom(busyCtx({ activityListeners: null }))
+    expect(unreadable.known, '监听者表读不出来却被当成「不忙」').toBe(false)
+
+    // 反面：**有**监听者、但答案确实是空的 ⇒ known:true + 空来源（不是 known:false）。
+    const empty = await busySourcesFrom(
+      busyCtx({
+        liveAgents: [{ id: 'session-idle', status: 'idle' }],
+        jobRecords: [],
+        emptyActivity: true,
+      }),
+    )
+    expect(empty.known, '有监听者却被当成「没有提供方」').toBe(true)
+    expect(empty.known && empty.value).toEqual([])
+  })
+
+  it('三个服务面缺任何一个 ⇒ known:false（fail-closed，不是「不忙」）', async () => {
+    const cases: Array<{ label: string; ctx: unknown }> = [
+      { label: '没有 agents', ctx: busyCtx({ agents: false }) },
+      { label: '没有 jobs', ctx: busyCtx({ jobs: false }) },
+      { label: '没有 waterfall', ctx: busyCtx({ waterfall: false }) },
+    ]
+    for (const item of cases) {
+      const observed = await busySourcesFrom(item.ctx)
+      expect(observed.known, `${item.label}: 被当成了「不忙」`).toBe(false)
+      expect(JSON.stringify(observed)).not.toBe(JSON.stringify({ known: true, value: [] }))
+    }
+  })
+
+  it('真实 cordis 形状下也分得开：真 ctx 有监听者 ⇒ known:true；换一个 ctx 注册 ⇒ 读得到', async () => {
+    // ⚠️ 上面那些用的都是**手搓夹具**（坑 40 的另一种形态：夹具与真实形状不一致时，
+    // 判据测的不是那条路）。这一条用**真的** `@deepseek-ai/cordis` 的 `Context`：
+    // 在**子 ctx** 上注册监听者，再从**父 ctx** 读 `_hooks` —— 这正是宿主里
+    // 「提供方在自己的 ctx 上注册、我们在插件 ctx 上数」的那个形状。
+    const root = new Context()
+    // `provide`（不是 `set`）：`set` 只能改一个**已经被 provide 过**的服务（实测报
+    // `cannot set property "agents" without provide`）。
+    root.provide('agents', { list: () => [{ id: 'session-a', status: 'idle' }] })
+    root.provide('jobs', { list: () => [] })
+    // `workspace/session-activity` 不在基座 `Events` 里（它由宿主包做模块增强）⇒
+    // 按**结构面**注册 —— 宿主里那几个提供方自己也是这么挂的。
+    const provider = root.extend() as unknown as {
+      on(
+        name: string,
+        listener: (
+          request: unknown,
+          next: () => Promise<readonly unknown[]>,
+        ) => Promise<readonly unknown[]>,
+      ): unknown
+    }
+    provider.on('workspace/session-activity', async (_request, next) => await next())
+
+    const observed = await busySourcesFrom(root)
+    expect(observed.known, '真实 cordis 形状下把「有监听者」读成了「没有提供方」').toBe(true)
+    expect(observed.known && observed.value).toEqual([])
+
+    // 反面：**没有**任何监听者的真 ctx ⇒ known:false（同一个读数不能恒真）。
+    const bare = new Context()
+    bare.provide('agents', { list: () => [] })
+    bare.provide('jobs', { list: () => [] })
+    const none = await busySourcesFrom(bare)
+    expect(none.known, '真 ctx 上没有任何监听者却判 known:true').toBe(false)
+  })
+})
+
+// ── 14. 退出通道与审批服务：结构面 ─────────────────────────────────────────
+
+describe('dsh_restart · appExit 与审批服务的结构面', () => {
+  it('appExit 取不到 ⇒ undefined（绝不退回 process.exit）；形状不对也一样', () => {
+    expect(appExitOf({ get: () => undefined })).toBeUndefined()
+    expect(appExitOf({ get: () => 'not a function' })).toBeUndefined()
+    expect(appExitOf({})).toBeUndefined()
+    const channel = (): void => undefined
+    expect(appExitOf({ get: () => channel })).toBe(channel)
+  })
+
+  it('审批档位：读不到 / 不是闭集里的值 / 抛异常 ⇒ 一律 undefined（fail-closed）', () => {
+    const agent = { session: {} }
+    expect(approvalPolicyOf({ get: () => undefined }, agent)).toBeUndefined()
+    expect(approvalPolicyOf({ get: () => ({}) }, agent)).toBeUndefined()
+    expect(
+      approvalPolicyOf({ get: () => ({ effectivePolicy: () => 'sometimes' }) }, agent),
+    ).toBeUndefined()
+    expect(
+      approvalPolicyOf(
+        {
+          get: () => ({
+            effectivePolicy: () => {
+              throw new Error('boom')
+            },
+          }),
+        },
+        agent,
+      ),
+    ).toBeUndefined()
+    expect(approvalPolicyOf({ get: () => ({ effectivePolicy: () => 'ask' }) }, agent)).toBe('ask')
+    expect(approvalPolicyOf({ get: () => ({ effectivePolicy: () => 'never' }) }, agent)).toBe(
+      'never',
+    )
+    // agent 上没有 session ⇒ 读不出档位（不是「没有档位 = 随便做」）。
+    expect(
+      approvalPolicyOf({ get: () => ({ effectivePolicy: () => 'never' }) }, {}),
+    ).toBeUndefined()
+  })
+
+  it('审批请求：抛异常 / 返回非闭集值 ⇒ unavailable（fail-closed）；闭集值原样透传', async () => {
+    const agent = { session: {} }
+    expect(await approvalRequestOf({ get: () => undefined }, agent, 'why')).toBe('unavailable')
+    expect(
+      await approvalRequestOf(
+        {
+          get: () => ({
+            request: async () => {
+              throw new Error('outside an open turn')
+            },
+          }),
+        },
+        agent,
+        'why',
+      ),
+    ).toBe('unavailable')
+    expect(
+      await approvalRequestOf({ get: () => ({ request: async () => 'maybe' }) }, agent, 'why'),
+    ).toBe('unavailable')
+    expect(
+      await approvalRequestOf(
+        { get: () => ({ request: async () => 'allowed-once' }) },
+        agent,
+        'why',
+      ),
+    ).toBe('allowed-once')
+  })
+})
+
+// ── 15. 描述层与 L2 ───────────────────────────────────────────────────────
+
+describe('dsh_restart · 描述与 L2', () => {
+  it('描述是四段骨架、段序固定、在字符上限内', async () => {
+    const text = composeDescription(RESTART_DESCRIPTION)
+    const lines = text.split('\n')
+    expect(lines.length).toBeLessThanOrEqual(DESCRIPTION_MAX_LINES)
+    expect(text.length).toBeLessThanOrEqual(DESCRIPTION_MAX_CHARS)
+    // 三件必须说清的事（判据是「模型看不到会不会做错决定」）。
+    expect(text).toContain('cannot reach another instance')
+    expect(text).toContain('ask prompts, never does not')
+    expect(text).toContain('file sandbox')
+    expect(RESTART_DESCRIPTION.cost, '行动类工具必须写代价段').toBeTruthy()
+  })
+
+  it('`keyText` 能喂空对象（守卫合成的兜底就是 `{}`），且不给默认值', () => {
+    expect(keyText({} as never)).toEqual([])
+    expect(keyText({ stage: 'gates', dryRun: false, markerWritten: false } as never)).toEqual([
+      'stage: gates',
+    ])
+  })
+})
+
+// ── 16. appExit 缺失：**动手之前**就拒绝（MUST-1） ─────────────────────────
+
+describe('dsh_restart · appExit 缺失：动手之前就拒绝', () => {
+  it('零写零拉起零退出，且 verdict **不出现**「the restart was not started」那种相反陈述', async () => {
+    const home = await tempDshHome()
+    // ⚠️ **必须真的传 `exitChannel`**：这个选项以前从没有用例传过 ⇒ 那条分支**从未被执行**
+    // （复核原话）。显式给 `undefined` = 「宿主没提供退出通道」那一格。
+    const h = harnessFor(home, { policy: 'never', exitChannel: undefined })
+    const failure = expectFail(await run(h.tool, ARGS, execFor()))
+
+    expect(failure.kind).toBe('not-configured')
+    // 判据一（根因，不是症状）：拉起**一次都没发生**、marker **一次都没写**。
+    // 把 bug 改回去（先拉起、后取 appExit）时，这两条各判红一次。
+    expect(h.fs.writes, 'appExit 取不到却写了 marker').toHaveLength(0)
+    expect(h.launchCalls, 'appExit 取不到却拉起了 —— 那正是双宿主那一半').toHaveLength(0)
+    expect(h.exitCalls, 'appExit 取不到却退出了').toHaveLength(0)
+    // 判据二（文本）：verdict 不许说「没开始」。改回旧顺序时它会变回
+    // 'the restart was not started: …' —— 而那时拉起**已经发生** ⇒ 说假话。
+    expect(failure.data.verdict).not.toContain('the restart was not started')
+    expect(failure.data.verdict).toContain('nothing was written and nothing was relaunched')
+    expect(failure.data.verdict).toContain('appExit')
+    // 先决条件在审批门**之前**判：这一格连审批窗都不该弹。
+    expect(h.requestCalls, '先决条件不过却弹了审批窗').toHaveLength(0)
+    expect(h.policyCalls, '先决条件不过却读了审批档').toHaveLength(0)
+  })
+
+  it('dryRun 也报出这条先决条件（演练的全部价值就是「这次会不会成」）', async () => {
+    const home = await tempDshHome()
+    const h = harnessFor(home, { policy: 'never', exitChannel: undefined })
+    const failure = expectFail(await run(h.tool, { ...ARGS, dryRun: true }, execFor()))
+    expect(failure.data.verdict).toContain('appExit')
+    expect(h.fs.writes).toHaveLength(0)
+    expect(h.launchCalls).toHaveLength(0)
+  })
+
+  it('通道在场时行为不变（反空转：上面那两条不是因为这条路径根本不碰 exit）', async () => {
+    const home = await tempDshHome()
+    const h = harnessFor(home, { policy: 'never' })
+    expectOk(await run(h.tool, ARGS, execFor()))
+    expect(h.fs.writes).toHaveLength(1)
+    expect(h.launchCalls).toHaveLength(1)
+    expect(h.exitCalls).toEqual([0])
+  })
+})
+
+// ── 17. 命令行长度上限（EXTRA-2，文档值） ─────────────────────────────────
+
+describe('dsh_restart · 拉起的命令行长度上限（schtasks /tr 的文档值）', () => {
+  it('超长 ⇒ 结构化拒绝，且**零写零拉起**（动手之前拒）', async () => {
+    const home = await tempDshHome()
+    const h = harnessFor(home, {
+      policy: 'never',
+      launch: {
+        known: true,
+        value: {
+          command: 'node',
+          args: ['bin.js'],
+          cwd: `C:/${'x'.repeat(SCHTASKS_TR_MAX_CHARS)}`,
+        },
+      },
+    })
+    const failure = expectFail(await run(h.tool, ARGS, execFor()))
+    expect(failure.kind).toBe('not-configured')
+    expect(failure.data.verdict).toContain('nothing was written and nothing was relaunched')
+    expect(failure.data.verdict).toContain(String(SCHTASKS_TR_MAX_CHARS))
+    // 模型要能看见「哪条行超了」——`key.relaunch` 就是那条行。
+    expect(String(failure.data.key['relaunch']).length).toBeGreaterThan(SCHTASKS_TR_MAX_CHARS)
+    expect(h.fs.writes, '命令行超限却写了 marker').toHaveLength(0)
+    expect(h.launchCalls, '命令行超限却拉起了').toHaveLength(0)
+    expect(h.exitCalls).toHaveLength(0)
+  })
+
+  it('win32：边界逐字钉住 —— 正好 261 放行、262 拒绝，且超限时**不起子进程**', async () => {
+    const recorder = recordingSpawn(() => cmdResult())
+    const makeRequest = (length: number): RelaunchRequest => ({
+      command: 'node',
+      args: [],
+      cwd: 'C:/repo',
+      commandLine: 'x'.repeat(length),
+      delayMs: 0,
+      budgetMs: 5_000,
+    })
+    // ⚠️ **构造 + 执行**整段都在 withPlatform 里（坑 25 的隐蔽变体）。
+    const atLimit = await withPlatform(
+      'win32',
+      async () =>
+        await relaunchViaTaskScheduler(recorder.spawn, makeRequest(SCHTASKS_TR_MAX_CHARS)),
+    )
+    expect(atLimit.ok, '正好在上限上却被拒 —— 边界不是「大于等于就拒」').toBe(true)
+    const callsAfterLimit = recorder.calls.length
+    expect(callsAfterLimit).toBe(2)
+
+    const overLimit = await withPlatform(
+      'win32',
+      async () =>
+        await relaunchViaTaskScheduler(recorder.spawn, makeRequest(SCHTASKS_TR_MAX_CHARS + 1)),
+    )
+    expect(overLimit.ok).toBe(false)
+    expect(overLimit.ok === false && overLimit.reason).toContain(String(SCHTASKS_TR_MAX_CHARS))
+    expect(recorder.calls.length, '超限还起了子进程').toBe(callsAfterLimit)
+  })
+})
+
+// ── 18. 命令行里的 cmd 元字符必须加引号（EXTRA-1） ────────────────────────
+
+describe('dsh_restart · 命令行对 cmd 元字符加引号', () => {
+  it('路径里**没有空格但有 `&`** ⇒ 那条 argv 必须带引号（否则 cmd 在那里断开、错起一条命令）', async () => {
+    const home = await tempDshHome()
+    const h = harnessFor(home, {
+      policy: 'never',
+      launch: {
+        known: true,
+        value: {
+          command: 'C:/R&D/node.exe',
+          args: ['C:/R&D/bin.js'],
+          cwd: 'C:/R&D',
+        },
+      },
+    })
+    const data = expectOk(await run(h.tool, ARGS, execFor()))
+    const line = String(data.key['relaunch'])
+    // 判据是**引号真的在**：把 bug 改回去（只按空格/制表/引号判）时这三段全是裸的 ⇒ 判红。
+    expect(line).toContain('"C:/R&D/node.exe"')
+    expect(line).toContain('"C:/R&D/bin.js"')
+    expect(line).toContain('cd /d "C:/R&D"')
+    // 交出去的那条行与 `key` 里逐字相同（模型复核的就是它）。
+    expect(h.launchCalls[0]?.commandLine).toBe(line)
+  })
+
+  it('其余元字符（`|` `^` `<` `>` `(` `)`）与空白同样加引号', async () => {
+    const home = await tempDshHome()
+    const h = harnessFor(home, {
+      policy: 'never',
+      launch: {
+        known: true,
+        value: {
+          command: 'node',
+          args: ['a|b', 'c^d', 'e<f', 'g>h', 'i(j)', 'k l', 'm\tn'],
+          cwd: 'C:/repo',
+        },
+      },
+    })
+    const data = expectOk(await run(h.tool, ARGS, execFor()))
+    const line = String(data.key['relaunch'])
+    for (const raw of ['a|b', 'c^d', 'e<f', 'g>h', 'i(j)', 'k l', 'm\tn']) {
+      expect(line, `${raw} 没被加引号`).toContain(`"${raw}"`)
+    }
+    // 反空转：不含元字符的普通参数**不许**被无谓地加引号（否则这条判据对「一律加引号」也绿）。
+    expect(line).toContain('& node')
+  })
+})
+
+// ── 19. 兜底分支的 `key.stage` 按调用点报（低危 1） ────────────────────────
+
+describe('dsh_restart · 兜底分支的 stage 按调用点报', () => {
+  it('marker 写完之后炸 ⇒ stage 是 `relaunch`（不是恒定的 `gates`）', async () => {
+    const home = await tempDshHome()
+    const h = harnessFor(home, { policy: 'never', relaunchThrows: true })
+    const failure = expectFail(await run(h.tool, ARGS, execFor()))
+    expect(failure.kind).toBe('internal')
+    // 顺序是判据：抛之前 marker 已经写完（拉起替身被调用过，且在写之后）。
+    expect(h.fs.writes).toHaveLength(1)
+    expect(h.launchCalls).toHaveLength(1)
+    expect(failure.data.key['stage'], '兜底把「marker 已写完」报成了「还没动手」').toBe('relaunch')
+  })
+
+  it('还没动手就炸 ⇒ stage 仍是 `gates`（同一个字段两格必须分得开）', async () => {
+    const home = await tempDshHome()
+    const h = harnessFor(home, { portThrows: 'history' })
+    const failure = expectFail(await run(h.tool, ARGS, execFor()))
+    expect(failure.kind).toBe('internal')
+    expect(failure.data.key['stage']).toBe('gates')
+    expect(h.fs.writes).toHaveLength(0)
+  })
+})
+
+// ── 20. `at` 坏掉的 marker 不许静默绕过闸①（低危 2） ──────────────────────
+
+describe('dsh_restart · marker 的 `at` 解析不出来 ⇒ 历史不可信', () => {
+  it('consumed / armed 两种状态都是 `known:false`（压成 `[]` = 静默绕过 60 秒冷却）', async () => {
+    for (const state of ['consumed', 'armed'] as const) {
+      const fs = makeFs({ seed: markerText({ at: 'not-a-timestamp', state }) })
+      const history = await restartHistoryFrom(fs.port, 'C:/home')
+      expect(history.known, `${state}: 坏掉的 at 被当成了「没有重启过」`).toBe(false)
+      expect(JSON.stringify(history)).not.toBe(JSON.stringify({ known: true, value: [] }))
+    }
+    // 反空转：同一个状态、`at` 正常时**必须**是 known:true 且带那个时刻。
+    const ok = makeFs({ seed: markerText({ state: 'consumed' }) })
+    expect(await restartHistoryFrom(ok.port, 'C:/home')).toEqual({ known: true, value: [NOW] })
+  })
+})
+
+// ── 21. subagent 族「不单独枚举」的**结构性**护栏 ─────────────────────────
+
+describe('dsh_restart · subagent 族由 `agents.list()` 覆盖（不重复枚举）', () => {
+  it('`busySourcesFrom` 里没有 `subagent` 分支，也没有按 `parentSession` / `origin` 过滤', () => {
+    // 这条护栏守的是**结构**，不是取值：上面那条「后代可见」的用例证明的是**取值**。
+    // 两者合起来才是完整判据 —— 只留取值那条，别人把 `subagent` 族再枚举一遍
+    // （重复计数、evidence 里同一个会话两个标签）时它照样是绿的。
+    const source = readFileSync(join(REPO_ROOT, 'src', 'tools', 'dsh_restart.ts'), 'utf8')
+    const body = source.slice(
+      source.indexOf('export async function busySourcesFrom'),
+      source.indexOf('/** 取一个忙来源的标识'),
+    )
+    expect(body.length, '锚点没找到 —— 下面两条是空转').toBeGreaterThan(500)
+    expect(body, '`subagent` 族被重复枚举了（它已由 agents.list() 覆盖）').not.toContain(
+      "kind === 'subagent'",
+    )
+    expect(body, '按 lineage 过滤会把 agents.list() 已经算进来的后代又排除掉').not.toContain(
+      'parentSession',
+    )
+    expect(body).not.toContain('origin')
+  })
+})

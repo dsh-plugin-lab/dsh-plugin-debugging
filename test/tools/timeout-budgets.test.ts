@@ -39,15 +39,15 @@ import { createDiagnosePluginLoadTool } from '../../src/tools/dsh_diagnose_plugi
 import { createHotReloadTool } from '../../src/tools/dsh_hot_reload.ts'
 import { createSignCookieTool } from '../../src/tools/dsh_sign_cookie.ts'
 import { createListInstancesTool } from '../../src/tools/dsh_list_instances.ts'
+import { createRestartTool, type RestartHost } from '../../src/tools/dsh_restart.ts'
 import type { ReloadHost } from '../../src/lib/hot-reload.ts'
 import { configFor, depsFor } from './helpers.ts'
 
 /** 仓根：本文件在 `test/tools/` 下。 */
 const REPO_ROOT = fileURLToPath(new URL('../../', import.meta.url))
 
-/** 六个工具文件所在目录（相对仓根）。 */
+/** 工具文件所在目录（相对仓根）。 */
 const TOOLS_DIR = 'src/tools'
-
 /** 全部工作量档（**闭集**：加档时这里会跟着编译报错，逼人回来看这条判据）。 */
 const WORKLOADS: readonly Workload[] = ['quick', 'schemaDump']
 
@@ -55,10 +55,10 @@ const WORKLOADS: readonly Workload[] = ['quick', 'schemaDump']
 const SLOW_DEFAULT_FLOOR_MS = 60_000
 
 /** 快档默认值（既有配置的含义，不许悄悄变）。 */
-const QUICK_DEFAULT_MS = 15_000
+const QUICK_DEFAULT_MS = 60_000
 
 describe('工作量 → 预算：唯一映射点的取值面', () => {
-  it('两个默认值：快档 15_000、慢档 ≥ 60_000（下界有理由，写在 timeouts.ts）', () => {
+  it('两个默认值：快档 60_000、慢档 ≥ 快档 × 4（下界有理由，写在 timeouts.ts）', () => {
     expect(WORKLOAD_DEFAULT_BUDGET_MS.timeoutMs).toBe(QUICK_DEFAULT_MS)
     expect(WORKLOAD_DEFAULT_BUDGET_MS.schemaDumpTimeoutMs).toBeGreaterThanOrEqual(
       SLOW_DEFAULT_FLOOR_MS,
@@ -174,7 +174,7 @@ describe('工作量 → 预算：唯一映射点的取值面', () => {
   })
 })
 
-describe('六个工具只声明工作量：预算一律经 toolBudgetMs 取', () => {
+describe('工具只声明工作量：预算一律经 toolBudgetMs 取', () => {
   /** 两个预算都**不等于默认值且彼此不同**：抄错字段 / 硬编码字面量都会在这里现形。 */
   const probeConfig = configFor('/tmp/nowhere', {
     timeoutMs: 4_242,
@@ -189,6 +189,26 @@ describe('六个工具只声明工作量：预算一律经 toolBudgetMs 取', ()
       resolveEntryUrl: async () => '',
       importFresh: async () => ({}),
       candidates: () => [],
+    }
+  }
+
+  /** 行动类工具要四个宿主面；构造工具**不会**调用它们（定义是惰性的）。 */
+  function restartStub(): RestartHost {
+    return {
+      ports: {
+        fs: { read: async () => ({ status: 'absent' }), write: async () => undefined },
+        restartHistory: async () => ({ known: true, value: [] }),
+        busySessions: async () => ({ known: true, value: [] }),
+        bundles: async () => ({ known: true, value: [] }),
+        launchCommand: async () => ({
+          known: true,
+          value: { command: 'node', args: [], cwd: '/' },
+        }),
+        now: () => 0,
+      },
+      approval: { policyOf: () => 'never', request: async () => 'rejected' },
+      launch: { relaunch: async () => ({ ok: true, detail: 'stub' }) },
+      exit: { exit: () => undefined },
     }
   }
 
@@ -231,6 +251,12 @@ describe('六个工具只声明工作量：预算一律经 toolBudgetMs 取', ()
       build: () => createListInstancesTool(depsFor(probeConfig)),
     },
     {
+      // 行动类工具：读两个小文件 + 跑两条 `schtasks` ⇒ 快档（它不是 dump 那种 CPU 密集的活）。
+      name: 'dsh_restart',
+      workload: 'quick',
+      build: () => createRestartTool({ ...depsFor(probeConfig), restart: restartStub() }),
+    },
+    {
       // **唯一**的慢档：它跑 `--dump-config-schema`。
       name: 'dsh_dump_config',
       workload: 'schemaDump',
@@ -239,7 +265,7 @@ describe('六个工具只声明工作量：预算一律经 toolBudgetMs 取', ()
   ]
 
   it('每个工具的 timeoutMs 都等于它那一档的预算（不是默认值、不是另一个字段）', () => {
-    expect(TOOLS, '工具清单被人改过 —— 这条判据按名字点名，必须同批改').toHaveLength(7)
+    expect(TOOLS, '工具清单被人改过 —— 这条判据按名字点名，必须同批改').toHaveLength(8)
     for (const item of TOOLS) {
       const tool = item.build()
       expect(tool.timeoutMs, `${item.name} 的 timeoutMs 不是它那一档的预算`).toBe(
@@ -272,6 +298,8 @@ describe('六个工具只声明工作量：预算一律经 toolBudgetMs 取', ()
         return createSignCookieTool(depsFor(config)).timeoutMs ?? 0
       case 'dsh_list_instances':
         return createListInstancesTool(depsFor(config)).timeoutMs ?? 0
+      case 'dsh_restart':
+        return createRestartTool({ ...depsFor(config), restart: restartStub() }).timeoutMs ?? 0
       case 'dsh_hot_reload':
         return createHotReloadTool({ ...depsFor(config), reload: reloadStub() }).timeoutMs ?? 0
       case 'dsh_dump_config':
@@ -371,7 +399,7 @@ describe('源码扫描：预算只在 lib/timeouts.ts 里，工具只声明工�
   /** 七个工具文件（`dsh_*.ts`）；`index.ts` / `shared.ts` / `describe.ts` 不是工具。 */
   const toolFiles = sources.filter((item) => item.path.includes('/dsh_'))
 
-  it('自证扫到了东西：工具目录非空、七个工具文件都在且都不是空文件', () => {
+  it('自证扫到了东西：工具目录非空、八个工具文件都在且都不是空文件', () => {
     expect(sources.length, '居然扫出 0 个文件 —— 路径写错了，下面全是空转').toBeGreaterThan(6)
     expect(
       toolFiles.map((item) => item.path.replace(`${TOOLS_DIR}/`, '')).sort(),
@@ -383,6 +411,7 @@ describe('源码扫描：预算只在 lib/timeouts.ts 里，工具只声明工�
       'dsh_dump_config.ts',
       'dsh_hot_reload.ts',
       'dsh_list_instances.ts',
+      'dsh_restart.ts',
       'dsh_sign_cookie.ts',
     ])
     for (const item of toolFiles) {
@@ -398,7 +427,7 @@ describe('源码扫描：预算只在 lib/timeouts.ts 里，工具只声明工�
     ).toEqual([])
   })
 
-  it('七个工具各自声明一次工作量，且**慢档只有 dump_config 一个**', () => {
+  it('每个工具各自声明一次工作量，且**慢档只有 dump_config 一个**', () => {
     const declared = toolFiles.map((item) => ({
       path: item.path,
       workload: WORKLOAD_DECLARATION.exec(stripComments(item.text))?.[1],

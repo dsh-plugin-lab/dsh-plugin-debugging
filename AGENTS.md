@@ -6,19 +6,20 @@
 
 - 版本以 [package.json](package.json) 的 `version` 为准
 - **已发布到 npm**（当前版本见 [package.json](package.json)；`latest` 与 dist-tags 以 registry 为准）。**`0.2.0` 是第一个由 `release.yml` 发出的版本**（带 provenance）；`0.1.0` 是手动发的、**没有** provenance。SLSA 徽章的真实性判据写在 [README.md](README.md) 的徽章注释里（对**具体版本**查 attestations 端点）。版本线与判例见 [docs/PUBLISHING.md](docs/PUBLISHING.md)
-- **能力面 = 1 个技能 + 7 个工具**：5 个只读（`dsh_check_effect_mode` / `dsh_diagnose_plugin_load` / `dsh_check_auth` / `dsh_dump_config` / **`dsh_list_instances`** —— 最后一个是 D′ 的**发现**工具：列本机活着的 DSH，**只给 authority（`host:port`）、给不出 `DSH_HOME`**）、**1 个写侧** `dsh_hot_reload`（已实现、已真机验证；算法与关键语义见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §5）、**1 个派生** `dsh_sign_cookie`（唯一会经手秘密的工具，**cookie 值刻意不进返回值**）。**目标形态与后续工具的归属见 [docs/SHAPE.md](docs/SHAPE.md)**（`dsh_restart` 排在最后）
+- **能力面 = 1 个技能 + 8 个工具**：5 个只读（`dsh_check_effect_mode` / `dsh_diagnose_plugin_load` / `dsh_check_auth` / `dsh_dump_config` / **`dsh_list_instances`** —— 最后一个是 D′ 的**发现**工具：列本机活着的 DSH，**只给 authority（`host:port`）、给不出 `DSH_HOME`**）、**1 个写侧** `dsh_hot_reload`（已实现、已真机验证；算法与关键语义见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §5）、**1 个派生** `dsh_sign_cookie`（唯一会经手秘密的工具，**cookie 值刻意不进返回值**）、**1 个行动** `dsh_restart`（四道闸 → 审批门 → 真拉起 → 退出宿主；**已实现，真机闭环未跑**，见下方待办）。**目标形态与后续工具的归属见 [docs/SHAPE.md](docs/SHAPE.md)**
   —— 工具清单以 [src/tools/index.ts](src/tools/index.ts) 的注册处为真源，红线 B9 钉住名字闭集。
 - **本仓是两个半边**：工具半边（`src/tools/`，都是代码）与技能半边（正文 + [src/skills/](src/skills/README.md) 的注册代码）。
   技能正文在 [skills/](skills/README.md)，它**是运行时载荷而不是文档** —— 同一目录下那两份双件才是文档，区别见那条目录的说明。
-- **「只读」纪律只覆盖诊断半边**：写侧改动必须先落决策 —— 见 [.agents/notes/2026-10-13-write-side-tool-boundaries.md](.agents/notes/2026-10-13-write-side-tool-boundaries.md)；**边界由 `test/redlines.test.ts` 的 B10（只读半边：杀进程 / fs 写入 / **写宿主数据路径** / 安装面，作用域是整个 `src/**`）与 B15（写侧只许碰进程内树，窄作用域 + 更严的记号判据）守着** —— 判据才是真源，规则的**唯一例外**写在下面「诊断半边保持只读」那一条里。
+- **「只读」纪律只覆盖诊断半边**：写侧改动必须先落决策 —— 见 [.agents/notes/2026-10-13-write-side-tool-boundaries.md](.agents/notes/2026-10-13-write-side-tool-boundaries.md)。**边界与唯一例外见下面「诊断半边保持只读」那一条**；判据才是真源（`test/redlines.test.ts` 的 B10 / B15）。
 - **输出契约 = `{ verdict, key, audit }`**（顶层恰好三键，成功失败同形）。冻结签名见 [docs/SHAPE.md](docs/SHAPE.md) §4.1；`hint` 已删、`evidence` 已并入 `data`；**`error.message` 不进模型文本**（它的角色与 `verdict` 不同，见 SHAPE §4.1 的字段角色表）
 
 ## 验证快照
 
-- **本机**：`npm run check` 全绿（**文件数与用例数都在漂，一律现查** —— 本节原先抄了「14 个 test files」，实测已是 16，见下一行那条纪律）；`tsc` 两个配置各 **0 error**；`lint` / `format:check` / `check:release`（**14 条**）全过（2026-10-14 实跑）
+- **本机**：`npm run check` 全绿；`tsc` 两个配置各 **0 error**；`lint` / `format:check` / `check:release` 全过（2026-10-14 实跑）
+  —— **文件数 / 用例数 / `check:release` 的条数都是会漂的值，一律现查**（`npm run test` 的汇总行、`npm run check:release` 的输出）
 - **红线**：覆盖面**以 `test/redlines.test.ts` 里 `describe('B…')` 的闭集为准** —— **不要在这里手抄编号清单，也不要抄用例数**。
   理由（踩过）：抄一次就意味着**每次加红线都得同批改这里**，而漏改的那次就是一句**骗人的假话**（本仓据此把「红线只到 B22」写错过一次）。
-  要个数就去 `npm run test` 看那一行 —— **文件数是稳定的，用例数不是**（本轮实测期间它就被并发写者从 455 推到 458）
+  要个数就去 `npm run test` 看那一行 —— **文件数是稳定的，用例数不是**（并发写者会让它在同一轮里就变）
 - **CI**：见 [.github/workflows/ci.yml](.github/workflows/ci.yml) 的 `CI Success`（唯一 required check）
 - 上面留的是**跑法 + 形状**；任何会漂的值（用例数、红线条数、行号、宿主版本号）一律现查
 
@@ -27,7 +28,7 @@
 - **结论必须来自实测**，不来自文档推断。引用宿主行为时写清是**哪一份真源、什么版本**
   —— 本机「在跑的宿主」与「源码检出」常常不是同一个版本。
 - **能落成校验的就不写散文**：不变量做成 `test/` 下的红线或 `scripts/` 下的检查，这里只留指针。
-- **诊断半边保持只读**：不改 profile、不写 `$DSH_HOME`、不杀进程。**写侧只做「不杀进程」的那一种**（就地换模块，失败放回旧版本）；**会杀掉宿主的重启类动作不引入**。任何越界的「顺手修一下」先落决策。**这条规则本身由机器判据守着**（`test/redlines.test.ts` 的 B10：杀进程 / fs 写入 / **写宿主数据路径** / 安装面四类，作用域是整个 `src/**`）；写侧的窄作用域与更严的记号判据是 B15。**唯一的例外**（维护者 2026-10-14 拍板的**精确命名空间**）：`$DSH_HOME/<包名>/` 这一层可以写 —— **只有紧跟 home 的第一段逐字等于包名**才放过（该层以下随便分；`profiles/<p>/<包名>`、`<包名>-logs` 这类**不放**）。
+- **诊断半边保持只读**：不改 profile、不写 `$DSH_HOME`、不杀进程。**写侧只做「不杀进程」的那一种**（就地换模块，失败放回旧版本）。**会杀掉宿主的重启类动作不并入写侧** —— 它是**独立的行动类**，靠四道闸 + 审批门 + marker 恢复（形态见 [docs/SHAPE.md](docs/SHAPE.md) §6.1）。任何越界的「顺手修一下」先落决策。**这条规则本身由机器判据守着**（`test/redlines.test.ts` 的 B10：杀进程 / fs 写入 / **写宿主数据路径** / 安装面四类，作用域是整个 `src/**`）；写侧的窄作用域与更严的记号判据是 B15。**唯一的例外**（维护者 2026-10-14 拍板，**精确命名空间 / 形态 A**）：`$DSH_HOME/<包名>/` 这一层可以写 —— **只有紧跟 home 的第一段逐字等于包名**才放过，其余顶层项照旧禁止。清单与四条边界用例见 [docs/SHAPE.md](docs/SHAPE.md) §10.3。
 - **一处一事实，别处只留指针**：一个事实有两个落点时，删掉一个。
 - **改动连带同步点**：谁引用了你改过的路径 / 名字 / 规则，同批改。双语门面（[README.md](README.md)
   与 [README_zh.md](README_zh.md)）与两份 `locale/*.json` 是典型的成对件。
@@ -79,7 +80,7 @@ git diff --check
 
 - 设计说明（为什么这样分层）→ [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - 宿主契约台账（已核 / 已实测的宿主事实，调宿主 API 前先查）→ [docs/HOST-CONTRACTS.md](docs/HOST-CONTRACTS.md)
-- 插件形态方案（工具怎么分、JSON 怎么管、双通道、未做工具的归属、红线清单）→ [docs/SHAPE.md](docs/SHAPE.md)
+- 插件形态方案（工具怎么分、JSON 怎么管、双通道、工具的归属、红线清单）→ [docs/SHAPE.md](docs/SHAPE.md)
 - 发布流程与判例 → [docs/PUBLISHING.md](docs/PUBLISHING.md)
 - 发布态不变量（可执行的检查脚本）→ [scripts/check-release.mjs](scripts/check-release.mjs)
 - 展示元数据 → `locale/en.json` · `locale/zh.json`（只住这里，别处只留指针）
@@ -99,31 +100,11 @@ git diff --check
 
 ## 待办
 
-- [ ] **`dsh_restart`（做，分两卡）**：方案见 [docs/SHAPE.md](docs/SHAPE.md) §6.1，动手前先读
-      [docs/HOST-CONTRACTS.md](docs/HOST-CONTRACTS.md) §2（拉起与恢复的契约）。
-      **已拍板：做真拉起**。**审批语义 = 不声明静态审批，工具自己在动作前先读档位、再决定问不问**：
-      **`ask` 档**（`read-only` / `workspace-write`）⇒ 调 `ctx.get('approval').request(...)` 走官方审批门（弹窗），
-      **只有 `allowed-once` 才算允许**（`rejected` / `cancelled` / `unavailable` **一律当拒绝**，fail-closed）；
-      **`never` 档**（= `danger-full-access`）⇒ **不问、直接执行**（并在 `key`/`audit` 记 `policy=never, not required`）。
-      ⚠️ **`never` 的含义是「提示已关闭」，不是「拒绝一切」** —— 宿主 `decide()` 里 `policy==='never'` 直接返回 `rejected`，
-      所以**在那一档主动去问 = 必然被拒**，那会把「你什么都授权了」变成「什么都不许做」（**本仓踩过、已改正**）。
-      策略读不出来 / 服务缺席 ⇒ **fail-closed**（结构化拒绝，说清无法确定档位）。
-      机制真源见 `dsh-user-approval`（`decide()` 的 `never` 分支 + `effectivePolicy()`）、
-      档位接线见 profile 的 `cordis.yml`（`danger-full-access` ⇔ `sandbox: danger-full-access` + `approval: never`）、`[已核]`。**先 dry-run**。
-      **退出通道已核（2026-10-14）**：**`ctx.get('appExit')`** —— `AppExit = (code: number) => void`，语义「**等树 dispose 完**再退」；
-      `dsh web` 的启动器**实测真的 provide 它**（`provideCmdline(hostCtx, { …, exit: (code) => void shutdown.shutdown(code) })`）；
-      ⚠️ **别用 `process.exit`**（源码点名那条路 bypassing `ctx.appExit`），**取不到要转成结构化失败**（B24）；
-      **顺序：先 `await` 完 marker 的写，再调 `appExit`**。分级见 [docs/HOST-CONTRACTS.md](docs/HOST-CONTRACTS.md) §2.6。
-      **审批门的位置也是判据**：四道确定性闸门**全过之后**才轮到它，且实现要**两段式**（先 `dryRun` 探闸门不落盘 → 审批 → 再落盘）——
-      因为 `planRestart` 把「四道闸」与「写 marker」收在同一个入口里。**恢复是把 marker 标为已消费，不是删除**（宿主 `fs` 没有删除方法）。
-      落地分两卡：**库半边**（`src/lib/restart.ts`：marker 读写 + 四道闸 + 恢复判定，纯函数 + 注入面）与
-      **工具壳 + 注册**（壳要满足 `{verdict,key,audit}` 三键与 B24；注册要**同批**改 `EXPECTED_TOOLS` 的
-      **四份副本** + `toolShapes()` 等长，见 `test/redlines.test.ts` 的 B9）。
-      （`dsh_hot_reload` 已完成并真机验证，已从本清单移除 —— 设计与宿主事实分别见
-      [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §5 与 [docs/HOST-CONTRACTS.md](docs/HOST-CONTRACTS.md) §1。）
-- [ ] **`dsh_restart` 与「发现工具」的验证方式已定：隔离实例上验，不进 CI**（维护者 2026-10-14）。
-      理由同 [test/integration/README.md](test/integration/README.md) §0：要真起服务、要空闲端口、要 junction。
-      ⇒ 「重启 → 会话被唤醒 → notice 到达发起者」那条真机闭环**只能是本机红线**。
+- [ ] **`dsh_restart`：工具已落地并注册（2026-10-14），剩「真机闭环」+ 一条可达性实测**。
+      形态（四道闸 / 审批门 / marker / 恢复）见 [docs/SHAPE.md](docs/SHAPE.md) §6.1；宿主侧的拉起 / 恢复 / 退出契约见
+      [docs/HOST-CONTRACTS.md](docs/HOST-CONTRACTS.md) §2。
+      ⚠️ **仍欠两件，都只能在隔离实例上做**：① **`ctx.get('appExit')` 在本插件这一层的可达性未实测**（台账 §2.6 的 E10 仍标 `[无法判定]`）—— 它是退出那一步的前提，**真机闭环前必须钉死**；② 「重启 → 会话被唤醒 → notice 到达发起者」那条闭环没跑。
+      ⇒ **验证方式已定：隔离实例上验，不进 CI**（理由同 [test/integration/README.md](test/integration/README.md) §0：要真起服务、要空闲端口、要 junction）；那条真机闭环**只能是本机红线**。
 - [x] **客户端半边（`dsh.client` + keyed `tool.call.toolview`）→ 维护者 2026-10-14 拍板：不做**。
       它只影响**人**通道、不影响模型；而代价不小（新构建产物要进 `files` 并过 `check:release`、
       keyed 条目要在 call/result 两侧可重放、加 `dsh.client` **要重启宿主一次**）。
@@ -139,7 +120,7 @@ git diff --check
       → v1.1 可考虑让本仓自己的某个工具报出「技能半边注册成了没有、几个 agent」，
       这样「注册了但没生效」这类问题不必靠 winner 反推。
 - [ ] **`SKILL.md` 已解冻**（维护者 2026-10-13 拍板）：技能**跟着插件一起演化**，不再逐字冻结在 v2.1.4。
-      ① **「干预」一节已落地**（纳入写侧 `hot_reload` 与派生 `sign_cookie`，并写明 `restart` 尚不存在）；
+      ① **「干预」一节已落地**（纳入写侧 `hot_reload`、派生 `sign_cookie` 与行动 `restart`）；
       ② **已完成**（2026-10-14）：`SKILL.md` §3.8 首句与 §3.6 提问清单第 2 条、以及
       [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) 的工具表都改成了「Fiber 状态**能查、但不在 `Config.listConfigs` 里`**
       —— 插件侧走 `ctx.get('loader')` + `entry.fiber.state`（见活跃坑 19）。
@@ -157,7 +138,7 @@ git diff --check
 - [x] **红线批 2b：`B17 / B20a / B20b / B18a / B21 / B24`** —— **六条已全部落地**（2026-10-13 核；
       真源是 `test/redlines.test.ts` 里 `describe('B…')` 的闭集，规则与逐条判据见 [docs/SHAPE.md](docs/SHAPE.md) §10）。
       其中 **`B24`** 是 SHAPE §4 说的「契约的承载条件」（`execute` 全路径不抛）。
-      **B17 的取值面已改**（L1/L2 ∪ 目标工具自己的描述）。三条空转口见 [docs/SHAPE.md](docs/SHAPE.md) §10.0。
+      **B17 的取值面是** L1/L2 ∪ 目标工具自己的描述；**空转口清单**见 [docs/SHAPE.md](docs/SHAPE.md) §10.0（不在这里抄条数）。
 - [x] **技术债：收敛重复的测试助手** —— **已收敛**（2026-10-13）。`renderText` / `splitRender` /
       `sharedSubstrings` 三条各从 5/5/3 份合成 1 份，`test/tools/helpers.ts` 只增不改既有导出。
       实测净减 **183 行**（此前估的 350–500 与更早的 800–1000 都偏高：这三条助手本体只有 3–18 行，
@@ -248,7 +229,7 @@ git diff --check
     验证者的第一版探针只当数组用（`.find()`），`entryFound` **永远是 false**（**假阴性**，看着像「没有这个 entry」）。
     坑的反面同样成立：**别用「拒绝数组」的 helper 去取 `Symbol.iterator`** —— 它会把数组判成非法 →
     **每棵树都读出空**，表现得像「宿主没有任何 entry」（本仓 `src/lib/fiber.ts` 第一版踩过）。
-    **两种错法都静默**。现行写法见 `src/lib/loader.ts:185`（直接读 `Symbol.iterator`，两种形状通吃）。
+    **两种错法都静默**。现行写法在 `src/lib/loader.ts`（直接读 `Symbol.iterator`，两种形状通吃；按检索串现找，不按行号）。
 21. **读 `fiber._error` 时不要 `await fiber.await()`**：宿主的启动审计会 await，但**工具调用不能挂在一个
     可能永不 settle 的 fiber 上** —— 那会让「传输层先超时、再转结构化错误」这条纪律失效（工具永不返回）。
     只读已同步可见的字段。本仓用一条 `awaited` 标志的测试钉住这一点。
@@ -256,7 +237,7 @@ git diff --check
     （本仓 `worstOf`：严重级 failed>pending>unknown>disabled>active，同级按 `entryId` tie-break），
     否则「哪一行浮上来」会随遍历顺序漂，看起来像随机故障。
 23. **`.gitignore` 里的 `lib/` 必须锚定成 `/lib/`** —— 裸 `lib/` 匹配**任意深度**，于是把
-    `src/lib/`（本布局里的**源码**目录，12 个文件）一起忽略了。表现是本机全绿、`git ls-files`
+    `src/lib/`（本布局里的**源码**目录，文件数会随改动变）一起忽略了。表现是本机全绿、`git ls-files`
     里却没有它们，**CI 克隆下来直接缺文件**。这个坑来自组织脚手架模板的 `_common/.gitignore`
     （模板里就是裸 `lib/`），任何把源码放在 `src/lib/` 的新仓都会中招。**加了新目录后，
     用 `git status --ignored --porcelain` 看一眼「被忽略的到底有哪些」**，别只看 `git status`。
@@ -332,7 +313,7 @@ git diff --check
     （hmr 并不把服务注册成那个名字）。判断 hmr 可用性只有两条真源：**profile 文件**与 **`--dump-config`**
     （本仓工具走的正是这两条）。「读不到 hmr 服务」≠「没挂 hmr」。
 35. **观察面纠正：`resolved` 里没有 `timeoutMs`**。`EffectiveConfigBlock` 的字段只有
-    `{ dshHome, dshHomeSource, profile, port, portSource }`（`src/tools/shared.ts:182-193`）。
+    `{ dshHome, dshHomeSource, profile, port, portSource }`（`src/tools/shared.ts` 的 `EffectiveConfigBlock`，按类型名现找）。
     想验「改了配置有没有被重读」，可观察的是 **`resolved.profile`**（`dsh_check_effect_mode`），
     或 `resolved.port` / `portSource`（`dsh_check_auth` —— 但它在**错误路径**上不返回 `resolved`，
     所以 `profile` 是这两者里唯一稳定的一项）。**别拿不存在的字段当判据**：

@@ -30,7 +30,14 @@
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools'
 
 import { fail, ok, toToolError, type JsonValue, type NextStep } from '../lib/errors.js'
-import { budgetFor, createDeadline, toolBudgetMs, type Workload } from '../lib/timeouts.js'
+import {
+  budgetFor,
+  createDeadline,
+  PROBE_TIMEOUT_MS,
+  toolBudgetMs,
+  transportTimeoutMs,
+  type Workload,
+} from '../lib/timeouts.js'
 import { listListeners, type ListenerCandidate } from '../lib/ports.js'
 import type { RenderTable } from '../lib/render.js'
 import { composeDescription, type ToolDescription } from './describe.js'
@@ -42,18 +49,46 @@ export const LIST_INSTANCES_TOOL = 'dsh_list_instances'
 /**
  * 本工具的工作量档：**快档**。
  *
- * 它只做两件事：跑一条 socket 表命令 + 对若干回环端口发一次很小的未认证请求。
- * 探测**逐个串行**，全部落在同一份 deadline 里。
+ * 它只做两件事：跑一条 socket 表命令（本机实测 ~2.5 s）+ 对若干回环端口发一次很小的
+ * 未认证请求。探测**有界并发**、**每条独立上限**（`PROBE_TIMEOUT_MS`）——
+ * 最坏情况约 6.5 s，落在快档预算内。
  */
 const WORKLOAD: Workload = 'quick'
+
+/**
+ * 同时最多探几个候选。
+ *
+ * **它就是本工具耗时的主变量** —— 不是算法，是并发数：耗时 ≈ `ceil(候选数 / 并发) × 单条上限`。
+ *
+ * 本机实测（2026-10-14，`elapsed` 为端到端真实读数）：
+ *
+ * | 并发 | 48 个候选 | 实测 elapsed |
+ * |---|---|---|
+ * | 串行 | 29.6 s（37 个端口 × 800 ms 下限） | 15 s 传输超时、**什么都返回不了** |
+ * | 8 | 6 波 | **9.7 s**（其中扫描 ~2.5 s） |
+ * | 48（全量） | 1 波 | **约 4.5 s** |
+ *
+ * 而**全并行探 37 个回环端口只要 833 ms** —— 说明它不怕端口多，只怕并发低。
+ * 所以这里取「**一次问完**」而不是某个折中数：候选本身已被 `MAX_CANDIDATES` 截过，
+ * 全量并发 = 1 波，最坏 = 单条上限（`PROBE_TIMEOUT_MS`），**与候选数无关**。
+ * 对回环发几十个极小的未认证 GET 对机器没有可感压力（实测总耗时 833 ms 已经包含它）。
+ */
+const PROBE_CONCURRENCY = 48
 
 /**
  * 候选上限：超过就不再往下探。
  *
  * 为什么要有它：socket 表可能有几百行，逐个发请求会让一次调用变成一次**端口扫描**。
- * 上限之外的那些**不静默丢掉** —— `key.scan.truncated` 会说出来。
+ * 上限之外的那些**不静默丢掉** —— `key.scan.truncated` 会说出来，而 L1 **不许**在
+ * 还有候选没探时说「没有 DSH」（见 {@link verdictFor}）。
+ *
+ * ⚠️ **为什么从 24 提到 48**（2026-10-14 真机端到端实测）：本机 socket 表有 **63 行 /
+ * 52 个唯一端口**，而 24 个上限配合当时的取法（不排序、不去重）⇒ **真正在跑的那个
+ * DSH（`127.0.0.1:3080`）排在下标 58，永远进不了候选** ⇒ 工具报「no DSH host was found」。
+ * 48 是「8 并发 × 2 s 上限」在 13 s 传输窗口内能跑完的量级（约 6 波），再往上就该
+ * 靠 deadline 兜底并**如实报告没探到多少**，而不是继续抬这个数。
  */
-const MAX_CANDIDATES = 24
+const MAX_CANDIDATES = 48
 
 /**
  * DSH 未认证 `GET /` 的响应体 —— **逐字**这一段才是签名。
@@ -221,7 +256,12 @@ async function discover(
   signatureFetch: SignatureFetch,
 ): Promise<JsonValue> {
   const budget = toolBudgetMs(WORKLOAD, deps.config)
-  const deadline = createDeadline(budget, deps.now)
+  // ⚠️ **截止线画在「传输预算」上，不是工具预算上**（2026-10-14 端到端实测逼出来的）：
+  // 传输层在 `budget − TRANSPORT_MARGIN_MS`（默认 60 s − 2 s = 58 s）就切了，而那 2 s 余量
+  // 本来就是留给本插件**把结果结构化再返回**的。原先这里用 `budget` ⇒ 循环可以一直跑到
+  // 工具预算，可传输会先断 ⇒ **模型拿到的是裸超时，不是结构化输出**。
+  // 本工具的耗时是「扫描 + N 条探测」，正是最吃这条余量的形状。
+  const deadline = createDeadline(transportTimeoutMs(budget), deps.now)
 
   const explicit = explicitPort(args.port)
   const scan = await gatherCandidates(explicit, signal, deps, deadline, budget)
@@ -267,15 +307,28 @@ async function discover(
   }
 
   const instances: InstanceKey[] = []
-  for (const candidate of scan.candidates) {
+  // **有界并发 + 每条探测独立上限**（`PROBE_TIMEOUT_MS` 里写着为什么必须独立）。
+  //
+  // 原写法是「串行 + 每条拿 `budgetFor(budget, deadline)`（剩余总预算）」：本机实测 37 个
+  // 回环监听端口里 **9 个接受连接但永不回话** ⇒ 第一个这样的端口就把剩余总预算吃光，
+  // 整次调用超时（真机上真观察到 15 s 全丢）。串行即使给了上限也要 29.6 s（37 × 800 ms），
+  // 而并行只要 833 ms —— 所以两处一起改，而不是只调大预算。
+  for (let index = 0; index < scan.candidates.length; index += PROBE_CONCURRENCY) {
     if (deadline.expired()) break
-    instances.push(
-      await probeCandidate(candidate, {
-        fetch: signatureFetch,
-        timeoutMs: budgetFor(budget, deadline),
-        signal,
-      }),
+    const wave = scan.candidates.slice(index, index + PROBE_CONCURRENCY)
+    const probed = await Promise.all(
+      wave.map((candidate) =>
+        probeCandidate(candidate, {
+          fetch: signatureFetch,
+          // 上限取「独立上限」与「剩余总预算」的较小者：前者保证一个挂住的候选不拖垮别人，
+          // 后者保证整次调用不越过工具预算。
+          timeoutMs: Math.min(PROBE_TIMEOUT_MS, budgetFor(budget, deadline)),
+          signal,
+        }),
+      ),
     )
+    // `Promise.all` 保序 ⇒ 输出顺序与候选顺序一致，与串行版逐字相同。
+    instances.push(...probed)
   }
   if (signal.aborted) {
     return toOutput(
@@ -344,13 +397,40 @@ async function gatherCandidates(
       detail: scan.detail,
     }
   }
+  const ordered = orderCandidates(scan.candidates)
   return {
     status: 'scanned',
-    candidates: scan.candidates.slice(0, MAX_CANDIDATES),
+    candidates: ordered.slice(0, MAX_CANDIDATES),
     unidentified: scan.unidentified,
-    truncated: scan.candidates.length > MAX_CANDIDATES,
+    truncated: ordered.length > MAX_CANDIDATES,
     detail: scan.detail,
   }
+}
+
+/**
+ * 把 socket 表规整成候选：**按端口去重** + **按端口升序** + 截到上限。
+ *
+ * 两条都是真机端到端实测逼出来的（2026-10-14）：
+ *
+ * 1. **去重**：`Get-NetTCPConnection` 对双栈监听会**同一端口返回两行**（IPv4 + IPv6），
+ *    本机实测 63 行只有 52 个唯一端口 ⇒ 不去重的话 24 个探测位里 **16 个浪费在 8 个
+ *    端口上**（每个探两遍）。
+ * 2. **定序**：原来的顺序就是 `Get-NetTCPConnection` 的返回顺序，而它是**降序**的
+ *    （49724 → 135）⇒ **低端口排在最后**，于是默认端口 3080 被截断挡在外面。
+ *    升序不是「更可能命中」的保证，而是**确定性的**：同一张表两次读出同一个候选序
+ *    （本仓坑 22：定序必须写死，否则结论会随遍历顺序漂）。
+ *
+ * ⚠️ 它仍然**只是启发式**：真 DSH 若绑在一个排得很后的端口上，照样会被截断挡住 ——
+ * 所以**截断时必须说出来**（{@link verdictFor} 不许在这种情况下说「没有 DSH」）。
+ *
+ * @param candidates 原始候选（可能重复、顺序不定）。
+ */
+function orderCandidates(candidates: readonly ListenerCandidate[]): ListenerCandidate[] {
+  const byPort = new Map<number, ListenerCandidate>()
+  for (const candidate of candidates) {
+    if (!byPort.has(candidate.port)) byPort.set(candidate.port, candidate)
+  }
+  return [...byPort.values()].sort((left, right) => left.port - right.port)
 }
 
 /** 探一个候选：回环 + 未认证 `GET /` + 逐字签名。 */
@@ -462,33 +542,51 @@ function toKey(
 /**
  * 拼 L1。
  *
- * 三档分开写，因为它们对下一步的决定不同：
+ * 四档分开写，因为它们对下一步的决定不同：
  * - **有认领成功的** → 直接给出 authority，并说它可以喂给 `dsh_check_auth`；
- * - **一个都没认领到、但探过** → 说清「探过了、都不是」；
+ * - **一个都没认领到、且候选表被截断** → ⚠️ **不许**说「no DSH host was found」：
+ *   还有候选**没查过**，所以只能说「探过的那批里没有」；
+ * - **一个都没认领到、但都探过** → 才能说「探过了、都不是」；
  * - **全是没探到** → **不许**说成「没有 DSH」（三值纪律）。
+ *
+ * ⚠️ 第二档是**真机端到端实测逼出来的**（2026-10-14）：本机 socket 表 63 行 / 52 个唯一端口、
+ * 上限 24 时，真正在跑的那个 DSH（`127.0.0.1:3080`）排在下标 58 ⇒ 它报
+ * 「no DSH host was found」，而**那台宿主此刻就在服务**。把「没查完」印成「没有」
+ * 正是本工具文件头警告的那条三值违规。
  *
  * @param key 本次的 `key`。
  * @param dsh 认领成功的那些。
  */
 function verdictFor(key: ListInstancesKey, dsh: readonly InstanceKey[]): string {
-  const truncated = key.scan.truncated ? ' (the candidate list was truncated)' : ''
   if (dsh.length > 0) {
+    const more = key.scan.truncated
+      ? ' (the candidate list was truncated, so there may be more)'
+      : ''
     return (
       `found ${String(dsh.length)} DSH host(s) on this machine: ` +
       `${dsh.map((item) => item.authority).join(', ')} — pass one to dsh_check_auth as host:port; ` +
-      `discovery gives an authority only, never a DSH_HOME${truncated}`
+      `discovery gives an authority only, never a DSH_HOME${more}`
     )
   }
   const probed = key.instances.filter((item) => item.verdict !== 'unknown').length
   if (probed === 0) {
+    const truncated = key.scan.truncated ? ' (the candidate list was truncated)' : ''
     return (
       `nothing could be probed: ${String(key.instances.length)} listening port(s) were found but every probe failed, ` +
       `so whether any of them is a DSH host is unknown rather than absent${truncated}`
     )
   }
+  if (key.scan.truncated) {
+    // ⚠️ 这一档**不能**说「no DSH host was found」—— 还有候选根本没探。
+    return (
+      `none of the ${String(probed)} probed listening port(s) returned the DSH signature, but the candidate list ` +
+      `was truncated, so additional listening port(s) were never examined: this is "not found among those probed", ` +
+      `not "there is none on this machine" — pass a port to check one directly`
+    )
+  }
   return (
     `no DSH host was found: ${String(probed)} listening port(s) answered and none returned the DSH signature — ` +
-    `other services on this machine are not instances${truncated}`
+    `other services on this machine are not instances`
   )
 }
 

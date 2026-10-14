@@ -48,11 +48,12 @@ Installing it gives the model the tools to answer that question, and one skill c
 - **Swap one mounted entry to the code on disk** — in place, no restart, rolled back on failure.
 - **Sign a browser-session cookie** — so a script or CLI client can authenticate against your own instance.
 - **List the DSH hosts running on this machine** — a port is only claimed as DSH when the unauthenticated `GET /` returns the exact DSH body; "could not probe" is reported separately from "not DSH".
+- **Restart this host when a change needs it** — four deterministic gates first, then approval, then the marker, then the relaunch and the exit.
 
 The skill behind them carries the installation forms, credential acquisition, process identification, and isolated instances.
 **The tools are accelerators; where one is ambiguous, the skill text wins.**
 
-**Pointing at another instance.** The file-based tools (`dsh_dump_config`, `dsh_check_effect_mode`, `dsh_diagnose_plugin_load`, `dsh_sign_cookie`) take a `dshHome` argument, so you can read a second instance's disk evidence without restarting anything. Path resolution *and* the spawned `dsh` subprocess both use that home, and the output says which one it read (`dshHomeSource: tool-argument`) — the value is never silently reported as the configured default. Discovery tools can only hand you an authority (`host:port`); nothing maps an authority to a `dshHome`, so you supply the path. Two tools deliberately do **not** take it: `dsh_check_auth` answers about an authority (it already has `host`/`port`), and `dsh_hot_reload` swaps modules in **this** process's memory — that cannot cross into another instance. `dsh_diagnose_plugin_load` splits its answer accordingly: disk evidence belongs to the home you passed, while the Loader-tree half is **this process only**.
+**Pointing at another instance.** The file-based tools (`dsh_dump_config`, `dsh_check_effect_mode`, `dsh_diagnose_plugin_load`, `dsh_sign_cookie`) take a `dshHome` argument, so you can read a second instance's disk evidence without restarting anything. Path resolution *and* the spawned `dsh` subprocess both use that home, and the output says which one it read (`dshHomeSource: tool-argument`) — the value is never silently reported as the configured default. Discovery tools can only hand you an authority (`host:port`); nothing maps an authority to a `dshHome`, so you supply the path. Two tools deliberately do **not** take it: `dsh_check_auth` answers about an authority (it already has `host`/`port`), and `dsh_hot_reload` swaps modules in **this** process's memory — that cannot cross into another instance. `dsh_restart` does not take it either, and that is the sharper case: it kills the host it runs in, so there is no "other instance" it could be aimed at. `dsh_diagnose_plugin_load` splits its answer accordingly: disk evidence belongs to the home you passed, while the Loader-tree half is **this process only**.
 
 ## Install
 
@@ -81,14 +82,14 @@ Requirements: Node `>= 20`, and a DSH range that satisfies [package.json](packag
 - They restart nothing and rewrite no profile. They write nothing to `DSH_HOME` — **machine-checked**: the moment a write targets host data (`profiles` / `sessions` / `storages` / `logs` / `cache` / `attachments` / `backups` / `integrations` / `mcp` / `settings.yaml` / `.credentials.yaml` …) or takes `DSH_HOME` as its target, `npm test` fails. The **one** exception is this plugin's own namespace, `$DSH_HOME/<package name>/` — exactly that one top-level segment; anything below it is free.
 - `dsh_hot_reload` touches only the **running module tree**; it writes no profile, writes nothing to `DSH_HOME`, and kills no process.
 - `dsh_sign_cookie` reads your local signing key to sign a cookie for your own instance. It sends no request and writes nothing; the cookie value is deliberately **not** returned.
-- A restart helper is deliberately absent: it is the only action that can kill the host you are debugging.
+- `dsh_restart` is the one **irreversible** action: it exits the host you are debugging. It is gated by four deterministic checks (restart loop, other busy sessions and jobs, an unparseable composition, an undeterminable launch command) and then by a fifth, separate one — the **approval policy**, read first and only asked about when it is `ask`. `never` means prompts are off, so asking there would be refused by construction; that is why the policy is read before deciding whether to prompt. Writing the marker needs a second, independent gate: this plugin's own namespace is outside the default file sandbox, so the write is made with `danger-full-access`. Both gates are reported in the output. The relaunch goes through the Windows task scheduler; on a platform where no relaunch route has been measured, the tool refuses **before** it writes anything.
 
 ## Platform support
 
 Port-based process identification covers Windows, Linux and macOS.
 When no usable command is found it reports that it could not check — deliberately not "no listener", because those are opposite conclusions.
 The two weaker fallbacks may name a listener without naming its process; that stays reported as unidentified rather than as an empty list.
-Everything else is platform-neutral.
+Everything else is platform-neutral, with one exception: `dsh_restart` can only **relaunch** on Windows, where the task-scheduler route has been measured. Elsewhere it refuses before it writes anything — it will not write a marker and then discover it cannot bring the host back.
 
 ## Configuration
 
@@ -99,8 +100,8 @@ There is no settings card: these fields belong to the plugin's config in the pro
 | `dshHome` | `$DSH_HOME`, else `<home>/.dsh` | Where the instance keeps profiles, logs and credentials. |
 | `profile` | `$DSH_PROFILE`, else the default profile | Which profile the tools inspect. |
 | `port` | `0` | Host port to probe; `0` finds the listening port. |
-| `timeoutMs` | `15000` | Tool budget for a quick workload: a file read, one spawned command, or one HTTP probe. |
-| `schemaDumpTimeoutMs` | `60000` | Tool budget for the one tool that runs `--dump-config-schema` (measured 10.2–15.7 s; 32 s under load). |
+| `timeoutMs` | `60000` | Tool budget for a quick workload: a file read, one spawned command, or one HTTP probe. |
+| `schemaDumpTimeoutMs` | `240000` | Tool budget for the one tool that runs `--dump-config-schema` (measured 10.2–15.7 s; 32 s under load). |
 
 Inside a tool, each spawned command or HTTP probe is given 2 s less than its tool budget: the transport layer must time out before the host's tool deadline, otherwise the model receives a bare `TimeoutError` with no error kind and cannot tell whether retrying is useful.
 

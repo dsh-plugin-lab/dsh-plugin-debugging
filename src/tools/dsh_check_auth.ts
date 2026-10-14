@@ -2,8 +2,10 @@
  * `dsh_check_auth` —— 分开「连接被拒（没启动）」与「401（服务在、认证没过）」。
  *
  * 对应 SKILL §3.3 / §3.4。这是本工具**唯一**要回答的问题，因为两者的下一步完全相反：
- * 前者去启动，后者去换 authority / 凭证（cookie 绑定 `host:port`，**换端口才 401**，
- * 同端口重启旧 cookie 照常可用、30 天不滑动）。
+ * 前者去启动宿主；后者只能**换一条真能区分的路**（在浏览器里打开同一个 authority 看是不是
+ * 也 401）。**本工具的探测不带凭据**，所以它拿到的 401 是**匿名 401** —— 对「存的凭据还有没有效」
+ * 零信息，**不许**由它推出「authority 不匹配」这类结论（旧文案正是这么编的，已删）。
+ * cookie 绑定 `host:port`、30 天不滑动这些机制事实见 SKILL §3.3。
  *
  * ## 这一版（W2）的三处形状改造 —— 见 docs/SHAPE.md §2 / §3 / §4
  *
@@ -98,7 +100,9 @@ interface CheckAuthKey {
   /**
    * 凭证文件的**存在性**报告 —— 只在 **401** 那条路上出现。
    *
-   * 为什么只有那条路：只有「条目在不在」会改变 401 的下一步（有没有 cookie 可发）。
+   * ⚠️ 它是一条**观测事实**，**不是**判定依据：本工具的探测不带凭据，条目在不在
+   * **不改变** 401 的 verdict 与 nextStep（那两处因此都不按它分叉）。它进 `key` 是因为
+   * 模型/人要拿它去**自己判断**下一步（有没有可用的登录态），而不是让本工具替它下结论。
    * 它在成功路径上是噪声（§5 的判据：模型看不到它也不会换下一步）。
    * `file` / `line` 都在里面 —— 「文件在不在、哪一行」是 401 排查的原料。
    */
@@ -113,15 +117,17 @@ interface CheckAuthKey {
  * - `useWhen`：模型的路由信号（页面 401；或根本不知道宿主起没起）。这两句是旧的
  *   description 里唯一承重的部分，其余（输出结构复述）删掉。
  * - `boundary`：**两行**，承载从输出里搬出来的恒定知识：① v1 只判存在性、不读值、
- *   不自签 cookie（旧 `credentials.note` 与旧 `hint` 的恒定语）；② 「401 常是 authority
- *   变了，而不是凭证错」这个唯一的反直觉点（旧 `hint` 里那句 cookie 绑定 `host:port`）。
+ *   不自签 cookie，**也不发送任何凭据**；② cookie 绑定 `host:port` 这个机制 —— 但**只对
+ *   「带着 cookie 的浏览器页面」成立**：本工具的探测是匿名的，它那条 401 推不出
+ *   「authority 变了」。旧文案写的是「A 401 usually means the authority changed」，
+ *   那正是把不知道说成结论（与 L1 同批改掉）。
  *   观察类工具没有「代价段」，所以两行边界 + 两行前置 = 合成后仍是四行。
  */
 export const CHECK_AUTH_DESCRIPTION: ToolDescription = {
   what: 'Separates "not running" from "not authenticated".',
   useWhen: 'Use when the page returns 401, or the host may not be up.',
   boundary:
-    'Read-only: no secrets read, no cookies signed.\nA 401 usually means the authority changed: cookies are bound to host:port.',
+    'Read-only: no secrets read, no cookies signed or sent.\nA page 401 can mean a changed authority: cookies are bound to host:port.',
 }
 
 /** 输出表：L1 就是 `data.verdict` 逐字，L2 由 `key` 投影成行。 */
@@ -236,7 +242,9 @@ async function probeAuthentication(
     signal,
   })
 
-  // 凭证文件**只在 401 那条路上读**：只有那个结论取决于条目在不在。
+  // 凭证文件**只在 401 那条路上读**：那是唯一「有没有登录态」会影响**人**下一步的场景。
+  // ⚠️ 读它**只为陈述事实**（`key.credentials` 会渲染成 L2 的一行），**不参与判定** ——
+  // 本工具没发凭据，条目在不在都不改变 401 的 verdict / nextStep。
   // 顺带的好处是「没启动 / 超时 / 取消」三条路一次多余的文件 IO 都不做。
   const credentials =
     probe.kind === 'unauthorized'
@@ -258,7 +266,7 @@ async function probeAuthentication(
     resolved,
     ...(credentials === undefined ? {} : { credentials }),
   })
-  const verdict = verdictOf(probe, authority, credentials)
+  const verdict = verdictOf(probe, authority)
 
   if (probe.kind === 'timeout') {
     return toOutput(
@@ -307,17 +315,16 @@ async function probeAuthentication(
       fail(
         {
           kind: 'auth',
-          message: `${authority} returned 401 — the service is up but authentication failed (not "not running")`,
+          message: `${authority} returned 401 — the service is up and this request arrived unauthenticated (not "not running")`,
         },
         { verdict, key, audit },
         {
-          // 401 的两条出路都是「用户自己去浏览器做」：改地址栏，或重新登录。
-          // 观测到的条目在不在决定是哪一条（`credentials` 此刻必然有值）。
+          // 出路只有一条，而且只能由**人**做：本工具没发凭据，区分不了「登录态过期」与
+          // 「authority 不对」；在浏览器里打开同一个 authority 才区分得开。
+          // （v1.1 会自签 cookie 自己试一次，那时这一步可以自动化 —— 现在不做。）
+          // ⚠️ 这里**不许**按 `credentials` 分叉：条目在不在不改变本次探测观测到的事实。
           manual: true,
-          why:
-            credentials?.browserSessionPresent === true
-              ? 'make the authority match the browser address bar exactly, then reload: a grant is stored, and cookies are bound to host:port'
-              : 'sign in again in the browser at this exact authority: no browser-session grant is stored, so every request arrives unauthenticated',
+          why: 'open this exact authority in the browser and see whether it also returns 401: that separates a stale session from a changed authority, and this credential-free probe cannot',
         },
       ),
     )
@@ -343,25 +350,20 @@ async function probeAuthentication(
  * **成功失败都必填**，而且每句都要能回答「所以呢」—— 新契约里 `error.message` 不进模型
  * 文本，所以这一行是失败分支唯一的判定行。
  *
- * 401 那一档**按观测到的凭证条目分叉**：有授权记录时最可能是 authority 不匹配（cookie
- * 绑定 `host:port`），没有记录时就是得重新登录。两种下一步不同，一句话也就必须不同。
+ * ⚠️ **401 那一档故意不接收 `credentials`**：本工具的探测不带凭据，那条 401 是**匿名 401**
+ * （服务在、要鉴权），对「存的凭据有没有效 / authority 对不对」**零信息**。旧文案按
+ * 「有没有授权记录」分叉，等于**把不知道说成结论**；现在改成一句与凭据无关的判定，
+ * 事实（条目在不在）只留在 `key.credentials` 里**陈述**，不参与推论。
  *
  * @param probe 探测结果。
  * @param authority 本次探测的 authority。
- * @param credentials 401 时读到的存在性报告；其它路径为 `undefined`。
  */
-function verdictOf(
-  probe: HttpProbeResult,
-  authority: string,
-  credentials: CredentialsPresence | undefined,
-): string {
+function verdictOf(probe: HttpProbeResult, authority: string): string {
   switch (probe.kind) {
     case 'ok':
       return `the service at ${authority} is up and this request was accepted, so authentication is not what is failing here`
     case 'unauthorized':
-      return credentials?.browserSessionPresent === true
-        ? `the service at ${authority} is up but answered 401 even though a browser-session grant is stored, so the authority is the likely mismatch (cookies are bound to host:port)`
-        : `the service at ${authority} is up but answered 401 and no browser-session grant is stored, so the browser has to sign in at this authority again`
+      return `the service at ${authority} is up and requires authentication (401); this check sends no credentials, so it cannot tell whether any stored browser-session grant is valid`
     case 'not-running':
       return `nothing is listening on ${authority}, so no authentication verdict exists — the host is down, or it moved to another port`
     case 'timeout':
