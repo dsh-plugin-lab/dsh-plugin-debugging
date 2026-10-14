@@ -28,6 +28,7 @@ import {
 } from '../../src/tools/describe.ts'
 import { ensureToolResult, TOOL_ERROR_KINDS, toolResultProblem } from '../../src/lib/errors.ts'
 import { decideEffectMode, type EffectChangeKind, type EffectInput } from '../../src/lib/effect.ts'
+import { toolBudgetMs, TRANSPORT_MARGIN_MS } from '../../src/lib/timeouts.ts'
 import {
   cmdResult,
   configFor,
@@ -139,7 +140,11 @@ describe('dsh_check_effect_mode', () => {
       }
       const props = parameters.properties ?? {}
       const names = Object.keys(props)
-      expect(names.length, '一个参数都没读到 —— 判据空转').toBe(2)
+      expect(names, '一个参数都没读到 —— 判据空转').toEqual([
+        'change',
+        'alreadyInDependencies',
+        'dshHome',
+      ])
       let total = 0
       for (const name of names) {
         const text = props[name]?.description ?? ''
@@ -478,10 +483,14 @@ describe('dsh_check_effect_mode', () => {
       const tool = createEffectModeTool(depsFor(config, { spawn }))
 
       await run(tool, { change: 'config' })
+      // 本工具是**快档**：它的工具预算就是 `timeoutMs`（唯一的映射点是 `lib/timeouts.ts`）。
+      const budget = toolBudgetMs('quick', config)
+      expect(budget).toBe(15_000)
+      expect(tool.timeoutMs).toBe(budget)
       const transport = calls[0]?.timeoutMs ?? 0
       expect(transport).toBeGreaterThan(0)
-      expect(transport).toBeLessThan(config.timeoutMs)
-      expect(tool.timeoutMs).toBe(config.timeoutMs)
+      expect(transport).toBeLessThan(budget)
+      expect(budget - transport).toBeGreaterThanOrEqual(TRANSPORT_MARGIN_MS)
     })
   })
 
@@ -784,6 +793,55 @@ describe('dsh_check_effect_mode', () => {
       expect(why).not.toContain('swaps the asset in')
       expect(why).toContain('restart is required')
       expect(why).toContain('cannot change the host module graph')
+    })
+  })
+
+  describe('跨实例（D′ 第②块）：dshHome 参数', () => {
+    it('文件层真的改读参数指定的 home（配置那个 home 里什么都没有）', async () => {
+      // 判据必须**真读盘**：配置 home 里没有 profile ⇒ 不覆盖就会走到「文件层没看到 hmr」，
+      // 于是补跑 dump 复核（`calls` 会非空）。覆盖生效 ⇒ 文件层当场看到 hmr，一次 dump 都不跑。
+      const configuredHome = await tempDshHome()
+      const otherHome = await tempDshHome()
+      await writeProfile(otherHome, 'web', { bundles: [HMR_BUNDLE] })
+      const { spawn, calls } = recordingSpawn(() => cmdResult({ stdout: CONFIG_WITHOUT_HMR }))
+      const tool = createEffectModeTool(depsFor(configFor(configuredHome), { spawn }))
+
+      const data = expectOk(await run(tool, { change: 'config', dshHome: otherHome }))
+      expect(data.key['hmr']).toBe('present')
+      const resolved = data.key['resolved'] as Record<string, unknown>
+      expect(resolved['dshHome']).toBe(otherHome)
+      expect(resolved['dshHomeSource']).toBe('tool-argument')
+      // 文件层就定了 ⇒ 不该起子进程（否则说明它其实还是去问了配置那个 home）。
+      expect(calls).toHaveLength(0)
+    })
+
+    it('**子进程环境**真的注入了 DSH_HOME（复核那次 dump 问的是同一个实例）', async () => {
+      // 这条才是最容易漏的：文件层看的是参数 home，而 `runDump` 起子进程时若不带 env，
+      // 子进程读回**本进程**的 home —— 两层证据来自两个实例，结论是混合的。
+      const configuredHome = await tempDshHome()
+      const otherHome = await tempDshHome()
+      await writeProfile(otherHome, 'web', { bundles: [] })
+      const { spawn, calls } = recordingSpawn(() => cmdResult({ stdout: CONFIG_WITH_HMR }))
+      const tool = createEffectModeTool(
+        depsFor(configFor(configuredHome), { spawn, env: { PATH: '/x' } }),
+      )
+
+      await run(tool, { change: 'config', dshHome: otherHome })
+      expect(calls.length).toBeGreaterThan(0)
+      for (const call of calls) expect(call.env?.['DSH_HOME']).toBe(otherHome)
+    })
+
+    it('没给参数 ⇒ 来源仍是配置那个（子进程也拿到它，不是 process.env）', async () => {
+      const configuredHome = await tempDshHome()
+      await writeProfile(configuredHome, 'web', { bundles: [] })
+      const { spawn, calls } = recordingSpawn(() => cmdResult({ stdout: CONFIG_WITH_HMR }))
+      const tool = createEffectModeTool(depsFor(configFor(configuredHome), { spawn, env: {} }))
+
+      const data = expectOk(await run(tool, { change: 'config' }))
+      const resolved = data.key['resolved'] as Record<string, unknown>
+      expect(resolved['dshHomeSource']).toBe('config')
+      expect(calls.length).toBeGreaterThan(0)
+      for (const call of calls) expect(call.env?.['DSH_HOME']).toBe(configuredHome)
     })
   })
 })

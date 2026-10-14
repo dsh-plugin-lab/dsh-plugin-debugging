@@ -12,6 +12,7 @@ import { dirname, join } from 'node:path'
 import { afterEach } from 'vitest'
 
 import type { ResolvedConfig } from '../../src/contracts.ts'
+import { WORKLOAD_DEFAULT_BUDGET_MS } from '../../src/lib/timeouts.ts'
 import type { CommandResult, RunCommandOptions, SpawnImpl } from '../../src/lib/exec.ts'
 import type { FetchImpl } from '../../src/lib/http.ts'
 import { createToolDeps, type ToolDeps } from '../../src/tools/shared.ts'
@@ -94,7 +95,13 @@ export async function writeInstalledPackage(
   return packageDir
 }
 
-/** 造配置。 */
+/**
+ * 造配置。
+ *
+ * 两个预算的默认值**引用 `lib/timeouts.ts`**（一处一事实）：夹具不该把 15_000 / 60_000
+ * 再抄一遍 —— 抄一遍就会出现「默认值改了、夹具还按旧值跑」这种**判据滞后于实现**的假绿。
+ * 要断言具体数字的用例（`timeout-budgets.test.ts`）用**字面量**，不用这里的默认值。
+ */
 export function configFor(
   dshHome: string,
   overrides: Partial<ResolvedConfig> = {},
@@ -104,7 +111,8 @@ export function configFor(
     dshHomeSource: 'config',
     profile: 'web',
     port: 0,
-    timeoutMs: 15_000,
+    timeoutMs: WORKLOAD_DEFAULT_BUDGET_MS.timeoutMs,
+    schemaDumpTimeoutMs: WORKLOAD_DEFAULT_BUDGET_MS.schemaDumpTimeoutMs,
     ...overrides,
   }
 }

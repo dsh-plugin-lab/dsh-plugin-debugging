@@ -27,7 +27,7 @@
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools'
 
 import { fail, ok, toToolError, type JsonValue } from '../lib/errors.js'
-import { budgetFor, createDeadline } from '../lib/timeouts.js'
+import { budgetFor, createDeadline, toolBudgetMs, type Workload } from '../lib/timeouts.js'
 import { indexByIdentifier, projectFiberPhase, worstOf, type FiberPhase } from '../lib/fiber.js'
 import type { LoaderEntrySnapshot } from '../lib/fiber.js'
 import { lookupPort, type PortLookupResult } from '../lib/ports.js'
@@ -60,6 +60,7 @@ import {
   resolvePort,
   toOutput,
   toolOutput,
+  withCallHome,
   type EffectiveConfigBlock,
   type ToolDeps,
 } from './shared.js'
@@ -67,10 +68,24 @@ import {
 /** 工具名。 */
 export const DIAGNOSE_PLUGIN_LOAD_TOOL = 'dsh_diagnose_plugin_load'
 
+/**
+ * 本工具的工作量档：**快档**。
+ *
+ * 它读的是文件与加载器树，唯一的外部命令是端口查询（也走同一档预算）。
+ */
+const WORKLOAD: Workload = 'quick'
+
 /** 参数。 */
 interface DiagnoseArgs {
   package?: string
   port?: number
+  /**
+   * 另一个实例的 `DSH_HOME`（跨实例观察，SHAPE §1.2 的 D′）。
+   *
+   * ⚠️ 它只换得动**磁盘那一半**（日志、profile 清单、安装形态）；Loader 树那一半来自
+   * 本进程内存。两者必须分开报 —— 见 `key.scope` 与 `crossInstanceScope`。
+   */
+  dshHome?: string
 }
 
 /** 一个包的诊断条目（内部记录；`key` / `audit` 是它的两种投影）。 */
@@ -210,6 +225,14 @@ interface StartupLogsKey {
 /** `key`：下一个决定可能要用到的原料。 */
 interface DiagnoseKey {
   resolved: ResolvedKey
+  /**
+   * 这次调用是不是**跨实例**：给了 `dshHome` 参数时是 `'cross-instance'`，否则整个字段不出现。
+   *
+   * 它存在的唯一理由是让「**两半分开报**」成为**可判**的事实（而非散文）：磁盘证据来自
+   * 参数指定的那个 home，而 Loader 树只来自本进程 —— 后者**任何参数都换不动**。
+   * 不出现 ≠ 没这回事，而是「这次没有跨实例」。
+   */
+  scope?: 'cross-instance'
   observation?: ObservationBlock
   packages: PackageKey[]
   /**
@@ -267,6 +290,21 @@ interface StartupEvidenceKey {
   gaps?: StartupLogNote[]
   /** 拿来投影下面那些事实的日志文件名（最新那份**解析成功**的）。 */
   from?: string
+  /**
+   * 这份日志相对**当前进程**的新鲜度（三值；只在有 `from` 时出现）。
+   *
+   * - `current`：它的 mtime 不早于当前进程的启动时间 ⇒ 属于这次进程；
+   * - `stale`：**早于**当前进程 ⇒ 是**历史遗留**，不是「这次加载失败」的证据
+   *   （真机实例：今天 11:03 起的宿主，`logs/` 里只有一份 09-29 写的日志）；
+   * - `undated`：**没有可比对的进程启动时间**（没给端口 / 端口查不了 / 读不到启动时间）
+   *   ⇒ 既不能说它属于当前进程，也不能说它属于历史 —— **不许暗示它是当前的**。
+   *
+   * 为什么必须三值：把 `undated` 压成 `current` 就会重现本条修复前的缺陷
+   * （拿旧失败当今天的结论）；压成 `stale` 则会**反向**丢掉真实证据。
+   */
+  freshness?: 'current' | 'stale' | 'undated'
+  /** 判 `freshness` 用的参照（ISO 8601）：监听进程的启动时间；`undated` 时不存在。 */
+  processStartedAt?: string
   /** 那份日志自己的 profile 与本次是否一致（读不出 profile 时不出现）。 */
   profileMatches?: boolean
   /** 不一致时日志的 profile（模型要看到是哪个）。 */
@@ -304,7 +342,7 @@ export const DIAGNOSE_PLUGIN_LOAD_DESCRIPTION: ToolDescription = {
   what: 'Checks whether a plugin loaded.',
   useWhen: 'Use when an installed plugin never shows up.',
   boundary:
-    'Preconditions prove only that loading was possible; startup-*.log exists only on failure.\n' +
+    'Preconditions only prove loading was possible; startup-*.log exists only on failure, and may be old.\n' +
     'A Loader-tree phase is host-internal, not a public API.',
 }
 
@@ -334,10 +372,15 @@ export function createDiagnosePluginLoadTool(deps: ToolDeps): ToolDefinition {
         type: 'integer',
         description: 'Host port; omit for the configured one.',
       },
+      dshHome: {
+        type: 'string',
+        description:
+          "Read another instance's disk evidence instead: its DSH_HOME path. Omit to use the configured one.",
+      },
     },
     output: toolOutput(DIAGNOSE_PLUGIN_LOAD_TOOL, TABLE),
 
-    timeoutMs: deps.config.timeoutMs,
+    timeoutMs: toolBudgetMs(WORKLOAD, deps.config),
     isConcurrencySafe: () => true,
 
     async execute(rawArgs, exec) {
@@ -346,15 +389,21 @@ export function createDiagnosePluginLoadTool(deps: ToolDeps): ToolDefinition {
       // 兜底分支的判据（B24）是「返回的是**过了守卫**的合法结果」，不是「没报错」。
       try {
         const args = rawArgs as DiagnoseArgs
-        const deadline = createDeadline(deps.config.timeoutMs, deps.now)
+        const deadline = createDeadline(toolBudgetMs(WORKLOAD, deps.config), deps.now)
 
-        const missing = assertResolvedDshHome(deps.config)
+        // 本次调用认的实例（参数优先）。**它只换得动「磁盘那一半」** ——
+        // Loader 树来自 `deps.loader`（本进程内存），跨不了实例；那一半必须显式标注，
+        // 见下面的 `crossInstance` / `key.scope`。
+        const call = withCallHome(deps, args.dshHome)
+        const crossInstance = call.config.dshHomeSource === 'tool-argument'
+
+        const missing = assertResolvedDshHome(call.config)
         if (missing !== undefined) return toOutput(missing)
 
-        const { dshHome, profile } = deps.config
+        const { dshHome, profile } = call.config
         const dir = profileDir(dshHome, profile)
-        const resolvedPort = resolvePort(args.port, deps.config.port, deps.env)
-        const resolved = effectiveConfig(deps.config, resolvedPort)
+        const resolvedPort = resolvePort(args.port, call.config.port, call.env)
+        const resolved = effectiveConfig(call.config, resolvedPort)
         const keyResolved = toResolvedKey(resolved)
 
         // 预算在真正开工前就耗尽：文件层诊断虽然便宜，也不该在「已超时」的前提下继续跑 ——
@@ -413,7 +462,7 @@ export function createDiagnosePluginLoadTool(deps: ToolDeps): ToolDefinition {
             ? undefined
             : await lookupPort(resolvedPort.port, {
                 spawn: deps.spawn,
-                timeoutMs: budgetFor(deps.config.timeoutMs, deadline),
+                timeoutMs: budgetFor(toolBudgetMs(WORKLOAD, deps.config), deadline),
                 signal: exec.signal,
               })
 
@@ -441,7 +490,10 @@ export function createDiagnosePluginLoadTool(deps: ToolDeps): ToolDefinition {
         // 解析器是纯函数（`lib/startup-log.ts`），读盘与上限判定留在这里。
         const startup = await listStartupLogs(dshHome)
         const startupReports = await readStartupReports(startup)
-        const startupEvidence = toStartupEvidence(startupReports, profile)
+        // 参照物与产物那条**同一个**：端口查询给出的监听进程启动时间（拿不到就是 `undefined`，
+        // 于是新鲜度是「不知道」而不是猜 —— 见 `logFreshness`）。
+        const processStartedAt = portLookup?.listeners[0]?.startedAt
+        const startupEvidence = toStartupEvidence(startupReports, profile, processStartedAt)
 
         // ── 观测：试着直接读宿主 Loader 树（`fiber.state`） ──────────────────────
         // 读不到就降级成推断；**降级不是错误** —— 那是宿主内部 primitive，见 lib/fiber.ts 文件头。
@@ -506,6 +558,10 @@ export function createDiagnosePluginLoadTool(deps: ToolDeps): ToolDefinition {
 
         const key: DiagnoseKey = {
           resolved: keyResolved,
+          // 跨实例时**必须**在 `key` 里留一个可判的记号：渲染层据此把「两半分开报」印出来。
+          // 不给这个字段的话，「磁盘那一半是目标的、树那一半只是本进程的」这件事就只能靠
+          // 读者自己从 `dshHomeSource` 推 —— 而它恰恰是最容易被读成「整套结论都属于目标实例」的地方。
+          ...(crossInstance ? { scope: 'cross-instance' as const } : {}),
           observation,
           packages: packages.map(toPackageKey),
           startupLogs: toStartupLogsKey(startup),
@@ -560,6 +616,7 @@ export function createDiagnosePluginLoadTool(deps: ToolDeps): ToolDefinition {
           stale,
           startup: startupEvidence,
           profile,
+          ...(crossInstance ? { crossHome: dshHome } : {}),
         })
 
         return toOutput(
@@ -691,13 +748,18 @@ function buildVerdict(input: {
   stale: readonly PackageDiagnosis[]
   startup: StartupEvidenceKey | undefined
   profile: string
+  /** 跨实例时才给：本次读的磁盘 home（见 `crossInstanceScope`）。 */
+  crossHome?: string
 }): string {
   // 启动日志里那些「**别把它读成好消息**」的部分，两条分支都要带上。
   const logParts = startupVerdictParts(input.startup, input.profile)
+  const scope = crossInstanceScope(input.crossHome)
+  const scopeParts = scope === undefined ? [] : [scope]
   if (!input.loaderOk) {
     return [
       'Could not read the Loader tree, so nothing here is observed: bundles / install shape / entry file only prove that loading was possible, not that it succeeded',
       ...logParts,
+      ...scopeParts,
     ].join('. ')
   }
   const parts: string[] = []
@@ -736,7 +798,29 @@ function buildVerdict(input: {
     }
   }
   parts.push(...logParts)
+  parts.push(...scopeParts)
   return parts.join('. ')
+}
+
+/**
+ * 跨实例时那句「**两半分开报**」——磁盘证据属于目标实例，Loader 树只属于本进程。
+ *
+ * 为什么必须写出来（维护者的硬要求，SHAPE §1.2）：`dshHome` 让**磁盘**那一半指向另一个实例，
+ * 但 `entry.fiber.state` 那一半来自**本进程内存**，任何参数都换不动它。不写明的话，
+ * 模型会把整份结论读成「**那个**实例的树长这样」—— 而那是它看不到的东西。
+ *
+ * 措辞把**具体 home** 带进来（不只是「另一个实例」）：这句话因此随调用变化，
+ * 不会被 B16（「同一个工具两份 fixture 里都不变的 ≥40 字符行」）当成恒定块。
+ *
+ * @param crossHome 跨实例时的 home；同实例（没给参数）时是 `undefined`。
+ * @returns 那一句；同实例时返回 `undefined`（**不许**恒印一句免责）。
+ */
+function crossInstanceScope(crossHome: string | undefined): string | undefined {
+  if (crossHome === undefined) return undefined
+  return (
+    `Disk evidence above is from ${crossHome} (the DSH_HOME you passed); ` +
+    'the Loader-tree half is this process only, so it says nothing about that instance'
+  )
 }
 
 /**
@@ -920,6 +1004,13 @@ function keyText(key: DiagnoseKey): string[] {
   // 会当场抛。`key` 本身不是对象时也要有输出，**不许静默返回空数组**。
   if (!key || typeof key !== 'object') return [GUARD_FALLBACK_LINE]
   const lines: string[] = [resolvedLine(key.resolved)]
+  // 跨实例：紧跟 `resolved:` 印一行「两半分开报」的**可判**记号。它与 L1 那句同一个事实，
+  // 但落在不同的层 —— L1 给判定、L2 给模型做下一步时要瞄的那两格（谁是目标的、谁是本进程的）。
+  if (key.scope === 'cross-instance') {
+    lines.push(
+      'scope: disk evidence is from the DSH_HOME you passed; the Loader tree is this process only',
+    )
+  }
   const observation = key.observation
   if (observation !== undefined) {
     lines.push(`mode: ${observation.mode}`)
@@ -1141,6 +1232,35 @@ function compareArtifactWithProcess(
 }
 
 /**
+ * 判一份启动日志相对当前进程的新鲜度（三值）。
+ *
+ * 与 {@link compareArtifactWithProcess} **同族**：同一个参照（监听进程的 `startedAt`）、
+ * 同样的 `Date.parse` 容错、同样在**拿不到参照时返回「不知道」而不是猜**。
+ * 差别在问法与结论的方向：
+ * - 那边问「产物比进程新吗」（产物新 = 你在跑旧代码），答案只有两值 + `null`；
+ * - 这边问「这份日志属于当前进程吗」，而「旧日志」的含义是**这份证据是历史遗留** ——
+ *   两值会把「不知道」压成其中一边，两种压法都错：压成 `current` 就是本条修复前的缺陷
+ *   （拿 09-29 的失败当今天的结论），压成 `stale` 则会丢掉**真实**的当前失败。
+ *
+ * 用 mtime 而不是日志内部那个 `timestamp`：后者可能整段缺失（解析缺口 / 截断），
+ * 而「有没有新日志」这件事本来就是按**文件**判的（文件名的 ISO 也是写入时刻）。
+ *
+ * @param logMtimeMs 日志文件的 mtime（毫秒）。
+ * @param processStartedAt 监听进程的启动时间（ISO 8601）；拿不到时 `undefined`。
+ */
+function logFreshness(
+  logMtimeMs: number,
+  processStartedAt: string | undefined,
+): 'current' | 'stale' | 'undated' {
+  if (processStartedAt === undefined) return 'undated'
+  const startedMs = Date.parse(processStartedAt)
+  if (!Number.isFinite(startedMs)) return 'undated'
+  // 相等按「属于当前进程」算：致命启动错误是在进程起来的那一瞬间写的，
+  // 而「早于进程」才是那个要报出来的结论 —— 边界不许把它误判成 stale。
+  return logMtimeMs >= startedMs ? 'current' : 'stale'
+}
+
+/**
  * 读并解析**每一份**启动日志（读全部，不抽样 —— 抽样就是静默 skip，活跃坑 18）。
  *
  * 两条边界：
@@ -1177,12 +1297,17 @@ async function readStartupReports(startup: StartupLogsResult): Promise<StartupLo
  * - 两者又都与「日志里真的没有失败条目」不同 —— 后者只有 `parseState === 'parsed'`
  *   且 `failed` 为空时才成立。
  *
+ * 第三个轴是**新鲜度**（`freshness`）：日志内容说了什么，与它是不是**这次进程**写的，
+ * 是两件事。旧日志里的失败条目是真的，但它证明的是**上一次**启动失败。
+ *
  * @param reports 每份日志的解析记录。
  * @param profile 本次诊断的 profile（用来判日志是否属于它）。
+ * @param processStartedAt 当前进程的启动时间（ISO 8601）；拿不到时 `undefined`。
  */
 function toStartupEvidence(
   reports: readonly StartupLogRecord[],
   profile: string,
+  processStartedAt: string | undefined,
 ): StartupEvidenceKey | undefined {
   if (reports.length === 0) return undefined
   const unreadable = reports.filter((item) => item.parse.readError !== undefined)
@@ -1216,6 +1341,12 @@ function toStartupEvidence(
   const newest = parsed[0]
   if (newest === undefined) return evidence
   evidence.from = newest.name
+  // 新鲜度：与产物那条（`compareArtifactWithProcess`）**同一个参照** ——
+  // 端口查询给出的监听进程 `startedAt`。拿不到参照时是 `undated`（不知道），**不猜**。
+  evidence.freshness = logFreshness(newest.mtimeMs, processStartedAt)
+  if (evidence.freshness !== 'undated' && processStartedAt !== undefined) {
+    evidence.processStartedAt = processStartedAt
+  }
   const logProfile = newest.report.profile
   if (logProfile !== undefined) {
     evidence.profileMatches = logProfile === profile
@@ -1265,6 +1396,11 @@ function startupEvidenceLines(evidence: StartupEvidenceKey): string[] {
     parts.push(`profileMatches=${evidence.profileMatches ? 'yes' : 'no'}`)
   }
   if (evidence.logProfile !== undefined) parts.push(`logProfile=${evidence.logProfile}`)
+  // 新鲜度进 L2：模型要能把「旧日志」与「这次失败」分开（L1 说了结论，这里给可复核的形状）。
+  if (evidence.freshness !== undefined) parts.push(`freshness=${evidence.freshness}`)
+  if (evidence.processStartedAt !== undefined) {
+    parts.push(`processStartedAt=${evidence.processStartedAt}`)
+  }
   if (evidence.requiredNotActivated !== undefined) {
     parts.push(`requiredNotActivated=${String(evidence.requiredNotActivated)}`)
   }
@@ -1330,7 +1466,25 @@ function startupVerdictParts(evidence: StartupEvidenceKey | undefined, profile: 
       `that startup log is from profile ${evidence.logProfile ?? 'another profile'}, not ${profile}, so it does not explain the current profile`,
     )
   }
+  // 新鲜度：**旧的失败不是今天的失败**。这一句是本次修复的核心 —— 没有它，L1 会拿
+  // 「上一次启动失败」的条目不限时间地断言当前状态（真机实例：今天 11:03 起的宿主，
+  // 报的是 09-29 那份日志里的 EADDRINUSE）。
   const failed = evidence.failed ?? []
+  const projectsFailure = failed.length > 0 || evidence.requiredNotActivated !== undefined
+  if (evidence.freshness === 'stale') {
+    const when =
+      evidence.processStartedAt === undefined
+        ? ''
+        : ` (the process started ${evidence.processStartedAt})`
+    parts.push(
+      `that startup log predates the current process${when}, so it is a leftover from an earlier run and not evidence about this one`,
+    )
+  } else if (evidence.freshness === 'undated' && projectsFailure) {
+    // 「不知道它属不属于当前进程」必须说出来：把 `undated` 读成「今天的失败」正是本条修复前的形状。
+    parts.push(
+      'this startup log could not be dated against the current process (no process start time was available), so treat its failures as possibly from an earlier run',
+    )
+  }
   if (failed.length > 0) {
     const head =
       evidence.requiredNotActivated === undefined

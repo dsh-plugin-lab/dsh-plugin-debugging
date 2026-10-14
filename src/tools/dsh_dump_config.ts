@@ -45,7 +45,7 @@ import {
   type ToolData,
   type ToolError,
 } from '../lib/errors.js'
-import { budgetFor, createDeadline } from '../lib/timeouts.js'
+import { budgetFor, createDeadline, toolBudgetMs, type Workload } from '../lib/timeouts.js'
 import {
   classifyDiagnostic,
   parseComposedEntries,
@@ -64,9 +64,12 @@ import type { RenderTable } from '../lib/render.js'
 import { composeDescription, type ToolDescription } from './describe.js'
 import {
   assertResolvedDshHome,
+  childEnvFor,
   effectiveConfig,
+  spawnWithHome,
   toOutput,
   toolOutput,
+  withHomeOverride,
   type EffectiveConfigBlock,
   type ToolDeps,
 } from './shared.js'
@@ -74,9 +77,26 @@ import {
 /** 工具名。 */
 export const DUMP_CONFIG_TOOL = 'dsh_dump_config'
 
+/**
+ * 本工具的工作量档：**慢档**。
+ *
+ * 它跑的 `--dump-config-schema` 是 CPU 密集且随 profile 规模增长的活（实测见
+ * `lib/timeouts.ts` 里那张表），与本仓其余工具的活差一个数量级 —— 所以它必须走慢档，
+ * 而不是跟大家一起分那个 15 s 的全局数。
+ */
+const WORKLOAD: Workload = 'schemaDump'
+
 /** 参数。 */
 interface DumpConfigArgs {
   profile?: string
+  /**
+   * 另**一个**实例的 `DSH_HOME`（跨实例观察，SHAPE §1.2 的 D′）。
+   *
+   * 它同时改两处：本工具用来拼路径的 home，以及**子进程**的 `DSH_HOME`
+   * （`--dump-config` 是起一个 `dsh` 去问的 —— 只改前者会让子进程读回本进程的 home，
+   * 那正是「看着成功、其实读的是另一个目录」）。
+   */
+  dshHome?: string
 }
 
 /** 这次调用实际用的是哪份配置（`key` 的投影：只留要模型决策的）。 */
@@ -227,22 +247,36 @@ export function createDumpConfigTool(deps: ToolDeps): ToolDefinition {
         type: 'string',
         description: "Profile name; omit for the plugin's configured profile.",
       },
+      dshHome: {
+        type: 'string',
+        // 参数规则住在参数上（SHAPE §2）：工具描述里不复述，也就不占那 4 行的预算。
+        // ⚠️ 措辞不承诺任何「自动配对」—— 发现出来的 authority 推不出 home（SHAPE §1.2 硬边界 2）。
+        description:
+          'Read another instance instead: its DSH_HOME path. Omit to use the configured one.',
+      },
     },
     output: toolOutput(DUMP_CONFIG_TOOL, TABLE),
 
-    timeoutMs: deps.config.timeoutMs,
+    timeoutMs: toolBudgetMs(WORKLOAD, deps.config),
     isConcurrencySafe: () => true,
 
     async execute(rawArgs, exec) {
       const args = rawArgs as DumpConfigArgs
-      const deadline = createDeadline(deps.config.timeoutMs, deps.now)
+      // 两条命令**共享**这一份 deadline（`lib/timeouts.ts` 的纪律：传输必须先于工具）。
+      const deadline = createDeadline(toolBudgetMs(WORKLOAD, deps.config), deps.now)
 
-      const missing = assertResolvedDshHome(deps.config)
+      // 本次调用认的 home（参数优先）。**预算仍取 `deps.config`**：预算是插件配置的事，
+      // 与「看哪个实例」无关。
+      const home = withHomeOverride(deps.config, args.dshHome)
+      const missing = assertResolvedDshHome(home)
       if (missing !== undefined) return toOutput(missing)
 
-      const profile = args.profile ?? deps.config.profile
-      const resolvedBlock = effectiveConfig(deps.config, 'not-used', profile)
+      const profile = args.profile ?? home.profile
+      const resolvedBlock = effectiveConfig(home, 'not-used', profile)
       const resolved = toResolvedKey(resolvedBlock)
+      // 子进程必须看到**同一个** home：只加参数不注环境的话，`dsh` 会读回本进程的 home，
+      // 而 `resolved.dshHome` 印的是参数值 —— 那正是最坏的那种「看着成功读错目录」。
+      const spawn = spawnWithHome(deps.spawn, childEnvFor(deps.env, home.dshHome))
 
       // **execute 绝不 throw**（SHAPE §4）：宿主只把抛出去的异常当失败，一旦抛出去，
       // 我们的 `verdict` / `key` / `audit` 全部失效、而且没有任何红线会报警。
@@ -251,8 +285,8 @@ export function createDumpConfigTool(deps: ToolDeps): ToolDefinition {
 
         const configRun = judgeDump(
           await runDump(launch, profile, '--dump-config', {
-            spawn: deps.spawn,
-            timeoutMs: budgetFor(deps.config.timeoutMs, deadline),
+            spawn,
+            timeoutMs: budgetFor(toolBudgetMs(WORKLOAD, deps.config), deadline),
             signal: exec.signal,
           }),
           resolved,
@@ -274,8 +308,8 @@ export function createDumpConfigTool(deps: ToolDeps): ToolDefinition {
         const entries = parseComposedEntries(configRun.invocation.stdout)
         const schemaRun = judgeDump(
           await runDump(launch, profile, '--dump-config-schema', {
-            spawn: deps.spawn,
-            timeoutMs: budgetFor(deps.config.timeoutMs, deadline),
+            spawn,
+            timeoutMs: budgetFor(toolBudgetMs(WORKLOAD, deps.config), deadline),
             signal: exec.signal,
           }),
           resolved,
@@ -311,7 +345,7 @@ export function createDumpConfigTool(deps: ToolDeps): ToolDefinition {
               assembled({ ...assembly, verdict: actionableVerdict(screening.actionable) }),
               {
                 tool: DUMP_CONFIG_TOOL,
-                args: { profile },
+                args: retryArgs(resolved),
                 why: 'after fixing the rows named in actionable, run it again and confirm actionable is empty',
               },
             ),
@@ -400,12 +434,14 @@ function failureOf(invocation: DumpInvocation, resolved: ResolvedKey): FailureHe
       verdict: `nothing could be judged: ${invocation.flag} hit the transport timeout before the tool budget, so there is no dump output to read`,
       nextStep: {
         tool: DUMP_CONFIG_TOOL,
-        args: { profile: resolved.profile },
+        args: retryArgs(resolved),
         // 这里曾经是唯一不指向已捕获证据的失败分支：stderr 就在 `key.invocations` 里，
         // 而超时的原因常常已经写在上面了（输出太大、宿主要现装依赖 …）。
+        // 点名 `schemaDumpTimeoutMs`（不是 `timeoutMs`）：本工具走的是**慢档**，
+        // 让模型去调另一个字段只会让人白改一次配置。
         why:
           'read the stderr captured in invocations first, then retry once as-is; ' +
-          'raise timeoutMs if it keeps timing out, since dump-config-schema is slow by nature',
+          'raise schemaDumpTimeoutMs if it keeps timing out, since dump-config-schema is slow by nature',
       },
     }
   }
@@ -703,6 +739,24 @@ function invocationKey(invocation: DumpInvocation): InvocationKey {
     exitCode: invocation.exitCode,
     ...(stderr === '' ? {} : { stderr }),
   }
+}
+
+/**
+ * 「再跑一次本工具」用的参数。
+ *
+ * 为什么把 `dshHome` 一起带上：这次的结论是关于**那个实例**的，重试若丢掉 home，
+ * 模型会拿到另一个实例的答案 —— 而两次调用的输出长得一模一样（同一个 schema），
+ * 这种错**看起来像成功**。只在**参数覆盖过**时才带：没覆盖时再调一次本来就是对的，
+ * 多印一个配置里的值只会变成噪声（L2 规则：只放本次非默认的）。
+ *
+ * 值必须在模型看得见的地方（B17）：`key.resolved` 会渲染成 L2 的 `resolved: … dshHome=…` 行。
+ *
+ * @param resolved `key` 里的配置投影。
+ */
+function retryArgs(resolved: ResolvedKey): Record<string, string> {
+  return resolved.dshHomeSource === 'tool-argument'
+    ? { profile: resolved.profile, dshHome: resolved.dshHome }
+    : { profile: resolved.profile }
 }
 
 /**

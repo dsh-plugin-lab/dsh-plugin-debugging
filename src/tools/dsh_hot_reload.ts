@@ -36,13 +36,21 @@ import {
   type ReloadHost,
   type ReloadKey,
 } from '../lib/hot-reload.js'
-import { createDeadline } from '../lib/timeouts.js'
+import { createDeadline, toolBudgetMs, type Workload } from '../lib/timeouts.js'
 import type { RenderTable } from '../lib/render.js'
 import { composeDescription, type ToolDescription } from './describe.js'
 import { toolOutput, toOutput, type ToolDeps } from './shared.js'
 
 /** 工具名。 */
 export const HOT_RELOAD_TOOL = 'dsh_hot_reload'
+
+/**
+ * 本工具的工作量档：**快档**。
+ *
+ * 它只改进程内的模块缓存与 fiber（不起子进程、不发 HTTP），所以它与读文件的工具
+ * 是同一量级 —— 慢档留给真正跑 `--dump-config-schema` 的那个工具。
+ */
+const WORKLOAD: Workload = 'quick'
 
 /** 出错时唯一可派发的只读工具（它的 L2 里就有 entryId，正是重载要的输入）。 */
 const DIAGNOSE_TOOL = 'dsh_diagnose_plugin_load'
@@ -119,7 +127,7 @@ export function createHotReloadTool(deps: HotReloadDeps): ToolDefinition {
     parameters: PARAMETERS,
     output: toolOutput(HOT_RELOAD_TOOL, TABLE),
 
-    timeoutMs: deps.config.timeoutMs,
+    timeoutMs: toolBudgetMs(WORKLOAD, deps.config),
     // 写侧工具**不安全**：两次并发重载会把缓存的备份/回滚交叉在一起。
     isConcurrencySafe: () => false,
 
@@ -166,7 +174,7 @@ export function createHotReloadTool(deps: HotReloadDeps): ToolDefinition {
           )
         }
 
-        const deadline = createDeadline(deps.config.timeoutMs, deps.now)
+        const deadline = createDeadline(toolBudgetMs(WORKLOAD, deps.config), deps.now)
         const outcome = await hotReload(deps.reload, parsed.target, {
           dryRun: args.dryRun === true,
           signal: exec.signal,

@@ -12,6 +12,7 @@
  *    这一块同时是本样板的**自检** —— 它按红线 B16/B17/B18b/B22 的判据在样板自己身上跑一遍。
  */
 import { join } from 'node:path'
+import { utimes } from 'node:fs/promises'
 import { describe, expect, it } from 'vitest'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 
@@ -30,6 +31,7 @@ import {
 import { FIBER_STATE } from '../../src/lib/fiber.ts'
 import { PORT_LOOKUP_SHELL } from '../../src/lib/ports.ts'
 import { ensureToolResult, TOOL_ERROR_KINDS, toolResultProblem } from '../../src/lib/errors.ts'
+import { toolBudgetMs, TRANSPORT_MARGIN_MS } from '../../src/lib/timeouts.ts'
 import {
   cmdResult,
   configFor,
@@ -94,7 +96,8 @@ describe('dsh_diagnose_plugin_load', () => {
       const props = parameters.properties ?? {}
       const names = Object.keys(props)
       // 下界：一个参数都没读到 = 注入/取数错了，判据空转，必须判红。
-      expect(names.length, '一个参数都没读到 —— 判据空转').toBe(2)
+      // 精确闭集：加参数要同批改这里（`dshHome` 只换得动磁盘那一半，见 `key.scope`）。
+      expect(names, '一个参数都没读到 —— 判据空转').toEqual(['package', 'port', 'dshHome'])
       for (const name of names) {
         expect(props[name]?.description ?? '', `参数 ${name} 的描述是空的`).not.toBe('')
       }
@@ -107,7 +110,7 @@ describe('dsh_diagnose_plugin_load', () => {
 
     it('搬走的恒定知识**只能**在描述层出现一次（旧的两种 caveat 逐字不在输出里）', () => {
       const boundary = DIAGNOSE_PLUGIN_LOAD_DESCRIPTION.boundary ?? ''
-      expect(boundary).toContain('startup-*.log exists only on failure')
+      expect(boundary).toContain('startup-*.log exists only on failure, and may be old')
       expect(boundary).toContain('host-internal')
       // 旧字段名与旧句子都不许再出现在任何一段描述里（它们已不存在于输出层）。
       expect(composeDescription(DIAGNOSE_PLUGIN_LOAD_DESCRIPTION)).not.toContain('loadProofCaveat')
@@ -694,10 +697,14 @@ describe('dsh_diagnose_plugin_load', () => {
         const tool = createDiagnosePluginLoadTool(depsFor(config, { spawn }))
 
         await run(tool, {})
+        // 本工具是**快档**：工具预算 = `timeoutMs`；端口查询的传输预算要留出余量。
+        const budget = toolBudgetMs('quick', config)
+        expect(budget).toBe(15_000)
+        expect(tool.timeoutMs).toBe(budget)
         expect(calls).toHaveLength(1)
-        expect(calls[0]?.timeoutMs ?? 0).toBeLessThan(config.timeoutMs)
+        expect(calls[0]?.timeoutMs ?? 0).toBeLessThan(budget)
         expect(calls[0]?.timeoutMs ?? 0).toBeGreaterThan(0)
-        expect(tool.timeoutMs).toBe(config.timeoutMs)
+        expect(budget - (calls[0]?.timeoutMs ?? 0)).toBeGreaterThanOrEqual(TRANSPORT_MARGIN_MS)
       })
     })
 
@@ -1385,6 +1392,123 @@ describe('dsh_diagnose_plugin_load', () => {
   })
 
   // ══════════════════════════════════════════════════════════════════════════
+  // A3 · 启动日志的**新鲜度**（受控复现 → 判据）
+  // ══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * 受控复现 → 判据：把「日志比当前进程旧」「日志属于当前进程」「拿不到进程启动时间」
+   * 三种情形造出来（第三种见下面第二条用例）。
+   *
+   * 复现时只动**一个**变量（日志文件的 mtime）；修之前两种情形**完全同形**
+   * （`key.startupEvidence` 逐字相等、`verdict` 逐字相等）—— 那就是缺陷本身。
+   */
+  describe('A3 · 启动日志的新鲜度：旧失败不许当成当前证据', () => {
+    /** 两档共用同一个日志文件（只有 mtime 不同），所以结论里不许出现「文件名不同」这种噪声。 */
+    const LOG_NAME = 'startup-2026-09-29T19-03-37.556Z-stale.log'
+    /** 监听进程相对现在多久起（负数 = 过去）。两档相同。 */
+    const PROCESS_AGE_MS = -5 * 60 * 1000
+
+    /**
+     * 造一份 fixture：真机日志 + 一个「5 分钟前启动」的监听进程。
+     *
+     * 进程启动时间从**端口查询**取（`PortListener.startedAt`）—— 与同工具的
+     * `artifactNewerThanProcess` 用的是**同一个**参照物。
+     *
+     * @param logAgeMs 日志文件 mtime 相对现在的偏移（负数 = 过去）。
+     */
+    async function freshnessFixture(logAgeMs: number): Promise<ToolDefinition> {
+      const dshHome = await tempDshHome()
+      const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
+      await writeInstalledPackage(profileDir, 'pkg-a')
+      const logPath = join(dshHome, 'logs', LOG_NAME)
+      await writeText(logPath, REAL_STARTUP_LOG)
+      const at = new Date(Date.now() + logAgeMs)
+      await utimes(logPath, at, at)
+
+      const startedAt = new Date(Date.now() + PROCESS_AGE_MS).toISOString()
+      const { spawn } = recordingSpawn(() => cmdResult({ stdout: `4242|node|${startedAt}\n` }))
+      // 端口查询只有 Windows 分支会起子进程 ⇒ **显式钉平台**（坑 25）。
+      // 无论跑在哪台机器上，这条用例测的都是 win32 分支。
+      return withPlatform('win32', () =>
+        Promise.resolve(
+          createDiagnosePluginLoadTool(
+            depsFor(configFor(dshHome, { port: 3080 }), {
+              spawn,
+              loader: loaderWith([entrySnapshot({ moduleName: 'pkg-a', fiberState: 2 })]),
+            }),
+          ),
+        ),
+      )
+    }
+
+    it('日志比进程旧 → `freshness=stale`，L1 明说它是历史遗留；当前进程的日志 → `current`，不说', async () => {
+      const stale = await freshnessFixture(-15 * 24 * 60 * 60 * 1000)
+      const current = await freshnessFixture(-60 * 1000)
+
+      const staleResult = await run(stale, {})
+      const currentResult = await run(current, {})
+      const staleData = expectOk(staleResult)
+      const currentData = expectOk(currentResult)
+
+      // ① 陈旧日志里的失败**仍然**被投影（不是「没读到」，也不是「把整份日志丢掉」）——
+      //    要的是给它加限定，不是抹掉它。
+      const staleEvidence = staleData.key['startupEvidence'] as Record<string, unknown>
+      expect(staleEvidence['requiredNotActivated']).toBe(2)
+      expect((staleEvidence['failed'] as Record<string, unknown>[])[0]?.['id']).toBe('webserver')
+      expect(String(staleData.verdict)).toContain('EADDRINUSE')
+
+      // ② 两种情形**必须可分**（防空转：一律加同一句话会在这里死）。
+      expect(staleEvidence['freshness']).toBe('stale')
+      expect((currentData.key['startupEvidence'] as Record<string, unknown>)['freshness']).toBe(
+        'current',
+      )
+      expect(staleData.verdict).not.toBe(currentData.verdict)
+
+      // ③ 陈旧时必须**说出来**：它是历史遗留、不是这次的结论。
+      expect(String(staleData.verdict)).toContain('predates the current process')
+      expect(String(staleData.verdict)).toContain('leftover from an earlier run')
+      // 对照：当前进程的日志**不许**背这句（否则「一律加同一句」也会全绿）。
+      expect(String(currentData.verdict)).not.toContain('predates the current process')
+      expect(String(currentData.verdict)).not.toContain('leftover')
+
+      // ④ L2 也要能复核：新鲜度与参照物都印出来，而 `current` 那份印的是它自己的值。
+      const staleParts = splitRender(renderText(stale, {}, staleResult))
+      expect(staleParts.l2.join('\n')).toContain('freshness=stale')
+      expect(staleParts.l2.join('\n')).toContain('processStartedAt=')
+      expect(splitRender(renderText(current, {}, currentResult)).l2.join('\n')).toContain(
+        'freshness=current',
+      )
+    })
+
+    it('拿不到进程启动时间（没给端口）→ `freshness=undated`，L1 不许把它读成「当前进程失败了」', async () => {
+      const dshHome = await tempDshHome()
+      const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
+      await writeInstalledPackage(profileDir, 'pkg-a')
+      await writeText(join(dshHome, 'logs', LOG_NAME), REAL_STARTUP_LOG)
+      // **不给端口** ⇒ 没有端口查询 ⇒ 没有进程启动时间这个参照物。
+      const { spawn } = recordingSpawn(() => cmdResult({ stdout: '' }))
+      const tool = createDiagnosePluginLoadTool(
+        depsFor(configFor(dshHome), {
+          spawn,
+          loader: loaderWith([entrySnapshot({ moduleName: 'pkg-a', fiberState: 2 })]),
+        }),
+      )
+
+      const data = expectOk(await run(tool, {}))
+      const evidence = data.key['startupEvidence'] as Record<string, unknown>
+      // 事实仍要报（日志内容是真的），但**不许**暗示它属于当前进程。
+      expect(evidence['requiredNotActivated']).toBe(2)
+      expect(evidence['freshness']).toBe('undated')
+      expect(evidence['processStartedAt']).toBeUndefined()
+      expect(String(data.verdict)).toContain('could not be dated against the current process')
+      expect(String(data.verdict)).toContain('possibly from an earlier run')
+      // 「不知道」不许被印成「属于当前进程」。
+      expect(String(data.verdict)).not.toContain('predates the current process')
+      expect(renderText(tool, {}, await run(tool, {}))).toContain('freshness=undated')
+    })
+  })
+
+  // ══════════════════════════════════════════════════════════════════════════
   // B · `dsh.bundle` 声明检查（SKILL §3.2 的第三类原因：装了却没生效）
   // ══════════════════════════════════════════════════════════════════════════
 
@@ -1675,6 +1799,83 @@ describe('dsh_diagnose_plugin_load', () => {
       expect(value.ok).toBe(false)
       if (value.ok) throw new Error('期望失败')
       expect(value.data.verdict).not.toBe('')
+    })
+  })
+
+  describe('D′ · 跨实例：磁盘那一半跟着 dshHome 走，树那一半只属于本进程', () => {
+    /**
+     * 造一个**两个 home 都可用、但内容不同**的夹具。
+     *
+     * 两个 home 各放一个不同的包名，这样「读的是哪一个」永远有一个**盘上可判**的答案
+     * （只用一个空 home 当对照的话，「同实例」那条路会直接 not-found，测不到路径解析）。
+     */
+    async function crossFixture(): Promise<{
+      tool: ToolDefinition
+      other: string
+      configured: string
+    }> {
+      const configured = await tempDshHome()
+      const other = await tempDshHome()
+      const configuredProfile = await writeProfile(configured, 'web', { bundles: ['pkg-config'] })
+      await writeInstalledPackage(configuredProfile, 'pkg-config')
+      const otherProfile = await writeProfile(other, 'web', { bundles: ['pkg-other'] })
+      await writeInstalledPackage(otherProfile, 'pkg-other')
+      const { spawn } = recordingSpawn(() => cmdResult({ stdout: '' }))
+      return {
+        configured,
+        other,
+        tool: createDiagnosePluginLoadTool(
+          depsFor(configFor(configured), {
+            spawn,
+            loader: loaderWith([entrySnapshot({ moduleName: 'pkg-other', fiberState: 2 })]),
+          }),
+        ),
+      }
+    }
+
+    it('磁盘证据真的来自参数那个 home（两边各有一个不同的包，读哪个看得出来）', async () => {
+      const { tool, other } = await crossFixture()
+      const data = expectOk(await run(tool, { dshHome: other }))
+      const resolved = data.key['resolved'] as Record<string, unknown>
+      expect(resolved['dshHome']).toBe(other)
+      expect(resolved['dshHomeSource']).toBe('tool-argument')
+      // profile 清单来自**参数**那个 home：里面是 pkg-other，不是配置 home 的 pkg-config。
+      const packages = data.key['packages'] as Record<string, unknown>[]
+      expect(packages.map((item) => item['packageName'])).toEqual(['pkg-other'])
+    })
+
+    it('跨实例时**必须**把两半分开报（L1 与 L2 都要有），并留下可判的记号', async () => {
+      const { tool, other } = await crossFixture()
+      const result = await run(tool, { dshHome: other })
+      const data = expectOk(result)
+      const parts = splitRender(renderText(tool, {}, result))
+      // `key.scope` 是可判的记号（不是靠读者从 dshHomeSource 推）。
+      expect(data.key['scope']).toBe('cross-instance')
+      const l2 = parts.l2.join('\n')
+      expect(l2).toContain('scope: disk evidence is from the DSH_HOME you passed')
+      expect(l2).toContain('the Loader tree is this process only')
+      // L1 也要说清：磁盘是目标实例的、树不是。
+      expect(data.verdict).toContain(other)
+      expect(data.verdict).toContain('the Loader-tree half is this process only')
+    })
+
+    it('同实例时那句话**不出现**（防空转：两种情形的渲染必须不同）', async () => {
+      const { tool, other } = await crossFixture()
+      const cross = await run(tool, { dshHome: other })
+      const same = await run(tool, {})
+      const crossText = renderText(tool, {}, cross)
+      const sameText = renderText(tool, {}, same)
+
+      const sameData = expectOk(same)
+      expect(sameText).not.toContain('the Loader tree is this process only')
+      expect(sameText).not.toContain('the Loader-tree half is this process only')
+      expect(sameData.key['scope']).toBeUndefined()
+      // 防空转：两句渲染必须真的不同（否则「一律加同一句话」也会全绿）。
+      expect(crossText).not.toBe(sameText)
+      // 同实例那条读的仍是**配置的** home（反向证明覆盖不是恒真的）。
+      expect((sameData.key['resolved'] as Record<string, unknown>)['dshHomeSource']).toBe('config')
+      const samePackages = sameData.key['packages'] as Record<string, unknown>[]
+      expect(samePackages.map((item) => item['packageName'])).toEqual(['pkg-config'])
     })
   })
 })

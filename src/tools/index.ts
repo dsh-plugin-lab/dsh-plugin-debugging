@@ -17,6 +17,7 @@
  * | `dsh_diagnose_plugin_load` | 只读 | §3.1 / §3.2 / §3.8 |
  * | `dsh_check_auth` | 只读 | §3.3 / §3.4 |
  * | `dsh_dump_config` | 只读 | §3.8 |
+ * | `dsh_list_instances` | 只读 | 跨实例（D′）—— 发现本机活着的 DSH |
  * | `dsh_hot_reload` | **写侧** | 生效三档（换模块） |
  * | `dsh_sign_cookie` | **派生**（唯一经手秘密） | §3.4 |
  *
@@ -33,6 +34,7 @@ import { createDiagnosePluginLoadTool } from './dsh_diagnose_plugin_load.js'
 import { createDumpConfigTool } from './dsh_dump_config.js'
 import { createEffectModeTool } from './dsh_check_effect_mode.js'
 import { createHotReloadTool } from './dsh_hot_reload.js'
+import { createListInstancesTool } from './dsh_list_instances.js'
 import { createSignCookieTool } from './dsh_sign_cookie.js'
 import { createToolDeps } from './shared.js'
 
@@ -57,6 +59,9 @@ export function registerTools(ctx: Context, state: PluginState): void {
     createDiagnosePluginLoadTool,
     createCheckAuthTool,
     createDumpConfigTool,
+    // 发现工具（D′ 第①块）：列本机活着的 DSH。它也是只读的（读 socket 表 + 发一次
+    // 未认证 `GET /`），与上面四个共用同一份 `deps`。
+    createListInstancesTool,
   ]
   for (const create of factories) {
     ctx.tools.register(create(deps))

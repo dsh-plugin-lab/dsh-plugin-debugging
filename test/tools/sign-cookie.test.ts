@@ -399,7 +399,7 @@ describe(SIGN_COOKIE_TOOL, () => {
       const tool = createSignCookieTool(depsFor(configFor('/tmp/none', { port: 3080 })))
       const params = tool.parameters as { properties?: Record<string, { description?: string }> }
       const names = Object.keys(params.properties ?? {})
-      expect(names).toEqual(['port', 'host', 'maxAgeDays'])
+      expect(names).toEqual(['port', 'host', 'maxAgeDays', 'dshHome'])
       let total = 0
       for (const name of names) {
         const description = params.properties?.[name]?.description ?? ''
@@ -417,6 +417,37 @@ describe(SIGN_COOKIE_TOOL, () => {
       expect(Object.keys(result).sort()).toEqual(['data', 'nextStep', 'ok'])
       const data = result['data'] as Record<string, unknown>
       expect(Object.keys(data).sort()).toEqual(['audit', 'key', 'verdict'])
+    })
+  })
+
+  describe('跨实例（D′ 第②块）：dshHome 参数', () => {
+    it('读的是**参数那个** home 的密钥：配置 home 里没有凭据也照样签得出来', async () => {
+      // 判据落在**真路径解析**上：配置 home 是空的（读它必然 not-found），凭据只在参数 home 里。
+      // 所以「签成功」这件事本身证明它读的是参数那一份 —— 不是靠断言某个字段。
+      const configuredHome = await tempDshHome()
+      const otherHome = await homeWithCredentials(credentialsWithGrant())
+      const tool = createSignCookieTool(depsFor(configFor(configuredHome, { port: 3080 })))
+
+      const data = expectOk(await run(tool, { port: 3080, dshHome: otherHome }))
+      expect(data.key['cookieName']).toBeDefined()
+      const resolved = data.key['resolved'] as Record<string, unknown>
+      expect(resolved['dshHome']).toBe(otherHome)
+      // 三值纪律：参数来的值不许印成 config / default。
+      expect(resolved['dshHomeSource']).toBe('tool-argument')
+      // 审计里那个「读了哪个文件」的事实也必须指向参数 home（它是复核材料）。
+      expect(String(data.audit['file'])).toContain(otherHome)
+    })
+
+    it('反向：把凭据放在**配置** home 里、参数指一个空 home ⇒ 必须 not-found（判据不恒真）', async () => {
+      const configuredHome = await homeWithCredentials(credentialsWithGrant())
+      const emptyHome = await tempDshHome()
+      const tool = createSignCookieTool(depsFor(configFor(configuredHome, { port: 3080 })))
+
+      const failed = expectFail(await run(tool, { port: 3080, dshHome: emptyHome }))
+      expect(failed.kind).toBe('not-found')
+      const resolved = failed.data.key['resolved'] as Record<string, unknown>
+      expect(resolved['dshHome']).toBe(emptyHome)
+      expect(resolved['dshHomeSource']).toBe('tool-argument')
     })
   })
 })

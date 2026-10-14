@@ -607,3 +607,403 @@ export async function lookupPort(
   // 方案里每一条都不可信 → 「查不了」，**不是**「没人听」。
   return notProbed(port, platform, `no usable socket table (${failures.join('; ')})`)
 }
+// ── 「列出全部监听者」（D′ 的发现能力） ────────────────────────────────────
+//
+// 与 `lookupPort` **并列**，不是改它：单端口查询的既有行为（含四态语义与全部断言）
+// 一个字都不许变，而「列全部」要的是另一件事 —— 找出**所有**候选端口，
+// 再由上层去逐个认领谁是 DSH。
+//
+// 三平台各自的差别全在「怎么列出全部」，而**四态语义照旧**：
+// `probed:false`（查不了）/ 没有候选（没人听）/ 候选带 pid（认得出来）/
+// 候选**不带 pid**（有人听但读不到 pid ⇒ `unidentified`）。
+
+/** 一个候选监听端口（端口必有；进程信息可能读不到）。 */
+export interface ListenerCandidate {
+  port: number
+  pid?: number
+  processName?: string
+  startedAt?: string
+}
+
+/** 「列出全部监听者」的结果。 */
+export interface ListenerScanResult {
+  platform: string
+  /** `false` = **查不了**（命令缺失 / 形状认不出 / 超时 / 取消），不是「没人听」。 */
+  probed: boolean
+  candidates: ListenerCandidate[]
+  /**
+   * **有监听、但读不到 pid** 的条数。
+   *
+   * 与 {@link ParsedSocketTable} 的 `unidentified` 同一个纪律：把它压成「没人听」
+   * 就是反向结论 —— 而那正是本仓反复记的那一族静默坏。
+   */
+  unidentified: number
+  detail: string
+}
+
+/** 一张「全部监听者」表的解析结果。 */
+export interface ParsedListenerTable {
+  candidates: ListenerCandidate[]
+  unidentified: number
+  /** **认得的**行数（含表头）—— 理由与 `ParsedSocketTable.rows` 逐字相同。 */
+  rows: number
+}
+
+/**
+ * 造「列出全部监听者」的脚本（**仅 Windows 分支**）。
+ *
+ * 与 {@link portLookupScript} 的两处差别，都是必需的：
+ * 1. 去掉 `-LocalPort <n>` —— 这正是「列全部」；
+ * 2. 输出**多带一个 `port` 字段**：单端口那次查询的调用方已经知道端口，列全部时
+ *    不知道，而 `LocalPort` 必须由脚本给出（否则解析器只能瞎猜）。
+ *
+ * 字段顺序固定为 `port|pid|name|startedAt`：加字段是**破坏性**改动，
+ * 解析器 {@link parseListenerScan} 与它成对，别只改一边。
+ */
+export function listenerScanScript(): string {
+  return [
+    "$ErrorActionPreference='SilentlyContinue'",
+    '$rows=@(Get-NetTCPConnection -State Listen)',
+    'foreach($r in $rows){',
+    '$p=$r.OwningProcess',
+    '$proc=Get-Process -Id $p',
+    "$started=''",
+    "try{ $started=$proc.StartTime.ToString('o') }catch{}",
+    'Write-Output ("{0}|{1}|{2}|{3}" -f $r.LocalPort,$p,$proc.ProcessName,$started)',
+    '}',
+  ].join('; ')
+}
+
+/**
+ * 解析「列出全部监听者」的脚本输出（`port|pid|name|startedAt`）。
+ *
+ * 形状不对的行**跳过**（不猜）：pid 读不出来时仍然保留端口 —— 那是「有人听、
+ * 不知道是谁」，属于 `unidentified`，不是「没有」。
+ *
+ * @param stdout 脚本的标准输出。
+ */
+export function parseListenerScan(stdout: string): ParsedListenerTable {
+  const table: ParsedListenerTable = { candidates: [], unidentified: 0, rows: 0 }
+  for (const rawLine of stdout.split(/\r?\n/u)) {
+    const line = rawLine.trim()
+    if (line === '') continue
+    const [portText, pidText = '', processName = '', startedAt = ''] = line.split('|')
+    const port = Number.parseInt(portText ?? '', 10)
+    if (!isPort(port)) continue
+    table.rows += 1
+    const pid = Number.parseInt(pidText, 10)
+    if (!isPid(pid)) {
+      table.unidentified += 1
+      table.candidates.push({ port })
+      continue
+    }
+    table.candidates.push({
+      port,
+      pid,
+      processName: processName === '' ? '(unknown)' : processName,
+      ...(startedAt === '' ? {} : { startedAt }),
+    })
+  }
+  return table
+}
+
+/** 合法端口（`0` 不是可连接的监听端口）。 */
+function isPort(value: number): boolean {
+  return Number.isSafeInteger(value) && value > 0 && value <= 65535
+}
+
+/** `ss` 一行里本地地址那列的端口（`0.0.0.0:3080` / `[::1]:3080`）。 */
+function ssPortOf(fields: readonly string[]): number | undefined {
+  const match = SS_ADDR_PORT.exec(fields[SS_LOCAL_ADDRESS_INDEX] ?? '')
+  const port = match === null ? Number.NaN : Number(match[1])
+  return isPort(port) ? port : undefined
+}
+
+/**
+ * 解析 `ss -ltnp` / `ss -ltn` 的**全部**监听行。
+ *
+ * 复用的是 {@link parseSsOutput} 那套「先认行、再取值」的形状判据
+ * （`ssRowHasKnownShape` + 结构内下标），只是**不过滤端口**。
+ *
+ * @param stdout `ss` 的标准输出。
+ */
+export function parseSsListeners(stdout: string): ParsedListenerTable {
+  const table: ParsedListenerTable = { candidates: [], unidentified: 0, rows: 0 }
+  const seen = new Set<string>()
+  for (const rawLine of stdout.split(/\r?\n/u)) {
+    const line = rawLine.trim()
+    if (line === '') continue
+    const fields = line.split(/\s+/u)
+    const state = (fields[0] ?? '').toUpperCase()
+    if (state === 'STATE') {
+      table.rows += 1
+      continue
+    }
+    if (state !== 'LISTEN') continue
+    if (!ssRowHasKnownShape(fields)) continue
+    table.rows += 1
+    const port = ssPortOf(fields)
+    if (port === undefined) continue
+    const pids = [...line.matchAll(SS_PID)]
+      .map((match) => Number(match[1]))
+      .filter(isPid)
+    if (pids.length === 0) {
+      table.unidentified += 1
+      table.candidates.push({ port })
+      continue
+    }
+    const names = [...line.matchAll(SS_PROCESS)].map((match) => unescapeSsName(match[1] ?? ''))
+    pids.forEach((pid, index) => {
+      const key = `${String(port)}:${String(pid)}`
+      if (seen.has(key)) return
+      seen.add(key)
+      table.candidates.push({
+        port,
+        pid,
+        processName: names[index] ?? names[names.length - 1] ?? '(unknown)',
+      })
+    })
+  }
+  return table
+}
+
+/**
+ * 解析 `lsof -nP -iTCP -sTCP:LISTEN` 的**全部**监听行。
+ *
+ * 与 {@link parseLsofOutput} 同形，只是不吃端口参数（`lsof` 那一行里已经带着端口）。
+ *
+ * @param stdout `lsof` 的标准输出。
+ */
+export function parseLsofListeners(stdout: string): ParsedListenerTable {
+  const table: ParsedListenerTable = { candidates: [], unidentified: 0, rows: 0 }
+  for (const rawLine of stdout.split(/\r?\n/u)) {
+    const line = rawLine.trim()
+    if (line === '') continue
+    const fields = line.split(/\s+/u)
+    if ((fields[0] ?? '').toUpperCase() === 'COMMAND') {
+      table.rows += 1
+      continue
+    }
+    if (!LSOF_LISTEN_STATE.test(line)) continue
+    table.rows += 1
+    const local = LSOF_LOCAL_PORT.exec(line)
+    const port = local === null ? Number.NaN : Number(local[1])
+    if (!isPort(port)) continue
+    const pid = Number.parseInt(fields[1] ?? '', 10)
+    if (!isPid(pid)) {
+      table.unidentified += 1
+      table.candidates.push({ port })
+      continue
+    }
+    const command = fields[0] ?? ''
+    table.candidates.push({ port, pid, processName: command === '' ? '(unknown)' : command })
+  }
+  return table
+}
+
+/**
+ * `netstat -an` 里**本地地址**那一列的列号（`Proto Recv-Q Send-Q Local Foreign (state)`）。
+ *
+ * 为什么是结构内下标而不是「扫全行找 `:port`」：与 `ss` 那条纪律逐字同一个理由 ——
+ * 扫全行会让**对端地址**被当成监听端口（实测踩过：本机夹具里 `Foreign` 那一列
+ * 恰好是另一个端口，扫全行就会报出一个根本不监听的端口）。
+ */
+const NETSTAT_LOCAL_INDEX = 3
+
+/** `netstat -an` 一行里本地地址那一列的端口（`127.0.0.1.3080` / `*.3080`）。 */
+function netstatPortOf(fields: readonly string[]): number | undefined {
+  if (fields.length <= NETSTAT_LOCAL_INDEX) return undefined
+  const match = NETSTAT_LOCAL_PORT.exec(fields[NETSTAT_LOCAL_INDEX] ?? '')
+  const port = match === null ? Number.NaN : Number(match[1])
+  return isPort(port) ? port : undefined
+}
+
+/**
+ * 解析 `netstat -an` 的**全部** tcp 监听行（darwin 的最后一档兜底）。
+ *
+ * **`netstat` 不给 pid**，所以每一条都同时进 `unidentified` 与 `candidates`（只带端口）：
+ * 「知道有东西在听、不知道是谁」是如实结论，而那个端口**仍然值得去探一次签名**
+ * （D′ 只需要 authority，不需要 pid）。
+ *
+ * @param stdout `netstat` 的标准输出。
+ */
+export function parseNetstatListeners(stdout: string): ParsedListenerTable {
+  const table: ParsedListenerTable = { candidates: [], unidentified: 0, rows: 0 }
+  for (const rawLine of stdout.split(/\r?\n/u)) {
+    const line = rawLine.trim()
+    if (line === '') continue
+    const fields = line.split(/\s+/u)
+    const proto = (fields[0] ?? '').toLowerCase()
+    if (proto === 'proto') {
+      table.rows += 1
+      continue
+    }
+    if (!proto.startsWith('tcp')) continue
+    if (fields[fields.length - 1] !== 'LISTEN') continue
+    table.rows += 1
+    const port = netstatPortOf(fields)
+    if (port === undefined) continue
+    table.unidentified += 1
+    table.candidates.push({ port })
+  }
+  return table
+}
+
+
+/** 「列出全部监听者」的一次尝试（命令 + 解析器）。 */
+export interface ListenerScanAttempt {
+  command: string
+  args: readonly string[]
+  parse: (stdout: string) => ParsedListenerTable
+}
+
+/**
+ * 取某个平台的「列出全部监听者」方案。
+ *
+ * 与 {@link portLookupPlan} 分开而不是参数化：两条路的**命令形态不同**
+ * （`-LocalPort` / `-iTCP:<port>` 都得去掉），把它们塞进一个函数只会让
+ * 「传不传端口」变成一个运行期分支 —— 而那个分支写错的形状正是**静默少列**。
+ *
+ * @param platform `process.platform`（**调用时**读）。
+ */
+export function listenerScanAttempts(platform: string): ListenerScanAttempt[] {
+  if (platform === 'win32') {
+    return [
+      {
+        command: PORT_LOOKUP_SHELL,
+        args: ['-NoProfile', '-NonInteractive', '-Command', listenerScanScript()],
+        parse: parseListenerScan,
+      },
+    ]
+  }
+  if (platform === 'linux') {
+    return [
+      { command: LINUX_LOOKUP_COMMAND, args: ['-ltnp'], parse: parseSsListeners },
+      { command: LINUX_LOOKUP_COMMAND, args: ['-ltn'], parse: parseSsListeners },
+    ]
+  }
+  if (platform === 'darwin') {
+    return [
+      { command: DARWIN_LOOKUP_COMMAND, args: ['-nP', '-iTCP', '-sTCP:LISTEN'], parse: parseLsofListeners },
+      { command: DARWIN_FALLBACK_COMMAND, args: ['-an'], parse: parseNetstatListeners },
+    ]
+  }
+  return []
+}
+
+/**
+ * 列出本机全部监听者。
+ *
+ * **不抛**：查不了收敛成 `probed: false`。可注入 spawn；每次尝试都带预算。
+ *
+ * @param deps 可注入的 spawn 与预算。
+ */
+export async function listListeners(deps: {
+  spawn: SpawnImpl
+  timeoutMs: number
+  signal?: AbortSignal | undefined
+}): Promise<ListenerScanResult> {
+  const platform = process.platform
+  const attempts = listenerScanAttempts(platform)
+  if (attempts.length === 0) {
+    return {
+      platform,
+      probed: false,
+      candidates: [],
+      unidentified: 0,
+      detail: `${platform}: no socket-table command is known on platform ${platform}`,
+    }
+  }
+
+  const failures: string[] = []
+  for (const attempt of attempts) {
+    const result = await deps.spawn({
+      command: attempt.command,
+      args: attempt.args,
+      timeoutMs: deps.timeoutMs,
+      signal: deps.signal,
+    })
+    if (result.aborted) {
+      return {
+        platform,
+        probed: false,
+        candidates: [],
+        unidentified: 0,
+        detail: `${platform}: the caller cancelled the listener scan`,
+      }
+    }
+    if (result.timedOut) {
+      return {
+        platform,
+        probed: false,
+        candidates: [],
+        unidentified: 0,
+        detail: `${platform}: the listener scan timed out`,
+      }
+    }
+    if (result.spawnError !== undefined) {
+      failures.push(`${attempt.command}: ${result.spawnError}`)
+      continue
+    }
+    const table = attempt.parse(result.stdout)
+    if (!listenerTableIsTrusted(result, table)) {
+      failures.push(`${attempt.command}: ${listenerAttemptFailure(result, table)}`)
+      continue
+    }
+    return {
+      platform,
+      probed: true,
+      candidates: dedupeCandidates(table.candidates),
+      unidentified: table.unidentified,
+      detail:
+        table.candidates.length === 0
+          ? `no listening ports were found (${platform})`
+          : `${String(table.candidates.length)} candidate port(s) (${platform})`,
+    }
+  }
+  return {
+    platform,
+    probed: false,
+    candidates: [],
+    unidentified: 0,
+    detail: `${platform}: no usable socket table (${failures.join('; ')})`,
+  }
+}
+
+/** 同端口同 pid 只留一条（多张表 / 双栈会让同一条出现两次）。 */
+function dedupeCandidates(candidates: readonly ListenerCandidate[]): ListenerCandidate[] {
+  const seen = new Set<string>()
+  const result: ListenerCandidate[] = []
+  for (const candidate of candidates) {
+    const key = `${String(candidate.port)}:${String(candidate.pid ?? '')}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    result.push(candidate)
+  }
+  return result
+}
+
+/**
+ * 一次「列出全部」的尝试能不能当结论用。
+ *
+ * 与 {@link attemptIsTrusted} 同一条纪律，只是表形状不同。
+ */
+function listenerTableIsTrusted(
+  result: CommandResult,
+  table: ParsedListenerTable,
+): boolean {
+  if (table.rows > 0) return true
+  if (result.stdout.trim() === '') return result.code === 0
+  if (result.stderr.trim() !== '') return false
+  return false
+}
+
+/** 一次「列出全部」尝试失败时留给 `detail` 的一句（模型可见，所以英文）。 */
+function listenerAttemptFailure(result: CommandResult, table: ParsedListenerTable): string {
+  if (result.spawnError !== undefined) return result.spawnError
+  if (result.code !== 0) {
+    const stderr = result.stderr.trim().split(/\r?\n/u)[0] ?? ''
+    return `exit ${String(result.code)}${stderr === '' ? '' : ` (${stderr})`}`
+  }
+  return `unrecognised output (${String(table.rows)} table row(s) parsed)`
+}

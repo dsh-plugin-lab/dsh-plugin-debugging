@@ -186,6 +186,100 @@ export function toOutput<T>(result: ToolResult<T>): JsonValue {
 }
 
 /**
+ * 参数里的 `dshHome`（跨实例观察的接缝；见 `docs/SHAPE.md` §1.2 的 D′ 第②块）。
+ *
+ * 只做**规整**，不做校验：空串 / 全空白 / 没传 = 「没覆盖」。刻意不 `resolve()`
+ * 成绝对路径 —— 本仓对路径一律**照实回报**（`resolved.dshHome` 就是用户给的那个串），
+ * 悄悄改写用户给的路径会让「我让它看的是 X，它读的是 Y」这种问题更难查。
+ *
+ * @param raw 工具参数里的值。
+ */
+export function dshHomeOverride(raw: string | undefined): string | undefined {
+  const trimmed = typeof raw === 'string' ? raw.trim() : ''
+  return trimmed === '' ? undefined : trimmed
+}
+
+/**
+ * 把本次调用的 `dshHome` 参数**叠进**配置：给了就覆盖 `dshHome`，
+ * 并把来源标成 `tool-argument`。
+ *
+ * 为什么同批改来源：只改路径不改来源串，输出里就会把「参数来的目录」印成
+ * `config` / `default`（三值纪律）—— 而那正是这次调用最该被看见的事实。
+ * 没给参数时**原样返回同一个对象**（不是浅拷贝），这样「没覆盖」与「覆盖成同一个值」
+ * 在引用层也分得开，判据可以据此断言。
+ *
+ * @param config 已补齐默认值的配置。
+ * @param dshHome 参数里的 `dshHome`。
+ */
+export function withHomeOverride(
+  config: ResolvedConfig,
+  dshHome: string | undefined,
+): ResolvedConfig {
+  const home = dshHomeOverride(dshHome)
+  if (home === undefined) return config
+  return { ...config, dshHome: home, dshHomeSource: 'tool-argument' }
+}
+
+/**
+ * 让**这次调用起的每一个子进程**都看到同一个 `DSH_HOME`。
+ *
+ * ## 为什么必须有这一层（本仓踩过的那条缝）
+ *
+ * `spawn` 型的工具（`dump_config` / `check_effect_mode`）是**起一个 `dsh` 去问**的，
+ * 而 `lib/exec.ts` 的 `env` 默认是 `process.env` ⇒ **只加参数、不注环境**的话，
+ * 子进程会读回**宿主进程自己的** home，而工具却把 `resolved.dshHome` 印成参数值 ——
+ * 那正好是「看着成功、其实读的是另一个目录」，也就是这个接缝要消灭的那类谎。
+ *
+ * ## 两条边界
+ *
+ * 1. **永远注入**（不只是给了参数时）：子进程问的必须是本次调用**认的那个** home ——
+ *    配置里指定的 home 同理（否则工具报的是配置的 home，子进程读的是 env 的）。
+ * 2. **返回新对象，绝不改 `process.env`**：改进程环境是**写侧**动作（本仓写侧边界
+ *    见 B15），而且会跨调用泄漏。`{ ...env, DSH_HOME: home }` 只影响这一个子进程。
+ *
+ * @param spawn 底层 spawn 实现。
+ * @param env 要注入的环境变量（见 {@link childEnvFor}）。
+ */
+export function spawnWithHome(spawn: SpawnImpl, env: NodeJS.ProcessEnv): SpawnImpl {
+  return async (options) => await spawn({ ...options, env })
+}
+
+/**
+ * 子进程要看到的环境变量：在调用方给的环境上叠加 `DSH_HOME`。
+ *
+ * @param env 调用方的环境（`ToolDeps.env`，测试可注入）。
+ * @param dshHome 本次调用认的 home；空串时不叠加（契约上不可能，见 `assertResolvedDshHome`）。
+ */
+export function childEnvFor(env: NodeJS.ProcessEnv, dshHome: string): NodeJS.ProcessEnv {
+  if (dshHome === '') return env
+  return { ...env, DSH_HOME: dshHome }
+}
+
+/**
+ * 「这次调用跑在哪个实例上」的**唯一装配点**：把 `dshHome` 参数叠进配置，
+ * 并让该次调用的子进程也看到同一个 home。
+ *
+ * 为什么要有它（而不是各工具自己 `{...config, dshHome}` 一遍）：
+ * 跨实例这个接缝**有两层**（路径解析 + 子进程环境），两层必须同时改 ——
+ * 分开写就一定会出现「只改了一层」的工具，而那种错的形状是**看着成功、读的是另一个实例**。
+ * 一处装配，六个工具共用；将来再加一层也只是改这一个函数。
+ *
+ * 没给参数时**仍然**包一层 spawn：子进程问的必须是本次调用认的那个 home（配置指定的也一样），
+ * 否则工具报的 home 与子进程读的 home 会不同 —— 那正是这个接缝要消灭的谎。
+ *
+ * @param deps 运行期依赖。
+ * @param dshHome 参数里的 `dshHome`。
+ */
+export function withCallHome(deps: ToolDeps, dshHome: string | undefined): ToolDeps {
+  const config = withHomeOverride(deps.config, dshHome)
+  return {
+    ...deps,
+    config,
+    spawn: spawnWithHome(deps.spawn, childEnvFor(deps.env, config.dshHome)),
+  }
+}
+
+/**
  * 生效配置块：把「这次调用实际用的是哪份配置」变成**可见证据**。
  *
  * 为什么每个工具的成功 `data` 都要带它：诊断工具最坏的一种失败不是报错，而是
