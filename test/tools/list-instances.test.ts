@@ -250,6 +250,56 @@ describe(`${LIST_INSTANCES_TOOL} · scan 的三态（scanned / skipped / unavail
     })
   })
 
+  // ⚠️ **用例超时要放宽到断言之上**：旧实现会耗掉 ~13 s，若用例自己在 5 s（vitest 默认）
+  // 就被掐死，那这条判据就只是「红了」，**没断言到根因**（坑 37 的形状：变红了但没测到东西）。
+  // 放宽之后，红/绿由下面那句 `elapsed < 6000` 决定。
+  it(
+    '⚠️ 挂住的候选**不许让整次调用回不来**（每条探测独立上限 + 有界并发）',
+    { timeout: 25_000 },
+    async () => {
+      // 真机分布（2026-10-14 实测）：37 个回环监听端口里 **9 个**「接受连接但永不回话」
+      // （1042 / 8588 / 8590 / 9012 / 14013 / 14016 / 14019 / 14022 / 14023）。
+      //
+      // 原写法「串行 + 每条拿 `budgetFor(budget, deadline)`（剩余总预算）」的真机症状是
+      // **整次调用回不来**（观察到的就是 15 s 传输超时），因为第一个挂住的端口把剩余预算吃光。
+      //
+      // ⚠️ 所以判据要断言的**是「回得来」**（耗时），而不是「后面的候选还在」——
+      // 后者在小预算下即使旧实现也成立（第一跳耗掉 1 s，剩下的仍够探第二个），
+      // 拿它当判据会**假绿**（本判据的第一版就是这么写的，变异跑出来是绿的）。
+      const stub: SignatureFetch = (url, init) =>
+        url.includes('5000')
+          ? Promise.resolve({ status: 401, text: () => Promise.resolve(DSH_UNAUTHORIZED_BODY) })
+          : new Promise((_resolve, reject) => {
+              init.signal.addEventListener('abort', () => {
+                reject(new Error('transport-timeout'))
+              })
+            })
+
+      // 三个候选：两个挂住、一个答签名。真机上的比例比这更糟（9/37 挂）。
+      const table = ['3080|111|node|', '4000|222|other|', '5000|333|node|'].join('\r\n')
+      const tool = toolWith({ table, probe: stub })
+
+      const started = Date.now()
+      const data = expectOk(await run(tool, {}))
+      const elapsed = Date.now() - started
+
+      // ① 三个都探了、顺序不变（并发也要保序）。
+      const instances = data.key['instances'] as Record<string, unknown>[]
+      expect(instances.map((item) => item['authority'])).toEqual([
+        '127.0.0.1:3080',
+        '127.0.0.1:4000',
+        '127.0.0.1:5000',
+      ])
+      // ② 挂住的两个如实是 `unknown`（不是 other、更不是「没有」），答话的那个被认领。
+      expect(instances.map((item) => item['verdict'])).toEqual(['unknown', 'unknown', 'dsh'])
+
+      // ③ **根因事实**：有 2 个挂住的候选时，整次调用仍必须在**远小于预算**的时间里回来。
+      //    修好的实现：一波并发、每条 2 s 上限 ⇒ ~2 s。
+      //    旧实现：串行，第一个就吃掉 ~13 s ⇒ 必然越过这个界（真机上就是传输超时）。
+      expect(elapsed).toBeLessThan(6000)
+    },
+  )
+
   it('给了 port：**不扫** ⇒ `skipped`，而且 socket 表命令一次都不跑', async () => {
     const spawn = recordingSpawn(() => cmdResult({ stdout: winTable() }))
     const stub = probeStub(() => ({ status: 401, body: DSH_UNAUTHORIZED_BODY }))
@@ -406,14 +456,52 @@ describe(`${LIST_INSTANCES_TOOL} · 有界与取消`, () => {
   it('候选超过上限 ⇒ 只探上限个，并**明说截断了**（不静默丢）', async () => {
     // 喂的仍是 win32 形状（`port|pid|name|startedAt`）⇒ 平台要钉住（坑 25）。
     await withPlatform('win32', async () => {
-      const many = Array.from({ length: 40 }, (_, index) => `${String(1000 + index)}|1|node|`)
+      const many = Array.from({ length: 60 }, (_, index) => `${String(1000 + index)}|1|node|`)
       const stub = probeStub(() => ({ status: 200, body: 'hi' }))
       const tool = toolWith({ table: many.join('\n'), probe: stub.fetch })
       const data = expectOk(await run(tool, {}))
       const scan = data.key['scan'] as Record<string, unknown>
       expect(scan['truncated']).toBe(true)
-      expect((data.key['instances'] as unknown[]).length).toBe(24)
-      expect(stub.urls.length).toBe(24)
+      expect((data.key['instances'] as unknown[]).length).toBe(48)
+      expect(stub.urls.length).toBe(48)
+      // ⚠️ **截断了就绝不许说「没有 DSH」**（真机端到端实测逼出来的：本机 3080 在跑，
+      // 而工具当时报的正是 `no DSH host was found` —— 把「没查完」印成「没有」）。
+      expect(String(data.verdict)).not.toContain('no DSH host was found')
+      expect(String(data.verdict)).toContain('never examined')
+    })
+  })
+
+  it('⚠️ 双栈重复要**去重**、候选要**按端口升序**（否则真 DSH 会被截断挡在外面）', async () => {
+    await withPlatform('win32', async () => {
+      // 真机形状（2026-10-14 实测）：`Get-NetTCPConnection` 对双栈监听**同一端口返回两行**
+      // （IPv4 + IPv6），且整体是**降序**（49724 → 135）。本机 63 行只有 52 个唯一端口，
+      // 而真正在跑的 DSH（3080）排在**下标 58** ⇒ 不去重、不排序时它永远进不了候选，
+      // 工具就会报「no DSH host was found」—— 而它此刻正在服务。
+      const rows = [
+        '49724|1|node|',
+        '49724|1|node|', // 双栈重复
+        '4000|2|node|',
+        '4000|2|node|', // 双栈重复
+        '3080|3|node|', // 真 DSH，在原始（降序）顺序里排最后
+      ]
+      const stub = probeStub((url) =>
+        url.includes('3080')
+          ? { status: 401, body: DSH_UNAUTHORIZED_BODY }
+          : { status: 200, body: 'hi' },
+      )
+      const tool = toolWith({ table: rows.join('\r\n'), probe: stub.fetch })
+      const data = expectOk(await run(tool, {}))
+      const instances = data.key['instances'] as Record<string, unknown>[]
+      // ① **去重**：5 行 ⇒ 3 个候选（不去重就是 5 个）。
+      // ② **升序**：3080 排第一（不排序就是原始降序 49724 → 4000 → 3080）。
+      expect(instances.map((item) => item['authority'])).toEqual([
+        '127.0.0.1:3080',
+        '127.0.0.1:4000',
+        '127.0.0.1:49724',
+      ])
+      // ③ 于是它真的被认领到（这正是这个工具存在的理由）。
+      expect(instances.map((item) => item['verdict'])).toEqual(['dsh', 'other', 'other'])
+      expect(String(data.verdict)).toContain('found 1 DSH host')
     })
   })
 

@@ -664,12 +664,25 @@ export function listenerScanScript(): string {
   return [
     "$ErrorActionPreference='SilentlyContinue'",
     '$rows=@(Get-NetTCPConnection -State Listen)',
-    'foreach($r in $rows){',
-    '$p=$r.OwningProcess',
-    '$proc=Get-Process -Id $p',
+    '$pids=@($rows | Select-Object -ExpandProperty OwningProcess -Unique)',
+    // ⚠️ **一次问完，不要逐行问**（2026-10-14 实测）：原写法在 `foreach($r in $rows)` 里对**每一行**
+    // （含双栈重复，本机 63 行）各调一次 `Get-Process -Id`，是 O(行数) 次进程查询 ——
+    // 本机实测 **2,110 ms**；把唯一 pid 数组**一次**交给 `Get-Process -Id` 只要 **705 ms**
+    // （同一份输出、同样的 `unidentified` 判定）。`Get-Process -Id` 接受数组，这是纯优化。
+    '$procs=@{}',
+    'if($pids.Count -gt 0){',
+    'foreach($proc in @(Get-Process -Id $pids)){',
     "$started=''",
     "try{ $started=$proc.StartTime.ToString('o') }catch{}",
-    'Write-Output ("{0}|{1}|{2}|{3}" -f $r.LocalPort,$p,$proc.ProcessName,$started)',
+    '$procs[[string]$proc.Id]=("{0}|{1}" -f $proc.ProcessName,$started)',
+    '}',
+    '}',
+    'foreach($r in $rows){',
+    '$p=$r.OwningProcess',
+    '$v=$procs[[string]$p]',
+    "if($null -eq $v){ $v='|' }",
+    "$i=$v.IndexOf('|')",
+    'Write-Output ("{0}|{1}|{2}|{3}" -f $r.LocalPort,$p,$v.Substring(0,$i),$v.Substring($i+1))',
     '}',
   ].join('; ')
 }

@@ -1,5 +1,5 @@
 /**
- * 工具半边 —— 注册四个**只读**诊断工具、一个写侧工具、一个派生工具。
+ * 工具半边 —— 注册**只读**诊断工具、一个写侧工具、一个派生工具、一个行动类工具。
  *
  * **契约（G2 冻结，改它要同时改 `src/contracts.ts` 与技能半边）**
  * - 只导出 `registerTools(ctx, state)`；
@@ -20,6 +20,7 @@
  * | `dsh_list_instances` | 只读 | 跨实例（D′）—— 发现本机活着的 DSH |
  * | `dsh_hot_reload` | **写侧** | 生效三档（换模块） |
  * | `dsh_sign_cookie` | **派生**（唯一经手秘密） | §3.4 |
+ * | `dsh_restart` | **行动**（不可逆；唯一会退出宿主） | §一 生效三档（`restart-required` 那一路） |
  *
  * **只读纪律**：不杀进程、不改 profile、不写 `$DSH_HOME`。
  * 进程与端口一律**按端口**查（`lib/ports.ts`），不用命令行子串 —— 子串会误匹配派生 shell。
@@ -35,6 +36,7 @@ import { createDumpConfigTool } from './dsh_dump_config.js'
 import { createEffectModeTool } from './dsh_check_effect_mode.js'
 import { createHotReloadTool } from './dsh_hot_reload.js'
 import { createListInstancesTool } from './dsh_list_instances.js'
+import { createRestartTool, restartHostFrom } from './dsh_restart.js'
 import { createSignCookieTool } from './dsh_sign_cookie.js'
 import { createToolDeps } from './shared.js'
 
@@ -79,4 +81,17 @@ export function registerTools(ctx: Context, state: PluginState): void {
   // `dsh_sign_cookie.ts` 文件头第 2 条：cookie 本体刻意不进 `data` 也不进 `audit`
   // （`audit` 会被 spill 落盘）。
   ctx.tools.register(createSignCookieTool(deps))
+
+  // 行动类工具（`dsh_restart`）：**唯一会退出宿主**的那一个，也是本仓唯一的不可逆动作。
+  //
+  // 它比写侧多要四个宿主面（四道闸的取数、审批档、计划任务拉起、`appExit`），
+  // 所以单独装配一处（`restartHostFrom`）—— `deps` 那份是只读工具共享的冻结形状，
+  // 不为行动类破例（与 `dsh_hot_reload` 同一个范式）。
+  //
+  // ⚠️ 装配发生在 apply 期，但 `restartHostFrom` **不在这里取任何服务**：
+  // `ctx.get('fs')` 在 apply 期是 `undefined`（`task-31` 实测，+1s 才有），
+  // 所以那个适配器每次读写时各自现取一次，本处只绑 ctx 与配置。
+  ctx.tools.register(
+    createRestartTool({ ...deps, restart: restartHostFrom(ctx, state.config, deps.spawn) }),
+  )
 }

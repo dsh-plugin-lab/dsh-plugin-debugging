@@ -68,6 +68,13 @@ import {
   LIST_INSTANCES_DESCRIPTION,
   LIST_INSTANCES_TOOL,
 } from '../src/tools/dsh_list_instances.ts'
+import {
+  createRestartTool,
+  RESTART_DESCRIPTION,
+  RESTART_TOOL,
+  type RestartHost,
+} from '../src/tools/dsh_restart.ts'
+import type { LaunchCommand, RestartFsPort, RestartPorts } from '../src/lib/restart.ts'
 import { encodeBase64Url } from '../src/lib/cookie-sign.ts'
 import { createToolDeps, type ToolDeps } from '../src/tools/shared.ts'
 
@@ -561,6 +568,7 @@ const EXPECTED_TOOLS = [
   'dsh_list_instances',
   'dsh_hot_reload',
   'dsh_sign_cookie',
+  'dsh_restart',
 ] as const
 
 /**
@@ -690,6 +698,8 @@ describe('B9 工具名是闭集', () => {
       `export const SIGN_COOKIE_TOOL = 'dsh_sign_cookie'`,
       // 第 7 个工具（D′ 的发现工具）同样走「常量 + defineTool 内联 name」两处。
       `export const LIST_INSTANCES_TOOL = 'dsh_list_instances'`,
+      // 第 8 个工具（行动类 `dsh_restart`）同样走「常量 + defineTool 内联 name」两处。
+      `export const RESTART_TOOL = 'dsh_restart'`,
     ].join('\n')
     const found = [
       ...new Set(collectDeclaredToolNames([{ path: 'synthetic.ts', text: synthetic }])),
@@ -3443,9 +3453,19 @@ function writeInstalledPackageFixture(profileDir: string, packageName: string): 
   writeTextFile(join(packageDir, 'lib', 'index.js'), '// redline fixture\n')
 }
 
-/** 造一个 exec（只需要 signal）。 */
+/**
+ * 造一个 exec。
+ *
+ * ⚠️ **带一个 agent**：`dsh_restart` 的闸②要拿「调用方自己那个会话」把它从阻塞者里
+ * 排除掉，而这个 id 只能从 `exec.agent` 取。夹具不给 agent 时那条路只能判失败 ——
+ * 于是「成功」那一条 fixture 根本走不到，B21 的下界会（正确地）报「没有成功 fixture」。
+ * 别的工具不读这个字段，所以带上它对它们零影响。
+ */
 function redlineExec(): ToolRunContext {
-  return { signal: new AbortController().signal } as unknown as ToolRunContext
+  return {
+    signal: new AbortController().signal,
+    agent: { id: 'session-redline', session: { id: 'session-redline' } },
+  } as unknown as ToolRunContext
 }
 
 /**
@@ -3701,6 +3721,45 @@ function hotReloadWith(kind: 'success' | 'throwing'): ToolDefinition {
 }
 
 /**
+ * `restart`：成功 = 闸门全过 + `dryRun`（演练，什么都不做）；失败 = **审批档读不出来**
+ * （fail-closed 的那一格，也是本工具唯一的 `ok: false` 常路）。
+ *
+ * 两条 fixture 各用一份不同的临时 home（B16 规则 6：`resolved:` 这类行按**环境**恒定）。
+ *
+ * @param kind 走哪条路。
+ */
+function restartWith(kind: 'dry-run' | 'no-policy'): ToolDefinition {
+  const home = makeTempRoot(`dsh-redline-restart-${kind}-`)
+  const fs: RestartFsPort = {
+    read: async () => ({ status: 'absent' }),
+    write: async () => undefined,
+  }
+  const launch: LaunchCommand = {
+    command: 'node',
+    args: ['bin.js', '--profile', 'web'],
+    cwd: 'C:/repo',
+  }
+  const ports: RestartPorts = {
+    fs,
+    restartHistory: async () => ({ known: true, value: [] }),
+    busySessions: async () => ({ known: true, value: [] }),
+    bundles: async () => ({ known: true, value: ['dsh-plugin-debugging'] }),
+    launchCommand: async () => ({ known: true, value: launch }),
+    now: () => Date.UTC(2026, 9, 14, 6, 0, 0),
+  }
+  const restart: RestartHost = {
+    ports,
+    approval: {
+      policyOf: () => (kind === 'no-policy' ? undefined : 'never'),
+      request: async () => 'rejected',
+    },
+    launch: { relaunch: async () => ({ ok: true, detail: 'schtasks /run exited 0' }) },
+    exit: { exit: () => () => undefined },
+  }
+  return createRestartTool({ ...redlineDeps(redlineConfig(home)), restart })
+}
+
+/**
  * 五个工具各跑成功 / 失败一次。
  *
  * 只建一次（memo）：六条红线共用，避免每条各跑十次真 IO。
@@ -3805,6 +3864,18 @@ async function buildRedlineCorpus(): Promise<RedlineRun[]> {
       'list_instances · socket 表读不出来（没给 port ⇒ 连候选都形不成）',
       {},
     ),
+    await runFixture(
+      restartWith('dry-run'),
+      RESTART_TOOL,
+      'restart · 闸门全过 + dryRun（演练，零写零拉起）',
+      { reason: 'the plugin code changed', dryRun: true },
+    ),
+    await runFixture(
+      restartWith('no-policy'),
+      RESTART_TOOL,
+      'restart · 审批档读不出来（fail-closed）',
+      { reason: 'the plugin code changed' },
+    ),
   ]
 }
 
@@ -3858,6 +3929,8 @@ function toolShapes(): RedlineToolShape[] {
     // 发现工具：它的 HTTP 依赖多一个 body 读取，但构造它同样不需要真 IO
     // （默认 `signatureFetch` 只在这一行被引用，不在这里被调用）。
     shapeOf(LIST_INSTANCES_TOOL, LIST_INSTANCES_DESCRIPTION, createListInstancesTool(deps)),
+    // 行动类工具：构造它同样不需要真 IO（端口都是惰性的）。
+    shapeOf(RESTART_TOOL, RESTART_DESCRIPTION, restartWith('dry-run')),
   ]
   return shapesCache
 }

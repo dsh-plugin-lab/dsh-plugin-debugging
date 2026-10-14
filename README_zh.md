@@ -48,11 +48,12 @@
 - **把一个已挂载的 entry 就地换成磁盘上的代码** —— 不重启，失败自动放回。
 - **签一个 browser-session cookie** —— 让脚本或命令行客户端能访问你自己的实例。
 - **列出本机活着的 DSH 宿主** —— 只有未认证 `GET /` 返回**逐字**那句 DSH 响应体时才认领该端口；「探不到」与「不是 DSH」分开报。
+- **改动需要重启时，重启这个宿主** —— 先过四道确定性闸门，再走审批，然后落 marker、拉起、退出。
 
 技能里装着安装形态、凭证获取、进程识别与隔离实例。
 **工具只是加速器；两者冲突时以技能正文为准。**
 
-**指向另一个实例。** 文件型工具（`dsh_dump_config` / `dsh_check_effect_mode` / `dsh_diagnose_plugin_load` / `dsh_sign_cookie`）都收一个 `dshHome` 参数，于是你不必重启任何东西就能读**第二个实例**的磁盘证据。路径解析**与**它起的 `dsh` 子进程都用那个 home，输出里也写明读的是哪一个（`dshHomeSource: tool-argument`）—— 参数来的值**绝不**被悄悄印成配置里的默认值。发现类工具只能给你一个 authority（`host:port`）；authority 与 `dshHome` 之间没有可推导的关系，所以那个路径由你填。两个工具**有意不收**它：`dsh_check_auth` 回答的是 authority（本来就有 `host` / `port`）；`dsh_hot_reload` 换的是**本进程**内存里的模块，跨不到另一个实例。`dsh_diagnose_plugin_load` 因此把答案**分成两半报**：磁盘证据属于你给的那个 home，Loader 树那一半**只属于本进程**。
+**指向另一个实例。** 文件型工具（`dsh_dump_config` / `dsh_check_effect_mode` / `dsh_diagnose_plugin_load` / `dsh_sign_cookie`）都收一个 `dshHome` 参数，于是你不必重启任何东西就能读**第二个实例**的磁盘证据。路径解析**与**它起的 `dsh` 子进程都用那个 home，输出里也写明读的是哪一个（`dshHomeSource: tool-argument`）—— 参数来的值**绝不**被悄悄印成配置里的默认值。发现类工具只能给你一个 authority（`host:port`）；authority 与 `dshHome` 之间没有可推导的关系，所以那个路径由你填。两个工具**有意不收**它：`dsh_check_auth` 回答的是 authority（本来就有 `host` / `port`）；`dsh_hot_reload` 换的是**本进程**内存里的模块，跨不到另一个实例。`dsh_restart` 同样不收它，而且这条更硬：它杀掉的就是**自己所在的**宿主，压根没有「另一个实例」可指。`dsh_diagnose_plugin_load` 因此把答案**分成两半报**：磁盘证据属于你给的那个 home，Loader 树那一半**只属于本进程**。
 
 ## 安装
 
@@ -81,14 +82,14 @@ dsh plugin --profile web add "$PWD"
 - 它们不重启进程、不改写 profile、不往 `DSH_HOME` 写任何东西 —— **这条是机器判据**：写动作一旦指向宿主数据路径（`profiles` / `sessions` / `storages` / `logs` / `cache` / `attachments` / `backups` / `integrations` / `mcp` / `settings.yaml` / `.credentials.yaml` …）或取值为 `DSH_HOME`，`npm test` 当场红。**唯一的例外是本插件自己的命名空间** `$DSH_HOME/<包名>/` —— 只放过**紧跟 home 的那一段**（逐字等于包名），该层以下随便分。
 - `dsh_hot_reload` 只动**运行中的模块树**：不写 profile、不写 `DSH_HOME`、不杀进程。
 - `dsh_sign_cookie` 读你的本地签名密钥，为你自己的实例签一个 cookie。它不发请求、不写任何东西；cookie 的值**刻意不返回**。
-- 重启助手**有意不做**：它是仅有的、能杀掉「你正在排障的那个宿主」的动作。
+- `dsh_restart` 是**唯一不可逆**的动作：它会退出你正在排障的那个宿主。它先过四道确定性闸门（重启循环 / 别的会话与作业在跑 / 组合解析不了 / 定不出启动命令），再走**第五道、也是独立的一道** —— **审批档**：先读档位，只有 `ask` 才去问。`never` 的含义是「提示已关闭」，在那一档去问**必然被拒**，所以档位是**先读再决定问不问**。写 marker 还要过**另一道互相独立**的门：本插件自己的命名空间不在默认文件沙箱里，所以那次写显式带 `danger-full-access`。两道门都会写进输出。拉起走 Windows 计划任务；在没有实测过拉起路线的平台上，本工具在**写任何东西之前**就拒绝。
 
 ## 平台支持
 
 按端口识别监听进程覆盖 Windows、Linux 与 macOS。
 一条可用的命令都找不到时，它会报「查不了」—— **刻意不写成「没有监听者」**：因为这两者是相反的两个结论。
 两档较弱的兜底命令可能报出「有人在听」但说不出是哪个进程；这种情况记为「未识别」，而不是谎称「没有监听者」。
-其余能力与平台无关。
+其余能力与平台无关 —— **只有一处例外**：`dsh_restart` 只在 Windows 上能**真拉起**（计划任务那条路线是实测过的）。别的平台上它在**写任何东西之前**就拒绝：不会先落下 marker、再发现拉不回来。
 
 ## 配置
 
@@ -99,8 +100,8 @@ dsh plugin --profile web add "$PWD"
 | `dshHome` | `$DSH_HOME`，否则 `<home>/.dsh` | 实例存放 profile、日志与凭据的目录 |
 | `profile` | `$DSH_PROFILE`，否则默认 profile | 工具检查哪个 profile |
 | `port` | `0` | 要探测的宿主端口；`0` = 自己找监听端口 |
-| `timeoutMs` | `15000` | **快档**工具的工具预算：读文件、跑一条命令、发一次 HTTP 探测 |
-| `schemaDumpTimeoutMs` | `60000` | 跑 `--dump-config-schema` 那个工具的工具预算（实测 10.2–15.7 s，负载重时 32 s） |
+| `timeoutMs` | `60000` | **快档**工具的工具预算：读文件、跑一条命令、发一次 HTTP 探测 |
+| `schemaDumpTimeoutMs` | `240000` | 跑 `--dump-config-schema` 那个工具的工具预算（实测 10.2–15.7 s，负载重时 32 s） |
 
 工具内部每一条外部命令 / HTTP 探测拿到的预算比工具预算少 2 s：传输层必须先于宿主的工具死线超时，否则模型拿到的是没有错误类别的裸 `TimeoutError`，无法判断重试是否有意义。
 

@@ -1,6 +1,6 @@
 # SHAPE — 插件形态：工具怎么分、JSON 怎么管、模型和人各看到什么
 
-**本文职责**：这个插件**最终长什么样** —— 四类角色、工具清单、描述层骨架、输出层三层、契约、`data` 的三段划分、**双通道**（模型 / 人）、未做工具的归属、代码边界、推进顺序、以及能把上面这些**钉住的红线**。
+**本文职责**：这个插件**最终长什么样** —— 四类角色、工具清单、描述层骨架、输出层三层、契约、`data` 的三段划分、**双通道**（模型 / 人）、工具的归属、代码边界、推进顺序、以及能把上面这些**钉住的红线**。
 **不负责**：宿主侧已核 / 未核的事实 → [HOST-CONTRACTS.md](HOST-CONTRACTS.md)；为什么这样分层、代价是什么 → [ARCHITECTURE.md](ARCHITECTURE.md)；发布流程 → [PUBLISHING.md](PUBLISHING.md)；在这个仓里怎么干活 → [AGENTS.md](../AGENTS.md)；决策快照 → [.agents/notes/](../.agents/notes/)。
 **读者**：要动这个插件的形态（加工具、改描述、改输出、改契约）的人。**动之前先读本文，再读 HOST-CONTRACTS。**
 
@@ -16,8 +16,8 @@
 |---|---|---|
 | **观察** | `dsh_check_effect_mode` · `dsh_diagnose_plugin_load` · `dsh_check_auth` · `dsh_dump_config` | 这是四个**问题**，不是一个工具的四个参数：何时生效 / 加载没有 / 是 401 还是没起 / 组合成什么。**加工具不改这一层** |
 | **派生** | `dsh_sign_cookie` | 唯一会**产出凭证**的工具：不同权限（要读密钥）、不同参数（authority / ttl）。**绝不能并进 `check_auth`** —— 那会把秘密带进一个判定型输出 |
-| **行动** | `dsh_hot_reload` · `dsh_restart` | 可逆与不可逆是两种权限面：前者失败放回旧版；后者不可逆。判据是**要不要审批闸门**。**哪个还没做见 §9 的推进顺序**，本表只答归属 |
-| **实例** | **列 → 收进本仓**（新增工具，见 §1.2 的 D′）；**建 / 销毁 → 另起插件** | 分界是**动不动手**：**「列」只发现**（扫本机监听者 + 用 DSH 专有签名认领），**不起进程、不写另一个 `DSH_HOME`、不分配端口** ⇒ 不越界；**「建 / 销毁」**要起长期进程、写**另一个** `DSH_HOME`、分配端口 ⇒ **越出两条边界**（B10 只读半边 / B15 写侧只碰进程内树），且它管的是**另一个**进程 |
+| **行动** | `dsh_hot_reload` · `dsh_restart` | 可逆与不可逆是两种权限面：前者失败放回旧版；后者不可逆。判据是**要不要审批闸门**。**本表只答归属**，顺序与状态见 §9 与根 [AGENTS.md](../AGENTS.md) |
+| **实例** | **列 → 收进本仓**（发现工具，见 §1.2 的 D′）；**建 / 销毁 → 另起插件** | 分界是**动不动手**：**「列」只发现**（扫本机监听者 + 用 DSH 专有签名认领），**不起进程、不写另一个 `DSH_HOME`、不分配端口** ⇒ 不越界；**「建 / 销毁」**要起长期进程、写**另一个** `DSH_HOME`、分配端口 ⇒ **越出两条边界**（B10 只读半边 / B15 写侧只碰进程内树），且它管的是**另一个**进程 |
 
 **两条纪律**：
 
@@ -35,8 +35,6 @@
 **特例**：**「列」进本仓，「建 / 销毁」不进** —— 分界是**动不动手**（§1 实例类判据）。
 
 **工具名是冻结的模型可见 API**。加工具、改描述可以；改已有工具名不行。「描述层」因此是**唯一还能调路由的杠杆**。
-
-**`dsh_restart` 只在自己那一类里排最后**（见 §6.1）。
 
 ### 1.1 与「创造模式」那批工具的设计对照（本轮核对，`[已核]`）
 
@@ -465,7 +463,7 @@ data
 
 ---
 
-## 6. 未做的工具：归属
+## 6. 工具的归属（含尚未做的）
 
 | 目标 | 归属 | 理由 |
 |---|---|---|
@@ -481,7 +479,7 @@ data
 - **依赖面**：它跨了模块（要 `ctx.get('typertGateway')`）。**它不在本仓既有的跨模块调用清单里**（本仓目前只有 `ctx.tools` / `ctx.get('loader')` / `ctx.agents` / `ctx.skills` 那几处，且每处都在 AGENTS 的活跃坑里记了代价）→ 用不用它是一次**新增依赖面的决策**，不是顺手加个字段。**建议：不在 v1.1 做**，先把三态措辞放进描述层③（零依赖）。
 | `dsh_sign_cookie` | **独立工具**（派生类） | 见 §1 |
 | 隔离实例 | **另起插件** | 见 §1 |
-| `dsh_restart` | **独立工具，排最后** | 见 §1 与 §6.1 |
+| `dsh_restart` | **独立工具**（行动类） | 见 §1 与 §6.1 |
 
 ### 6.1 `dsh_restart`（原独立文件的内容并入本节）
 
@@ -506,13 +504,15 @@ data
 
 **流程（顺序是判据）**：闸门检查 → **审批门** → **写 marker（落盘，必须在拉起之前）** → 拉起新进程 → **本进程退出** →（新进程）读 marker → 恢复会话 → 注入 notice → **把 marker 标为「已消费」**（**不是删除**：宿主 `fs` 缝上没有任何删除方法 —— 状态迁移替代删除的裁决见 §10.3 与 [HOST-CONTRACTS.md](HOST-CONTRACTS.md) §2.5）。
 
+**实现落点**：库半边 `src/lib/restart.ts`（marker + 四道闸 + 恢复判定）· 真实 IO `src/lib/restart-fs.ts`（走宿主 `ctx.fs`）· 恢复半 `src/lib/restart-recovery.ts`（由 `src/index.ts` 调度）· 工具壳 `src/tools/dsh_restart.ts`（四道闸 → 审批门 → 写 marker → 计划任务拉起 → `appExit`）；注册处在 `src/tools/index.ts`。
+
 **四步的通道都已核过**（证据与分级在 [HOST-CONTRACTS.md](HOST-CONTRACTS.md) §2，这里只留结论）：
 
 - **退出 = `ctx.get('appExit')`** —— `AppExit = (code: number) => void`，语义原话「**等树 dispose 完**再退」；`dsh web` 的启动器**实测真的 provide 它**（`provideCmdline(hostCtx, { …, exit: (code) => void shutdown.shutdown(code) })`）。⚠️ **别用 `process.exit`**（源码注释点名那条路 bypassing `ctx.appExit`）；取不到要**转成结构化失败**（B24：不许抛）。**顺序：先 `await` 完 marker 的写，再调 `appExit`** —— 反了就是「树都拆了、写还在飞」。
 - **审批门的位置本身是判据**：**四道确定性闸门全过之后**才轮到它 —— 反过来会出现「先弹窗让用户同意、再告诉用户闸③不过」。⚠️ 实现要**两段式**：先用 `dryRun` 探一遍闸门（**不落盘**），过了才走审批，再真正落盘 —— 因为 `planRestart` 把「四道闸」与「写 marker」收在**同一个入口**里，**不许**为了插审批而把那道顺序拆坏。
-- **审批语义（2026-10-14 改正一处写反的）**：**先读档位再决定问不问**。`ask` ⇒ 调 `request()`（只有 `allowed-once` 算允许；`rejected`/`cancelled`/`unavailable` 一律当拒绝）；**`never`（= `danger-full-access`）⇒ 不问、直接执行**；读不出来 ⇒ fail-closed。⚠️ **`never` 是「提示已关闭」，不是「拒绝一切」** —— 在那一档主动去问**必然被拒**，那会把「你什么都授权了」变成「什么都不许做」。
+- **审批语义（2026-10-14 改正一处写反的）**：**不声明静态审批** —— 工具自己在动作前**先读档位、再决定问不问**。`ask` ⇒ 调 `request()`（只有 `allowed-once` 算允许；`rejected`/`cancelled`/`unavailable` 一律当拒绝）；**`never`（= `danger-full-access`）⇒ 不问、直接执行**（并在 `key` / `audit` 记 `policy=never, not required`）；读不出来 ⇒ fail-closed。⚠️ **`never` 是「提示已关闭」，不是「拒绝一切」** —— 在那一档主动去问**必然被拒**，那会把「你什么都授权了」变成「什么都不许做」。机制真源见 `dsh-user-approval`（`decide()` 的 `never` 分支 + `effectivePolicy()`），档位接线见 profile 的 `cordis.yml`（`danger-full-access` ⇔ `sandbox: danger-full-access` + `approval: never`）、`[已核]`。
 - **拉起** = 首选外部管理器 / 计划任务（见下面那张降级路径表）。
-- **恢复** = 新进程读 marker → `resolveAgent` 唤醒 → `followup` 投 notice（**信息性，不是「请继续」**）→ 标记已消费。
+- **恢复** = 新进程读 marker → `resolveAgent` 唤醒 → `followup` 投 notice（**信息性，不是「请继续」**；notice 只放事实 + 指针）→ 标记已消费。通道实测与分级见 [HOST-CONTRACTS.md](HOST-CONTRACTS.md) §2.4.1 的 C15–C27。
 
 - **拉起优先交给外部管理器**（supervisor / Windows 服务 / systemd）；插件只做「查闸门 → 落盘 marker → 退出」。**自建 helper 是降级路径**，而它的落地方式**已被本机实测改写**（见下条）。
 - **降级路径：`{detached: true}` 已实测不可用，改用「由一个不在宿主 job 里的进程代起」**（`[已实测]`，证据在 [HOST-CONTRACTS.md](HOST-CONTRACTS.md) §2）：
@@ -535,12 +535,12 @@ data
   1. **marker 是纯 JSON，不加「末尾哨兵行」**（决策笔记里曾提议）—— 数据里夹一行非 JSON 会**破坏 `JSON.parse` 与任何外部读者**；版本演进用「`version` 放第一个键 + 版本门 + 未知版本**结构化失败**（不许读成「没有 marker」）」足够。**这是有意的取舍，不是遗漏。**
   2. **写 marker 不能走 `node:fs`** —— B10 的 `judgeFsWriteUsage` 判的是**来源**（用没用 `node:fs` 写 API），**与路径无关**，所以形态 A 的白名单在**真实写入**面前够不到（`[已核]`：探针实测过）。⇒ 走**宿主 `fs` 服务**（`ctx.get('fs')`，`dsh-fs` 包的 `FileSystem`；与 §5 的 `spillStore` 同族 —— **宿主在写**）。**别用放宽红线的方式解决。**
   ⚠️ **「谁来写」在库半边是注入面**（`RestartFsPort`：`read` / `write` / `remove`，其中 `read` 是**三值**：有内容 / 不存在 / 读失败）——真实适配器单独一层。这样判定逻辑可单测、换实现不动判定。
-  **本半实现不了、但被有意保留的一条**：§3 的返回草稿里有 `newPid=<pid>` —— **库半边不拉起进程，所以没有 pid**，它的 verdict 明说「marker 已在任何拉起之前写好；本半不启动进程，因此尚无新 pid」。**宁可这么写，也不许凑一个 pid。**
+  **本半实现不了、但被有意保留的一条**：库半边的 verdict 明说「marker 已在任何拉起之前写好；本半不启动进程，因此尚无新 pid」—— **宁可这么写，也不许凑一个 pid。**
 
 **恢复逻辑**：注入的是**信息性 notice**，不是强制「继续」；唤醒走官方通道、按会话原有预设；**唤醒失败保留 marker**，下次启动继续重试。
 
-**工具草稿**：`{ reason, delayMs（默认 10s，留给回执落盘）, dryRun, force }` —— `dryRun` 是本仓新增（四道闸必须能单独演练）；`force` **只对闸②有效**，且命中时**必须留痕**（见本节末）。
-**返回草稿**：`verdict: gates=4/4 passed · marker=<path> · newPid=<pid>`，`nextStep` **无**（本进程即将退出）；被闸门拒绝时按 §3 的三层输出，`L3` 给 `dsh_check_effect_mode`。
+**工具参数**：`{ reason, delayMs（默认 10s，留给回执落盘）, dryRun, force }` —— `dryRun` 是本仓特有的（四道闸必须能单独演练）；`force` **只对闸②有效**，且命中时**必须留痕**（见本节末）。
+**返回形状**（逐字真源在 `src/lib/restart.ts` 与 `src/tools/dsh_restart.ts`，**不在此抄**）：库半边报 `gates=4/4 passed` + marker 路径 + 「marker 已在任何拉起之前写好」；工具壳报闸门 / 审批 / marker / 拉起 / 退出这几件事。`nextStep` **无**（本进程即将退出）；被闸门拒绝时按 §3 的三层输出，`L3` 给 `dsh_check_effect_mode`。
 **验收**：四道闸**各一条拒绝用例**；真机一条「重启 → 会话被唤醒 → notice 到达发起者」闭环；反向用例「marker 存在但新进程没起来」→ 下次启动仍能恢复或明确报「上次重启未完成」；真机判据由**独立角色**跑，写者不自己验自己（[ARCHITECTURE.md](ARCHITECTURE.md) §8）。
 
 **协作纪律（契约，不是建议）**：`dsh_check_effect_mode` 先行 —— `mode=hot` 且 `hmr=present` → 通常不需要写侧工具 `[已实测]`；`mode=hot` 但 `hmr=absent` → 改 config **必须重启** `[已实测]`；`mode=restart-required` → 走 `dsh_restart`。
@@ -570,7 +570,7 @@ data
 
 ## 7. 代码结构：只加边界，不加层
 
-- **能力落地在 `lib/`，工具文件只做「参数 → 机制 → 契约」的翻译**（现状已是，保持）。新增：日志解析 → `lib/startup-log.ts`；页面在线 → `lib/inspect.ts`；cookie 签发 → `lib/cookie.ts`。
+- **能力落地在 `lib/`，工具文件只做「参数 → 机制 → 契约」的翻译**（现状已是，保持）。落点：日志解析 → `lib/startup-log.ts`；cookie 签发 → `lib/cookie-sign.ts`；`dsh_restart` 的库半边 → `lib/restart.ts` / `lib/restart-fs.ts` / `lib/restart-recovery.ts`。**页面在线（原计划 `lib/inspect.ts`）未做**，理由见 §6。
 - **密钥材料与「存在性扫描」分文件**，并用红线钉住 import 方向：**观察层四个工具不许（间接）import 到取值路径**。这是「派生 / 观察」的分界线，靠目录自觉一定会破。
 - **渲染层从「一个 `summarize` 钩子」改成「每个工具声明一张输出表」**（L1 生成器 + L2 字段白名单 + `audit` 投影）。好处是判断能逐工具断言 —— 见 §10。
 - **`data` 的外层形状由一个共享 helper 构造**（`verdict / key / audit`），失败分支走同一形状。
@@ -707,7 +707,7 @@ interface ToolResult { content: ContentBlock[]; isError: boolean; meta?: JsonVal
 - **复用没有「双 React」风险**（`[已实测]`）：`dsh-client-ui-primitives` 走**浏览器模块表**（`window.__ModuleLoader__`）而不是 npm 解析 → 宿主内层的包在插件里同样可得（`dsh-client-ui-tool` 自己就这么 `require`），`require('react')` 拿到的是**同一个** React 实例。
 - **粗体照抄 500**（不自己发明一个新值），**结构照抄 `标题 · 摘要`**（`sep` 是 2px 圆点，`margin:0 8px`）。
 - **注意它不是 `presentResult` 的替代品**：keyed 条目拿的是**冻结的 call/result 切片 + `block.meta`**，所以 §5 的 `audit`（走 `presentationMeta`）正好是它的输入 —— 两条设计在这里接上。
-- **代价照实记**：新增一个客户端构建产物（要进 `files`、要过 `check:release`、多一份 HMR/replay 语义），且 keyed 条目必须在 **call/result 两侧都可重放**。→ 因此**排在形态改造之后**，不进 §9 的 ⓪–⑥。
+- **代价照实记**：新增一个客户端构建产物（要进 `files`、要过 `check:release`、多一份 HMR/replay 语义），且 keyed 条目必须在 **call/result 两侧都可重放**。→ 因此**排在形态改造之后**，不进 §9 的 ⓪–⑥。**维护者 2026-10-14 拍板：不做**（见 §9.2）—— 本节保留为「已评估、怎么做」的记录。
 - **加 `dsh.client` 必须重启宿主一次**（`[已实测]`）：`dsh-client-modules` 把 **package.json 元数据缓存到重启为止**（其 README，检索串 `cached per Loader specifier`）。此后改**产物内容**走 HMR 的 `rebuilt()`，不用重启；⚠️ **但磁盘上删字段也要重启才生效** —— 缓存的反面同样成立。
 
 **`[已实测]` 那张卡走 DetailsRow、图标是 `IconCordisPluginOutlineRegular`**（原先这条「未定」销掉）。
@@ -730,24 +730,26 @@ interface ToolResult { content: ContentBlock[]; isError: boolean; meta?: JsonVal
 | **输出三层** | L1 判定 / L2 事实 / L3 指路（`nextStep` 两分支） | §3.1 + `src/lib/render.ts` |
 | **描述四段骨架** | 做什么 / 什么时候用我 / 边界 / 代价，段序不许换 | §2.1 + B20a / B20b |
 | **工具清单** | 四类角色的划分见 §1；**具体有哪几个、叫什么，真源是注册处**（本文不抄清单、也不抄个数）；**名字闭集由 B9 钉住** | `src/tools/index.ts` 注册处 |
-| **技能半边** | `SKILL.md` 已**解冻**（跟着插件演化），并已补「干预」一节（写侧 + 派生 + 写明 `restart` 尚不存在） | §9.3 的连带同步点 |
+| **技能半边** | `SKILL.md` 已**解冻**（跟着插件演化），并已补「干预」一节（写侧 `hot_reload` + 派生 `sign_cookie` + 行动 `restart`） | §9.3 的连带同步点 |
 | **超时预算** | 工具**只声明工作量档**（`quick` / `schemaDump`），预算收在 `src/lib/timeouts.ts` 的**唯一映射点**；工具里不许有毫秒字面量 | `test/tools/timeout-budgets.test.ts`（**扫源码**） |
 | **只读纪律** | 是**机器判据**：B10（杀进程 / fs 写入 / **写宿主数据路径** / 安装面，作用域**整个 `src/**`**）+ B15（写侧窄作用域、更严记号） | §10.3 与 `test/redlines.test.ts` |
 | **大 `audit` 的去处** | `spillStore` 可达性**已实测**（§5.1）；但它**不跨重启**（每进程临时目录 + 启动清扫）⇒ 只适合「这次会话里的大 `audit`」 | §5 / §5.1 |
 
-### 9.2 剩余队列（按顺序）
+### 9.2 队列（按顺序）
+
+**本节只记形态与顺序**：哪一项已落地、还剩什么，以根 [AGENTS.md](../AGENTS.md) 的待办与「能力面」为准（一处一事实）。
 
 | 序 | 内容 | 为什么排这里 | 前置 |
 |---|---|---|---|
-| **D′** | **新增发现工具**（列出活着的 DSH 宿主）+ **给文件型工具加 `dshHome`（含 `DSH_HOME` 注进子进程环境）** | 它是 §1.2 已拍板的一块，且**独立于 `restart`**；先做能让「跨实例观察」在 `restart` 之前就有用 | 见 §1.2 的三项代价（**B9 闭集同批改**、描述预算、**三平台「列全部」是新能力**） |
+| **D′** | 发现工具（列出活着的 DSH 宿主）+ 给文件型工具加 `dshHome`（含 `DSH_HOME` 注进子进程环境）；形态见 §1.2 | 它是 §1.2 已拍板的一块，且**独立于 `restart`** | 真源是 `src/tools/index.ts` 注册处与各工具的参数声明 |
 | **④ `dsh_sign_cookie`** | ✅ **已完成**（独立工具 + 真机红线） | 算法是照抄（SKILL §3.4 已实测），但**错误信号是二值**、调试困难 ⇒ 值一条独立真机红线 | 实现与契约见 [ARCHITECTURE.md](ARCHITECTURE.md) §5 |
-| **⑤ `dsh_restart`** | 四道闸 + marker + 恢复 | **不可逆，排一切之后**；**先 dry-run** | 它的**前提本轮被大幅改写**：`{detached:true}` 已实测不可用、改用「由不在 job 里的进程代起」（§6.1）、marker 落 `$DSH_HOME/<包名>/restart/marker.json`。**机制证据见 [HOST-CONTRACTS.md](HOST-CONTRACTS.md) §2 —— 本文不重推** |
-| **⑦ 客户端半边**（形态之外） | 加 `dsh.client` + keyed `tool.call.toolview`：粗体标题（500）+ 复用宿主图标 + `标题 · 摘要`，读 `block.meta` 里的 `audit`（§8.5） | 只影响**人**通道、不影响模型 ⇒ 排一切之后 | 已实测：视觉来源已定；仍是推断：构建产物进 `files` 并过 `check:release`、keyed 条目在 call/result 两侧可重放、多一份 HMR 语义 |
+| **⑤ `dsh_restart`** | 四道闸 + marker + 恢复；形态见 §6.1，**实现状态见根 [AGENTS.md](../AGENTS.md) 的待办** | 它**不可逆，因此排在一切之后** | 宿主契约与实测见 [HOST-CONTRACTS.md](HOST-CONTRACTS.md) §2 —— 本文不重推 |
+| **⑦ 客户端半边**（形态之外） | 加 `dsh.client` + keyed `tool.call.toolview`：粗体标题（500）+ 复用宿主图标 + `标题 · 摘要`，读 `block.meta` 里的 `audit`（§8.5）。**已评估、不做**（维护者 2026-10-14 拍板）—— 记录保留，不再排进队列 | 只影响**人**通道、不影响模型 | 已实测：视觉来源已定；仍是推断：构建产物进 `files` 并过 `check:release`、keyed 条目在 call/result 两侧可重放、多一份 HMR 语义 |
 | **⑥ 隔离实例** | **建 / 销毁 → 另一个仓**（**「列」已收进本仓，见 D′**） | 与本仓边界已由 §1 划清 | 它要起长期进程、写**另一个** `DSH_HOME`、分配端口 |
 
 ### 9.3 连带同步点（改上面任何一项都要同批看）
 
-- **`SKILL.md`**：它是**运行时载荷**，不是文档；但它**跟着插件一起演化**。**新增/改名工具、改动写侧语义、改动「干预」范围时，同批改它** —— 漏改是**静默**的（B12 只查 frontmatter 与正文长度，**不比对原件**）。
+- **`SKILL.md`**：它是**运行时载荷**，不是文档；但它**跟着插件一起演化**。**新增/改名工具、改动写侧语义、改动「干预」范围时，同批改它** —— 漏改是**静默**的（B12 只查 frontmatter 与正文长度，**不比对原件**；B9 只钉工具名闭集）。⇒ 正文里**不带工具名**的假话（例：一句「本插件不提供 X」）两条红线都抓不到，只能靠人工通读。
 - **`AGENTS.md` 的待办**：`SKILL.md` **已解冻**（2026-10-13 拍板，待办里已改成「跟着插件一起演化」）；配套的 **B12 断言对象**也已从「与原件逐字一致」改成**结构约束**（见 §10 的 B12 修订注）。**再改技能正文时，同批核那两条待办是否要跟着动。**
 - **两份门面**（[README.md](../README.md) / [README_zh.md](../README_zh.md)）：配置表、工具清单、只读纪律的措辞**成对改**。
 - **描述预算（§2）**：**加一个工具 = 系统提示多占一段** —— 那个字符数是**实测值、会漂**，别抄；加工具时同批复核 §2 的结论是否还成立。
@@ -868,12 +870,12 @@ interface ToolResult { content: ContentBlock[]; isError: boolean; meta?: JsonVal
 
 ```
 $DSH_HOME/dsh-plugin-debugging/
-    restart/marker.json      ← `dsh_restart` 即将用（§6.1）
+    restart/marker.json      ← `dsh_restart` 用它（§6.1）
     cookie/                  ← 将来要用就加
     logs/                    ← 将来要用就加
 ```
 
-**判据的形态**（`[已核]`，落地中）：从「命中任一禁止前缀 ⇒ 红」改成「**写 `$DSH_HOME` 时，只有第一个路径段逐字等于包名才放过；否则红**」。
+**判据的形态**（`[已核]`，**已落地**；真源 `test/redlines.test.ts` 的 `judgeHostDataWrites` / `firstSegmentAfterHome`）：从「命中任一禁止前缀 ⇒ 红」改成「**写 `$DSH_HOME` 时，只有第一个路径段逐字等于包名才放过；否则红**」。
 
 **四条必须成立的边界**（每条都要有能判红的用例）：
 
