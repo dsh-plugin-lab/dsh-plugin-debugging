@@ -12,6 +12,12 @@
  *   而组合期错仍写在它的 **stderr** 上（实测 `patch: name mismatch … skipping`）；
  * - `--dump-config-schema`：**退出码 1 = 有 error**，诊断在 stdout 的 `diagnostics` 里。
  *
+ * 而这扇门有一个前提：**「筛过了、是空的」与「根本没读到」不是一回事**。所以
+ * `key.notScreened` 记下「工具打算读、但这次没读到」的来源，渲染层据此出三值：
+ * 读到且为空 = `actionable: none`／读到且有 = 逐条列出／**没读到 = 绝不许印 `none`**。
+ * 归集只有一处（`screen()`），**成功与失败分支共用它** —— 一次 dump 失败不该让
+ * 已经跑成的那一次变得不可读（那正是本工具曾有过的缺陷）。
+ *
  * 而 error **可能是误报**：官方 `preset-*` 行的 `unrecognized Loader tree carrier`
  * 就是已知的那条，判它必须把 `path`（形如 `/182`）解析成组合树里的 entry id ——
  * 所以「有 error」与「有**该管的** error」不是一回事，本工具分两类报。
@@ -20,8 +26,9 @@
  *
  * `data` 顶层**恰好三键**：`verdict`（L1，成功失败都有）/ `key`（L2 的原料）/
  * `audit`（给人复核，不进模型文本）。`key` 里放**模型下一步要读的**：
- * `actionable`（正因如此它属于 `key`，不是 `audit`）、两次 dump 的退出码与失败时的
- * stderr、以及 hmr 是否可用。原始全量 `diagnostics` 与 `counts` 放 `audit`。
+ * `actionable`（正因如此它属于 `key`，不是 `audit`）、`notScreened`（覆盖完整性：
+ * 「不知道」不许印成「没有」）、两次 dump 的退出码与失败时的 stderr、以及 hmr 是否可用。
+ * 原始全量 `diagnostics` 与 `counts` 放 `audit`。
  *
  * 失败分支也走同一个形状（`ok:false` 只表示「这次操作没完成」），且**必须有实质
  * `verdict`**：新契约下 `error.message` 不进模型文本（SHAPE §4.1 字段角色表），
@@ -34,8 +41,9 @@ import {
   ok,
   toToolError,
   type JsonValue,
+  type NextStep,
   type ToolData,
-  type ToolFail,
+  type ToolError,
 } from '../lib/errors.js'
 import { budgetFor, createDeadline } from '../lib/timeouts.js'
 import {
@@ -46,6 +54,8 @@ import {
   resolveDshLaunch,
   runDump,
   type ClassifiedDiagnostic,
+  type ComposedEntry,
+  type DumpDiagnostic,
   type DumpInvocation,
   type DiagnosticClass,
 } from '../lib/dump.js'
@@ -112,10 +122,70 @@ interface DumpConfigKey {
   resolved: ResolvedKey
   /** 已筛出的可执行错误（`error` / `composition-error`）—— 模型下一步要读的。 */
   actionable: ClassifiedDiagnostic[]
+  /**
+   * **没读到的诊断来源**（空数组 = 覆盖完整）。
+   *
+   * 为什么它是一等值、而不是让人从 `invocations` 反推：`actionable: []` 只在
+   * 「该读的都读到了」时才等于 `none`；少了这份记录，渲染层只能把「不知道」
+   * 印成「没有」（三值纪律，见本文件头那扇门）。
+   */
+  notScreened: DumpInvocation['flag'][]
   /** 这次跑过哪几次 dump（早失败时可能只有一次，或者一次都没有）。 */
   invocations: InvocationKey[]
   /** hmr 探测结果；没走到探测那一步时整个字段不出现（「没查」≠「没有」）。 */
   hmr?: HmrKey
+}
+
+/**
+ * 失败分支的「头」：只回答「为什么停」。
+ *
+ * 它与归集结果**刻意分开**：结论与下一步来自那次没读成的 dump，
+ * 而 `key` / `audit` 来自**所有**跑过的 dump —— 两半拼起来才是结果。
+ */
+interface FailureHead {
+  error: ToolError
+  verdict: string
+  nextStep?: NextStep
+}
+
+/** 一次 dump 的观测：调用结果 + 「这一次读没读到」。 */
+interface DumpRun {
+  invocation: DumpInvocation
+  /** 读不出来的原因；`undefined` = 这一次真的读到了。 */
+  failure?: FailureHead
+}
+
+/**
+ * 「这次读到了什么」—— **成功与失败分支共用的唯一归集点**。
+ *
+ * 它存在的理由就是本工具曾有过的缺陷：失败分支各自硬编码 `actionable: []`，
+ * 于是第二次 dump 一失败（真机实测是 `--dump-config-schema` 传输层超时），
+ * 第一次已经跑成、组合期错已经写在 stderr 上的事实就整个消失了。
+ */
+interface Screening {
+  /** 已经读到的全部诊断（含已知误报，`audit` 用）。 */
+  diagnostics: ClassifiedDiagnostic[]
+  /** 其中**该管的**那些（`key.actionable` 用）。 */
+  actionable: ClassifiedDiagnostic[]
+  /** 已知误报（`audit` 用，也是 clean 结论那一档的原料）。 */
+  knownFalsePositives: ClassifiedDiagnostic[]
+  /** 按分类计数（`audit` 用）。 */
+  counts: Record<DiagnosticClass, number>
+  /** 没读到的来源；**空数组**才允许 `actionable` 为空这一个事实叫 `none`。 */
+  notScreened: DumpInvocation['flag'][]
+  /** 组合树顶层条目数。 */
+  entryCount: number
+}
+
+/** 装配输入：成功与失败分支同构（差别只在 `verdict` 从哪来）。 */
+interface AssemblyInput {
+  resolvedBlock: EffectiveConfigBlock
+  resolved: ResolvedKey
+  /** 跑过的每一次 dump（含「读没读到」）。 */
+  runs: readonly DumpRun[]
+  screening: Screening
+  /** hmr 探测结果；**没探测过就不要传**（「没查」≠「没有」）。 */
+  hmr?: HmrProbe
 }
 
 /**
@@ -179,61 +249,54 @@ export function createDumpConfigTool(deps: ToolDeps): ToolDefinition {
       try {
         const launch = resolveDshLaunch()
 
-        const configDump = await runDump(launch, profile, '--dump-config', {
-          spawn: deps.spawn,
-          timeoutMs: budgetFor(deps.config.timeoutMs, deadline),
-          signal: exec.signal,
-        })
-        const configFailure = invocationFailure(configDump, resolved, [])
-        if (configFailure !== undefined) return toOutput(configFailure)
-        const configInvocation = invocationKey(configDump)
-
-        const schemaDump = await runDump(launch, profile, '--dump-config-schema', {
-          spawn: deps.spawn,
-          timeoutMs: budgetFor(deps.config.timeoutMs, deadline),
-          signal: exec.signal,
-        })
-        const schemaFailure = invocationFailure(schemaDump, resolved, [configInvocation])
-        if (schemaFailure !== undefined) return toOutput(schemaFailure)
-
-        const entries = parseComposedEntries(configDump.stdout)
-        // 两条来源都要：schema 的 diagnostics 在 stdout，而组合期错只在各自的 stderr。
-        const raw = [
-          ...parseDiagnosticsFromSchemaText(schemaDump.stdout),
-          ...parseDiagnosticsFromStderr(configDump.stderr),
-          ...parseDiagnosticsFromStderr(schemaDump.stderr),
-        ]
-        const diagnostics = dedupe(raw.map((item) => classifyDiagnostic(item, entries)))
-
-        const counts = countByClass(diagnostics)
-        const actionable = diagnostics.filter(isActionable)
-        const knownFalsePositives = diagnostics.filter(
-          (item) => item.classification === 'known-false-positive',
+        const configRun = judgeDump(
+          await runDump(launch, profile, '--dump-config', {
+            spawn: deps.spawn,
+            timeoutMs: budgetFor(deps.config.timeoutMs, deadline),
+            signal: exec.signal,
+          }),
+          resolved,
         )
-        const hasSchemaErrors = schemaDump.exitCode === 1
-        const hmr = probeHmr(configDump.stdout)
+        if (configRun.failure !== undefined) {
+          // 读不出组合树就不再跑第二次：schema 诊断的 `path` 要靠这棵树才解析得成 entry id，
+          // 没有它，`preset-*` 那条已知误报会被当成真问题报出来 —— 所以「第一次读不出来」
+          // 不是少一份材料，而是**判不了**。
+          const head = configRun.failure
+          return toOutput(
+            fail(
+              head.error,
+              stopped(head, bareRun(configRun, resolvedBlock, resolved)),
+              head.nextStep,
+            ),
+          )
+        }
 
-        const invocations = [configInvocation, invocationKey(schemaDump)]
-        const hmrKey: HmrKey = { present: hmr.present, disabled: hmr.disabled }
-        const audit = asAudit({
-          resolved: resolvedBlock,
-          counts,
-          diagnostics,
-          knownFalsePositives,
-          configDump: {
-            exitCode: configDump.exitCode,
-            entryCount: entries.length,
-            stderr: configDump.stderr.trim(),
-          },
-          schemaDump: { exitCode: schemaDump.exitCode, hasErrors: hasSchemaErrors },
-          hmr,
-        })
+        const entries = parseComposedEntries(configRun.invocation.stdout)
+        const schemaRun = judgeDump(
+          await runDump(launch, profile, '--dump-config-schema', {
+            spawn: deps.spawn,
+            timeoutMs: budgetFor(deps.config.timeoutMs, deadline),
+            signal: exec.signal,
+          }),
+          resolved,
+        )
+        const runs = [configRun, schemaRun]
+        // 归集**只做这一次**：成功与失败两条分支读的是同一份结果（这正是解耦点）。
+        const screening = screen(runs, entries)
+        const hmr = probeHmr(configRun.invocation.stdout)
+        const assembly: AssemblyInput = { resolvedBlock, resolved, runs, screening, hmr }
 
-        if (actionable.length > 0) {
+        if (schemaRun.failure !== undefined) {
+          const head = schemaRun.failure
+          return toOutput(fail(head.error, stopped(head, assembly), head.nextStep))
+        }
+
+        const hasSchemaErrors = schemaRun.invocation.exitCode === 1
+        if (screening.actionable.length > 0) {
           // **不能**用 `hasSchemaErrors` 当这个分支的门：组合期错出现在 `--dump-config`
           // 的 **stderr** 上，而那条命令的退出码恒 0、也不做 schema 校验。
           // 用退出码当门 = 把「插件被整条丢弃」这一类静默故障整条漏掉。
-          const composition = actionable.filter(
+          const composition = screening.actionable.filter(
             (item) => item.classification === 'composition-error',
           )
           return toOutput(
@@ -243,13 +306,9 @@ export function createDumpConfigTool(deps: ToolDeps): ToolDefinition {
                 message:
                   composition.length > 0
                     ? `${String(composition.length)} composition error(s): patch rows were dropped by skipping (the exit code is still 0)`
-                    : `--dump-config-schema reported ${String(actionable.length)} error(s) that need attention`,
+                    : `--dump-config-schema reported ${String(screening.actionable.length)} error(s) that need attention`,
               },
-              {
-                verdict: actionableVerdict(actionable),
-                key: { resolved, actionable, invocations, hmr: hmrKey },
-                audit,
-              },
+              assembled({ ...assembly, verdict: actionableVerdict(screening.actionable) }),
               {
                 tool: DUMP_CONFIG_TOOL,
                 args: { profile },
@@ -260,24 +319,35 @@ export function createDumpConfigTool(deps: ToolDeps): ToolDefinition {
         }
 
         return toOutput(
-          ok({
-            verdict: cleanVerdict({
-              hasSchemaErrors,
-              knownFalsePositiveCount: knownFalsePositives.length,
+          ok(
+            assembled({
+              ...assembly,
+              verdict: cleanVerdict({
+                hasSchemaErrors,
+                knownFalsePositiveCount: screening.knownFalsePositives.length,
+              }),
             }),
-            key: { resolved, actionable, invocations, hmr: hmrKey },
-            audit,
-          }),
+          ),
         )
       } catch (error) {
         // 兜底分支（B24 的判据是「返回的是过守卫的合法结果」，不是「没报错」）。
+        // 这里**一次 dump 都没跑成**：`actionable` 为空是事实，覆盖为空也是事实 ——
+        // 两个来源都得记成「没读到」，否则渲染层会把「不知道」印成 `actionable: none`。
+        const screening = screen([], [])
+        const verdict =
+          'nothing could be judged: the dump threw before it produced a result, ' +
+          'so this is a failure of this plugin rather than a verdict about the config'
         return toOutput(
-          fail(toToolError(error, 'dumping the profile config'), {
-            verdict:
-              'nothing could be judged: the dump threw before it produced a result, so this is a failure of this plugin rather than a verdict about the config',
-            key: { resolved, actionable: [], invocations: [] },
-            audit: asAudit({ resolved: resolvedBlock }),
-          }),
+          fail(
+            toToolError(error, 'dumping the profile config'),
+            assembled({
+              verdict: `${verdict}${coverageSentence(screening)}`,
+              resolvedBlock,
+              resolved,
+              runs: [],
+              screening,
+            }),
+          ),
         )
       }
     },
@@ -285,124 +355,279 @@ export function createDumpConfigTool(deps: ToolDeps): ToolDefinition {
 }
 
 /**
- * 把一次 dump 调用的失败（超时 / 取消 / 起不来 / 退出码不合契约）转成结构化失败。
+ * 判一次 dump：**读到了**还是**读不到**。
+ *
+ * 同一个判定有两个用处，所以它返回「观测」而不是整份结果：
+ * ① `screen()` 用它决定这个来源算不算「筛过了」；② 执行路径用它决定报什么失败。
+ *
+ * @param invocation dump 结果。
+ * @param resolved 这次用的配置（`nextStep.args.profile` 的取值来源）。
+ */
+function judgeDump(invocation: DumpInvocation, resolved: ResolvedKey): DumpRun {
+  const failure = failureOf(invocation, resolved)
+  return failure === undefined ? { invocation } : { invocation, failure }
+}
+
+/**
+ * 一次 dump 的失败头（读得到时返回 `undefined`）。
  *
  * 每一条都带**实质 `verdict`**（模型只能从 L1 知道「所以呢」）与已经在手的事实
  * （`key.invocations`：跑了哪个 flag、退出码、stderr）。
  *
  * @param invocation dump 结果。
  * @param resolved 这次用的配置（`nextStep.args.profile` 的取值来源）。
- * @param prior 这次失败之前**已经跑成**的 dump 投影。
  */
-function invocationFailure(
-  invocation: DumpInvocation,
-  resolved: ResolvedKey,
-  prior: readonly InvocationKey[],
-): ToolFail | undefined {
-  const invocations = [...prior, invocationKey(invocation)]
-  const audit = asAudit({
-    resolved,
-    invocations,
-    raw: {
-      flag: invocation.flag,
-      exitCode: invocation.exitCode,
-      stderr: invocation.stderr,
-    },
-  })
-  /** 失败分支的 `data`：形状与成功分支同构，只是这次什么都没看到。 */
-  const data = (verdict: string): ToolData<DumpConfigKey> => ({
-    verdict,
-    key: { resolved, actionable: [], invocations },
-    audit,
-  })
-
+function failureOf(invocation: DumpInvocation, resolved: ResolvedKey): FailureHead | undefined {
   if (invocation.aborted) {
-    return fail(
-      {
+    return {
+      error: {
         kind: 'cancelled',
         message: 'the caller cancelled this execution',
       },
-      data(
-        `nothing could be judged: ${invocation.flag} was cancelled by the caller, so no dump was completed`,
-      ),
-      {
+      verdict: `nothing could be judged: ${invocation.flag} was cancelled by the caller, so no dump was completed`,
+      nextStep: {
         manual: true,
         why: 'cancellation is up to the caller; retrying the same call is pointless',
       },
-    )
+    }
   }
   if (invocation.timedOut) {
-    return fail(
-      {
+    return {
+      error: {
         kind: 'timeout',
         message: `${invocation.flag} timed out (the transport layer timed out first, before the tool budget)`,
       },
-      data(
-        `nothing could be judged: ${invocation.flag} hit the transport timeout before the tool budget, so there is no dump output to read`,
-      ),
-      {
+      verdict: `nothing could be judged: ${invocation.flag} hit the transport timeout before the tool budget, so there is no dump output to read`,
+      nextStep: {
         tool: DUMP_CONFIG_TOOL,
         args: { profile: resolved.profile },
-        why: 'retry once as-is; raise timeoutMs if it keeps timing out, since dump-config-schema is slow by nature',
+        // 这里曾经是唯一不指向已捕获证据的失败分支：stderr 就在 `key.invocations` 里，
+        // 而超时的原因常常已经写在上面了（输出太大、宿主要现装依赖 …）。
+        why:
+          'read the stderr captured in invocations first, then retry once as-is; ' +
+          'raise timeoutMs if it keeps timing out, since dump-config-schema is slow by nature',
       },
-    )
+    }
   }
   if (invocation.spawnError !== undefined) {
     const notFound = invocation.spawnError.includes('ENOENT')
-    return fail(
-      {
+    const head: FailureHead = {
+      error: {
         kind: notFound ? 'not-configured' : 'internal',
         message: `cannot start dsh: ${invocation.spawnError}`,
       },
-      data(
-        notFound
-          ? 'nothing could be dumped: dsh could not be started at all, so this plugin has no way to see what the profile composes to'
-          : 'nothing could be dumped: starting dsh failed with an unexpected error, which is a problem on this side rather than a verdict about the config',
-      ),
-      notFound
-        ? {
+      verdict: notFound
+        ? 'nothing could be dumped: dsh could not be started at all, so this plugin has no way to see what the profile composes to'
+        : 'nothing could be dumped: starting dsh failed with an unexpected error, which is a problem on this side rather than a verdict about the config',
+    }
+    return notFound
+      ? {
+          ...head,
+          nextStep: {
             manual: true,
             why: 'make dsh runnable — put it on PATH, or run this plugin on the same node as the host — then call this tool again',
-          }
-        : undefined,
-    )
+          },
+        }
+      : head
   }
   if (invocation.flag === '--dump-config' && invocation.exitCode !== 0) {
     // 契约上恒 0；非 0 说明是没见过的形态，值得单独报出来（恒定知识在描述层）。
-    return fail(
-      {
+    return {
+      error: {
         kind: 'command-failed',
         message: `--dump-config unexpectedly exited with code ${String(invocation.exitCode)} (the contract is always 0)`,
       },
-      data(
-        `--dump-config exited with code ${String(invocation.exitCode)}, which contradicts its always-0 contract: the composition may not have been produced at all, so nothing here can be trusted`,
-      ),
-      {
+      verdict: `--dump-config exited with code ${String(invocation.exitCode)}, which contradicts its always-0 contract: the composition may not have been produced at all, so nothing here can be trusted`,
+      nextStep: {
         manual: true,
         why: 'read the stderr captured in invocations and settle why the exit code is not 0 before looking at the config',
       },
-    )
+    }
   }
   if (
     invocation.flag === '--dump-config-schema' &&
     invocation.exitCode !== 0 &&
     invocation.exitCode !== 1
   ) {
-    return fail(
-      {
+    return {
+      error: {
         kind: 'command-failed',
         message: `--dump-config-schema exited with code ${String(invocation.exitCode)} (the contract only allows 0 and 1)`,
       },
-      data(
-        `--dump-config-schema exited with code ${String(invocation.exitCode)}, which is outside the contract: the schema dump did not run to a known state, so its diagnostics cannot be read as a verdict`,
-      ),
-      {
+      verdict: `--dump-config-schema exited with code ${String(invocation.exitCode)}, which is outside the contract: the schema dump did not run to a known state, so its diagnostics cannot be read as a verdict`,
+      nextStep: {
         manual: true,
         why: 'read the stderr captured in invocations and settle why the exit code is outside {0,1} before looking at the config',
       },
-    )
+    }
   }
   return undefined
+}
+
+/**
+ * 每一个诊断来源**怎么读** —— 「工具打算读哪些东西」的唯一声明。
+ *
+ * 顺序即 `notScreened` 的输出顺序（先组合树那份、再 schema 那份）。
+ * 目前一次 dump 恰好等于一个来源，所以它是按 flag 声明的；将来某个 dump
+ * 若多出一条读法，加在这里即可，`screen()` 不必改。
+ */
+const DIAGNOSTIC_SOURCES: ReadonlyArray<{
+  flag: DumpInvocation['flag']
+  read(invocation: DumpInvocation): DumpDiagnostic[]
+}> = [
+  {
+    flag: '--dump-config',
+    // 组合期错只写在它的 stderr 上：那条命令的退出码恒 0、也不做 schema 校验（活跃坑 14）。
+    read: (invocation) => parseDiagnosticsFromStderr(invocation.stderr),
+  },
+  {
+    flag: '--dump-config-schema',
+    // schema 的 diagnostics 在 **stdout**；它自己的 stderr 另有一份带严重级的文本。
+    read: (invocation) => [
+      ...parseDiagnosticsFromSchemaText(invocation.stdout),
+      ...parseDiagnosticsFromStderr(invocation.stderr),
+    ],
+  },
+]
+
+/**
+ * 归集：把「跑过的 dump」读成诊断，并记下**哪几个来源根本没读到**。
+ *
+ * **成功与失败分支共用它**。两条纪律都落在这里：
+ * ① 已经跑成的那次 dump 的诊断**不因后一次失败而消失**（本工具曾有过的缺陷）；
+ * ② 「没读到」与「读到了、是空的」分开走：前者进 `notScreened`，只有后者才允许
+ * 渲染成 `actionable: none`（三值纪律）。
+ *
+ * @param runs 跑过的每一次 dump（含「读没读到」）。
+ * @param entries 组合树条目（解析 `path` 用）。
+ */
+function screen(runs: readonly DumpRun[], entries: readonly ComposedEntry[]): Screening {
+  const raw: DumpDiagnostic[] = []
+  const notScreened: DumpInvocation['flag'][] = []
+  for (const source of DIAGNOSTIC_SOURCES) {
+    const run = runs.find((item) => item.invocation.flag === source.flag)
+    if (run === undefined || run.failure !== undefined) {
+      // 没跑 / 没读成 ⇒ 这个来源「没筛」：既不抹掉别处读到的东西，也不假装筛过。
+      notScreened.push(source.flag)
+      continue
+    }
+    raw.push(...source.read(run.invocation))
+  }
+  const diagnostics = dedupe(raw.map((item) => classifyDiagnostic(item, entries)))
+  return {
+    diagnostics,
+    actionable: diagnostics.filter(isActionable),
+    knownFalsePositives: diagnostics.filter(
+      (item) => item.classification === 'known-false-positive',
+    ),
+    counts: countByClass(diagnostics),
+    notScreened,
+    entryCount: entries.length,
+  }
+}
+
+/**
+ * 只跑了第一次 dump 时的装配输入（**没有** hmr 探测 —— 「没查」≠「没有」）。
+ *
+ * @param run 那一次 dump 的观测。
+ * @param resolvedBlock 生效配置块。
+ * @param resolved `key` 里的配置投影。
+ */
+function bareRun(
+  run: DumpRun,
+  resolvedBlock: EffectiveConfigBlock,
+  resolved: ResolvedKey,
+): AssemblyInput {
+  return { resolvedBlock, resolved, runs: [run], screening: screen([run], []) }
+}
+
+/**
+ * 三层记录的**唯一装配点**：`key` / `audit` 的形状只在这里定义一次。
+ *
+ * 它同时服务成功与失败分支 —— 这就是「跑了什么」与「读到了什么」解耦的落地：
+ * 结论（`verdict`）由各分支自己给，而**观测**永远来自同一份 `Screening`。
+ *
+ * @param input 装配输入（含这一分支的 `verdict`）。
+ */
+function assembled(input: AssemblyInput & { verdict: string }): ToolData<DumpConfigKey> {
+  const { verdict, resolvedBlock, resolved, runs, screening, hmr } = input
+  return {
+    verdict,
+    key: {
+      resolved,
+      actionable: screening.actionable,
+      notScreened: screening.notScreened,
+      invocations: runs.map((run) => invocationKey(run.invocation)),
+      ...(hmr === undefined ? {} : { hmr: { present: hmr.present, disabled: hmr.disabled } }),
+    },
+    audit: asAudit({
+      resolved: resolvedBlock,
+      counts: screening.counts,
+      diagnostics: screening.diagnostics,
+      knownFalsePositives: screening.knownFalsePositives,
+      notScreened: screening.notScreened,
+      entryCount: screening.entryCount,
+      // 每一次 dump 的复核材料。`read=false` 就是「这一次没读到」，原因一并带上 ——
+      // 复核者先看这一格，再看 `stoppedBecause`。
+      invocations: runs.map((run) => ({
+        flag: run.invocation.flag,
+        exitCode: run.invocation.exitCode,
+        timedOut: run.invocation.timedOut,
+        aborted: run.invocation.aborted,
+        spawnError: run.invocation.spawnError ?? null,
+        stderr: run.invocation.stderr.trim(),
+        read: run.failure === undefined,
+        stoppedBecause: run.failure?.error.message ?? null,
+      })),
+      hmr: hmr ?? null,
+    }),
+  }
+}
+
+/**
+ * 失败分支的 `data`：`verdict` = 「为什么停」＋「覆盖到哪」。
+ *
+ * 为什么两句都要在 L1：`error.message` **不进模型文本**（SHAPE §4.1 的字段角色表），
+ * 所以「这次 dump 超时了」与「这份筛选不完整」都只能由 `verdict` 承载。
+ *
+ * @param head 失败头（来自那次没读成的 dump）。
+ * @param input 装配输入（观测来自**所有**跑过的 dump）。
+ */
+function stopped(head: FailureHead, input: AssemblyInput): ToolData<DumpConfigKey> {
+  return assembled({
+    ...input,
+    verdict: `${head.verdict}${coverageSentence(input.screening)}`,
+  })
+}
+
+/**
+ * 覆盖不全时补进 L1 的那一句；**全覆盖时返回空串**（那时 `actionable: none` 才合法）。
+ *
+ * 两种情形分开写：观测到真错时先报错（覆盖不全只是附注），什么都没观测到时
+ * 必须说清「这不是 none，是没读到」。
+ *
+ * @param screening 本次归集结果。
+ */
+function coverageSentence(screening: Screening): string {
+  if (screening.notScreened.length === 0) return ''
+  const missing = flagList(screening.notScreened)
+  if (screening.actionable.length === 0) {
+    return `; the screening is incomplete (not read: ${missing}), so this is not a "none"`
+  }
+  return (
+    `; the screening is incomplete (not read: ${missing}), but ` +
+    `${String(screening.actionable.length)} actionable diagnostic(s) still came out of the dumps that did complete`
+  )
+}
+
+/**
+ * 把来源列表拼成一句话：`a` / `a and b` / `a, b and c`。
+ *
+ * @param flags 来源名。
+ */
+function flagList(flags: readonly string[]): string {
+  if (flags.length <= 1) return flags[0] ?? ''
+  return `${flags.slice(0, -1).join(', ')} and ${flags[flags.length - 1] ?? ''}`
 }
 
 /**
@@ -545,12 +770,44 @@ function keyText(key: DumpConfigKey): string[] {
   }
   if (!Array.isArray(key.actionable)) {
     lines.push('actionable: unknown (the guard synthesized this result)')
-  } else if (key.actionable.length === 0) {
-    lines.push('actionable: none')
-  } else {
+  } else if (key.actionable.length > 0) {
     for (const item of key.actionable) lines.push(actionableLine(item))
+    // 真错要报，覆盖不全也要说：有内容时读者最容易以为「该看的都看了」，
+    // 而这次其实还有来源没读 —— 剩下半张图没照。
+    if (Array.isArray(key.notScreened) && key.notScreened.length > 0) {
+      lines.push(coverageLine(key.notScreened))
+    }
+  } else {
+    lines.push(actionableNoneLine(key.notScreened))
   }
   return lines
+}
+
+/**
+ * `actionable` 为空时那一行 —— **三值**，不是两值。
+ *
+ * - 该读的都读到了、且是空的 → `actionable: none`；
+ * - 有来源没读到 → `unknown`（**绝不许**印 `none`：那会把「不知道」说成「没有」）；
+ * - 这份结果根本没记覆盖（旧形状 / 别处合成的 `key`）→ 同样 `unknown`，并说清原因。
+ *
+ * @param notScreened `key.notScreened`（形状不可信时按 `unknown` 处理）。
+ */
+function actionableNoneLine(notScreened: unknown): string {
+  if (!Array.isArray(notScreened)) {
+    return 'actionable: unknown (this result does not record which sources were read, so a "none" cannot be claimed)'
+  }
+  if (notScreened.length === 0) return 'actionable: none'
+  const flags = notScreened.filter((flag): flag is string => typeof flag === 'string')
+  return `actionable: unknown (${flagList(flags)} ${flags.length === 1 ? 'was' : 'were'} not read, so this is not a "none")`
+}
+
+/**
+ * 覆盖不全、但**已经观测到真错**时另起的那一行。
+ *
+ * @param flags 没读到的来源。
+ */
+function coverageLine(flags: readonly string[]): string {
+  return `screening: incomplete (not read: ${flagList(flags)})`
 }
 
 /**
