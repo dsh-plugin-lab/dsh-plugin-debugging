@@ -63,20 +63,36 @@ function probeStub(
   }
 }
 
-/** 造工具：`spawn` 给一段 socket 表输出，探针给签名答复。 */
+/**
+ * 造工具：`spawn` 给一段 socket 表输出（**默认 win32 形状**），探针给签名答复。
+ *
+ * ⚠️ **执行必须在钉住的平台上跑**（活跃坑 25 的隐蔽变体）：解析按**当前平台**选分支，
+ * 而这些夹具喂的是 win32 形状的表 —— 不钉 ⇒ 本机（Windows）绿、CI（ubuntu）红。
+ * 本 PR 首次推送在 CI 上真踩：同一段 `port|pid|name|startedAt` 被按 `ss` 解析 ⇒ 0 行
+ * ⇒ `unavailable` ⇒ 工具报 `not-configured`。
+ *
+ * **钉的是「构造 + 执行」整段**，不是只包构造 —— 只包构造、让 `execute` 落在平台恢复
+ * 之后，等于没包（`diagnose` 那边就是这么错的）。要喂别的平台的表，显式传 `platform`。
+ */
 function toolWith(options: {
   table?: string
   result?: CommandResult
   probe?: SignatureFetch
+  platform?: NodeJS.Platform
 }): ToolDefinition {
   const spawn = recordingSpawn(() => options.result ?? cmdResult({ stdout: options.table ?? '' }))
   const base = depsFor(configFor('C:\\fake-home'), { spawn: spawn.spawn })
   // ⚠️ **不许**把 `signatureFetch` 塞进 `depsFor(...)` 的 overrides：那个形参类型里没有它，
   // 而对象展开**不受多余属性检查**约束 ⇒ 它会被静默丢掉、探针退回**真的全局 fetch**，
   // 于是判据会去敲本机真实端口（本机 3080 上就有一个活宿主，实测真的返回了签名！）。
-  return createListInstancesTool(
+  const tool = createListInstancesTool(
     options.probe === undefined ? base : { ...base, signatureFetch: options.probe },
   )
+  const platform = options.platform ?? 'win32'
+  return {
+    ...tool,
+    execute: (args, exec) => withPlatform(platform, () => tool.execute(args, exec)),
+  }
 }
 
 /** win32 的 socket 表（`port|pid|name|startedAt`）。 */
@@ -184,41 +200,54 @@ describe(`${LIST_INSTANCES_TOOL} · 专有签名：三值互不重叠`, () => {
 
 describe(`${LIST_INSTANCES_TOOL} · 接线：判据走完整入口`, () => {
   it('三值结论真的经 `execute` 走到渲染里（不是只测一个内部函数）', async () => {
-    const dsh = toolWith({
-      table: '3080|111|node|',
-      probe: probeStub(() => ({ status: 401, body: DSH_UNAUTHORIZED_BODY })).fetch,
+    // ⚠️ **必须钉住平台**（活跃坑 25）：socket 表是按**当前平台**解析的，而这条喂的是
+    // win32 形状的文本。不钉 ⇒ 本机（Windows）按 win32 解析得绿，CI（ubuntu）按 `ss`
+    // 解析同一段文本得到 0 行 ⇒ `unavailable` ⇒ **本机绿、CI 红**（本 PR 首次推送真踩）。
+    await withPlatform('win32', async () => {
+      const dsh = toolWith({
+        table: '3080|111|node|',
+        probe: probeStub(() => ({ status: 401, body: DSH_UNAUTHORIZED_BODY })).fetch,
+      })
+      const rendered = renderText(dsh, {}, await run(dsh, {}))
+      expect(rendered).toContain(`[${LIST_INSTANCES_TOOL}] ok`)
+      expect(rendered).toContain('instance: 127.0.0.1:3080 dsh')
+      // 三值里的另外两值在渲染里长得**不一样**（防空转）。
+      const other = toolWith({
+        table: '3080|111|node|',
+        probe: probeStub(() => ({ status: 200, body: 'ok' })).fetch,
+      })
+      expect(renderText(other, {}, await run(other, {}))).toContain(
+        'instance: 127.0.0.1:3080 other',
+      )
+      expect(renderText(other, {}, await run(other, {}))).not.toContain(
+        'instance: 127.0.0.1:3080 dsh',
+      )
     })
-    const rendered = renderText(dsh, {}, await run(dsh, {}))
-    expect(rendered).toContain(`[${LIST_INSTANCES_TOOL}] ok`)
-    expect(rendered).toContain('instance: 127.0.0.1:3080 dsh')
-    // 三值里的另外两值在渲染里长得**不一样**（防空转）。
-    const other = toolWith({
-      table: '3080|111|node|',
-      probe: probeStub(() => ({ status: 200, body: 'ok' })).fetch,
-    })
-    expect(renderText(other, {}, await run(other, {}))).toContain('instance: 127.0.0.1:3080 other')
-    expect(renderText(other, {}, await run(other, {}))).not.toContain(
-      'instance: 127.0.0.1:3080 dsh',
-    )
   })
 })
 
 describe(`${LIST_INSTANCES_TOOL} · scan 的三态（scanned / skipped / unavailable）`, () => {
   it('没给 port：真读 socket 表 ⇒ `scanned`，并逐个探', async () => {
-    const tool = toolWith({
-      table: winTable(),
-      probe: probeStub((url) =>
-        url.includes('3080')
-          ? { status: 401, body: DSH_UNAUTHORIZED_BODY }
-          : { status: 200, body: 'hi' },
-      ).fetch,
+    // 同上：喂的是 win32 形状的表，所以平台必须显式钉住（坑 25）。
+    await withPlatform('win32', async () => {
+      const tool = toolWith({
+        table: winTable(),
+        probe: probeStub((url) =>
+          url.includes('3080')
+            ? { status: 401, body: DSH_UNAUTHORIZED_BODY }
+            : { status: 200, body: 'hi' },
+        ).fetch,
+      })
+      const data = expectOk(await run(tool, {}))
+      const scan = data.key['scan'] as Record<string, unknown>
+      expect(scan['status']).toBe('scanned')
+      const instances = data.key['instances'] as Record<string, unknown>[]
+      expect(instances.map((item) => item['authority'])).toEqual([
+        '127.0.0.1:3080',
+        '127.0.0.1:4000',
+      ])
+      expect(instances.map((item) => item['verdict'])).toEqual(['dsh', 'other'])
     })
-    const data = expectOk(await run(tool, {}))
-    const scan = data.key['scan'] as Record<string, unknown>
-    expect(scan['status']).toBe('scanned')
-    const instances = data.key['instances'] as Record<string, unknown>[]
-    expect(instances.map((item) => item['authority'])).toEqual(['127.0.0.1:3080', '127.0.0.1:4000'])
-    expect(instances.map((item) => item['verdict'])).toEqual(['dsh', 'other'])
   })
 
   it('给了 port：**不扫** ⇒ `skipped`，而且 socket 表命令一次都不跑', async () => {
@@ -375,24 +404,29 @@ describe(`${LIST_INSTANCES_TOOL} · 平台（三条分支都必须被真跑到�
 
 describe(`${LIST_INSTANCES_TOOL} · 有界与取消`, () => {
   it('候选超过上限 ⇒ 只探上限个，并**明说截断了**（不静默丢）', async () => {
-    const many = Array.from({ length: 40 }, (_, index) => `${String(1000 + index)}|1|node|`)
-    const stub = probeStub(() => ({ status: 200, body: 'hi' }))
-    const tool = toolWith({ table: many.join('\n'), probe: stub.fetch })
-    const data = expectOk(await run(tool, {}))
-    const scan = data.key['scan'] as Record<string, unknown>
-    expect(scan['truncated']).toBe(true)
-    expect((data.key['instances'] as unknown[]).length).toBe(24)
-    expect(stub.urls.length).toBe(24)
+    // 喂的仍是 win32 形状（`port|pid|name|startedAt`）⇒ 平台要钉住（坑 25）。
+    await withPlatform('win32', async () => {
+      const many = Array.from({ length: 40 }, (_, index) => `${String(1000 + index)}|1|node|`)
+      const stub = probeStub(() => ({ status: 200, body: 'hi' }))
+      const tool = toolWith({ table: many.join('\n'), probe: stub.fetch })
+      const data = expectOk(await run(tool, {}))
+      const scan = data.key['scan'] as Record<string, unknown>
+      expect(scan['truncated']).toBe(true)
+      expect((data.key['instances'] as unknown[]).length).toBe(24)
+      expect(stub.urls.length).toBe(24)
+    })
   })
 
   it('探针抛异常 ⇒ 那个候选是 `unknown`，整次调用**仍然成功**（绝不 throw）', async () => {
-    const tool = toolWith({
-      table: winTable(),
-      probe: probeStub(() => ({ status: 200, body: '' }), new Error('boom')).fetch,
+    await withPlatform('win32', async () => {
+      const tool = toolWith({
+        table: winTable(),
+        probe: probeStub(() => ({ status: 200, body: '' }), new Error('boom')).fetch,
+      })
+      const data = expectOk(await run(tool, {}))
+      const instances = data.key['instances'] as Record<string, unknown>[]
+      expect(instances.map((item) => item['verdict'])).toEqual(['unknown', 'unknown'])
     })
-    const data = expectOk(await run(tool, {}))
-    const instances = data.key['instances'] as Record<string, unknown>[]
-    expect(instances.map((item) => item['verdict'])).toEqual(['unknown', 'unknown'])
   })
 
   it('调用方已取消 ⇒ `cancelled` 失败，且**一个请求都不发**', async () => {
@@ -432,14 +466,16 @@ describe(`${LIST_INSTANCES_TOOL} · 形状（SHAPE §2.1 / §4.1）`, () => {
   })
 
   it('`data` 恰好三键（顶层不许有第四个）', async () => {
-    const tool = toolWith({
-      table: '3080|111|node|',
-      probe: probeStub(() => ({ status: 401, body: DSH_UNAUTHORIZED_BODY })).fetch,
+    await withPlatform('win32', async () => {
+      const tool = toolWith({
+        table: '3080|111|node|',
+        probe: probeStub(() => ({ status: 401, body: DSH_UNAUTHORIZED_BODY })).fetch,
+      })
+      const result = (await run(tool, {})) as unknown as Record<string, unknown>
+      expect(Object.keys(result).sort()).toEqual(['data', 'nextStep', 'ok'])
+      const data = result['data'] as Record<string, unknown>
+      expect(Object.keys(data).sort()).toEqual(['audit', 'key', 'verdict'])
     })
-    const result = (await run(tool, {})) as unknown as Record<string, unknown>
-    expect(Object.keys(result).sort()).toEqual(['data', 'nextStep', 'ok'])
-    const data = result['data'] as Record<string, unknown>
-    expect(Object.keys(data).sort()).toEqual(['audit', 'key', 'verdict'])
   })
 
   it('形状不合法的返回值也**渲染得出来**（守卫合成的 `key={}` 不许抛）', () => {

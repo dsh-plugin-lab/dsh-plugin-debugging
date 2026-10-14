@@ -1416,7 +1416,7 @@ describe('dsh_diagnose_plugin_load', () => {
      *
      * @param logAgeMs 日志文件 mtime 相对现在的偏移（负数 = 过去）。
      */
-    async function freshnessFixture(logAgeMs: number): Promise<ToolDefinition> {
+    async function freshnessFixture(logAgeMs: number): Promise<() => ToolDefinition> {
       const dshHome = await tempDshHome()
       const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
       await writeInstalledPackage(profileDir, 'pkg-a')
@@ -1427,57 +1427,59 @@ describe('dsh_diagnose_plugin_load', () => {
 
       const startedAt = new Date(Date.now() + PROCESS_AGE_MS).toISOString()
       const { spawn } = recordingSpawn(() => cmdResult({ stdout: `4242|node|${startedAt}\n` }))
-      // 端口查询只有 Windows 分支会起子进程 ⇒ **显式钉平台**（坑 25）。
-      // 无论跑在哪台机器上，这条用例测的都是 win32 分支。
-      return withPlatform('win32', () =>
-        Promise.resolve(
-          createDiagnosePluginLoadTool(
-            depsFor(configFor(dshHome, { port: 3080 }), {
-              spawn,
-              loader: loaderWith([entrySnapshot({ moduleName: 'pkg-a', fiberState: 2 })]),
-            }),
-          ),
-        ),
-      )
+      // ⚠️ **钉平台必须把「执行」一起包住**（坑 25 的隐蔽变体）：端口查询只有 Windows 分支
+      // 会起子进程、并按 win32 形状解析 spawn 的输出。所以这里返回**工厂**，由调用方在
+      // 同一个 `withPlatform` 里构造**并**跑。只把「构造」包进去、让执行落在 `finally`
+      // 恢复平台之后，就是「本机绿、CI 红」—— 本 PR 首次推送在 CI（ubuntu）上真踩：
+      // 那段 win32 形状的输出被按 linux 分支解析 ⇒ 红。
+      return () =>
+        createDiagnosePluginLoadTool(
+          depsFor(configFor(dshHome, { port: 3080 }), {
+            spawn,
+            loader: loaderWith([entrySnapshot({ moduleName: 'pkg-a', fiberState: 2 })]),
+          }),
+        )
     }
 
     it('日志比进程旧 → `freshness=stale`，L1 明说它是历史遗留；当前进程的日志 → `current`，不说', async () => {
-      const stale = await freshnessFixture(-15 * 24 * 60 * 60 * 1000)
-      const current = await freshnessFixture(-60 * 1000)
+      await withPlatform('win32', async () => {
+        const stale = (await freshnessFixture(-15 * 24 * 60 * 60 * 1000))()
+        const current = (await freshnessFixture(-60 * 1000))()
 
-      const staleResult = await run(stale, {})
-      const currentResult = await run(current, {})
-      const staleData = expectOk(staleResult)
-      const currentData = expectOk(currentResult)
+        const staleResult = await run(stale, {})
+        const currentResult = await run(current, {})
+        const staleData = expectOk(staleResult)
+        const currentData = expectOk(currentResult)
 
-      // ① 陈旧日志里的失败**仍然**被投影（不是「没读到」，也不是「把整份日志丢掉」）——
-      //    要的是给它加限定，不是抹掉它。
-      const staleEvidence = staleData.key['startupEvidence'] as Record<string, unknown>
-      expect(staleEvidence['requiredNotActivated']).toBe(2)
-      expect((staleEvidence['failed'] as Record<string, unknown>[])[0]?.['id']).toBe('webserver')
-      expect(String(staleData.verdict)).toContain('EADDRINUSE')
+        // ① 陈旧日志里的失败**仍然**被投影（不是「没读到」，也不是「把整份日志丢掉」）——
+        //    要的是给它加限定，不是抹掉它。
+        const staleEvidence = staleData.key['startupEvidence'] as Record<string, unknown>
+        expect(staleEvidence['requiredNotActivated']).toBe(2)
+        expect((staleEvidence['failed'] as Record<string, unknown>[])[0]?.['id']).toBe('webserver')
+        expect(String(staleData.verdict)).toContain('EADDRINUSE')
 
-      // ② 两种情形**必须可分**（防空转：一律加同一句话会在这里死）。
-      expect(staleEvidence['freshness']).toBe('stale')
-      expect((currentData.key['startupEvidence'] as Record<string, unknown>)['freshness']).toBe(
-        'current',
-      )
-      expect(staleData.verdict).not.toBe(currentData.verdict)
+        // ② 两种情形**必须可分**（防空转：一律加同一句话会在这里死）。
+        expect(staleEvidence['freshness']).toBe('stale')
+        expect((currentData.key['startupEvidence'] as Record<string, unknown>)['freshness']).toBe(
+          'current',
+        )
+        expect(staleData.verdict).not.toBe(currentData.verdict)
 
-      // ③ 陈旧时必须**说出来**：它是历史遗留、不是这次的结论。
-      expect(String(staleData.verdict)).toContain('predates the current process')
-      expect(String(staleData.verdict)).toContain('leftover from an earlier run')
-      // 对照：当前进程的日志**不许**背这句（否则「一律加同一句」也会全绿）。
-      expect(String(currentData.verdict)).not.toContain('predates the current process')
-      expect(String(currentData.verdict)).not.toContain('leftover')
+        // ③ 陈旧时必须**说出来**：它是历史遗留、不是这次的结论。
+        expect(String(staleData.verdict)).toContain('predates the current process')
+        expect(String(staleData.verdict)).toContain('leftover from an earlier run')
+        // 对照：当前进程的日志**不许**背这句（否则「一律加同一句」也会全绿）。
+        expect(String(currentData.verdict)).not.toContain('predates the current process')
+        expect(String(currentData.verdict)).not.toContain('leftover')
 
-      // ④ L2 也要能复核：新鲜度与参照物都印出来，而 `current` 那份印的是它自己的值。
-      const staleParts = splitRender(renderText(stale, {}, staleResult))
-      expect(staleParts.l2.join('\n')).toContain('freshness=stale')
-      expect(staleParts.l2.join('\n')).toContain('processStartedAt=')
-      expect(splitRender(renderText(current, {}, currentResult)).l2.join('\n')).toContain(
-        'freshness=current',
-      )
+        // ④ L2 也要能复核：新鲜度与参照物都印出来，而 `current` 那份印的是它自己的值。
+        const staleParts = splitRender(renderText(stale, {}, staleResult))
+        expect(staleParts.l2.join('\n')).toContain('freshness=stale')
+        expect(staleParts.l2.join('\n')).toContain('processStartedAt=')
+        expect(splitRender(renderText(current, {}, currentResult)).l2.join('\n')).toContain(
+          'freshness=current',
+        )
+      })
     })
 
     it('拿不到进程启动时间（没给端口）→ `freshness=undated`，L1 不许把它读成「当前进程失败了」', async () => {
