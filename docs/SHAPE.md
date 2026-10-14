@@ -4,7 +4,7 @@
 **不负责**：宿主侧已核 / 未核的事实 → [HOST-CONTRACTS.md](HOST-CONTRACTS.md)；为什么这样分层、代价是什么 → [ARCHITECTURE.md](ARCHITECTURE.md)；发布流程 → [PUBLISHING.md](PUBLISHING.md)；在这个仓里怎么干活 → [AGENTS.md](../AGENTS.md)；决策快照 → [.agents/notes/](../.agents/notes/)。
 **读者**：要动这个插件的形态（加工具、改描述、改输出、改契约）的人。**动之前先读本文，再读 HOST-CONTRACTS。**
 
-> **本文是方案，不是已实现的现状。** 现状（5 个工具、旧契约、整块 JSON 进上下文）见 [ARCHITECTURE.md](ARCHITECTURE.md) §5。本文描述的是**目标形态**；已核的宿主事实标 `[已核]`，实测标 `[已实测]`，其余是**待定 / 待实测**。
+> **本文是方案，也是已拍板决定的记录。** 已实现的形态（**工具清单以注册处为真源**、`{verdict, key, audit}` 三段契约、双通道）以 [ARCHITECTURE.md](ARCHITECTURE.md) §5 为真源；本文写**目标形态**与**已拍板但尚未落地的部分**。引用宿主事实时只标**可信度等级**，等级的定义与分级清单在 [HOST-CONTRACTS.md](HOST-CONTRACTS.md) 的「怎么读本文」—— 本文不重述证据（一处一事实）。
 
 ---
 
@@ -17,7 +17,7 @@
 | **观察** | `dsh_check_effect_mode` · `dsh_diagnose_plugin_load` · `dsh_check_auth` · `dsh_dump_config` | 这是四个**问题**，不是一个工具的四个参数：何时生效 / 加载没有 / 是 401 还是没起 / 组合成什么。**加工具不改这一层** |
 | **派生** | `dsh_sign_cookie` | 唯一会**产出凭证**的工具：不同权限（要读密钥）、不同参数（authority / ttl）。**绝不能并进 `check_auth`** —— 那会把秘密带进一个判定型输出 |
 | **行动** | `dsh_hot_reload` · `dsh_restart` | 可逆与不可逆是两种权限面：前者失败放回旧版；后者不可逆。判据是**要不要审批闸门**。**哪个还没做见 §9 的推进顺序**，本表只答归属 |
-| **实例** | 建 / 列 / 销毁 → **另起插件** | 它起长期进程、写另一个 `DSH_HOME`、分配端口 —— **越出本仓两条边界**（B10 诊断半边只读 / B15 写侧只碰进程内树），且它管的是**另一个**进程 |
+| **实例** | **列 → 收进本仓**（新增工具，见 §1.2 的 D′）；**建 / 销毁 → 另起插件** | 分界是**动不动手**：**「列」只发现**（扫本机监听者 + 用 DSH 专有签名认领），**不起进程、不写另一个 `DSH_HOME`、不分配端口** ⇒ 不越界；**「建 / 销毁」**要起长期进程、写**另一个** `DSH_HOME`、分配端口 ⇒ **越出两条边界**（B10 只读半边 / B15 写侧只碰进程内树），且它管的是**另一个**进程 |
 
 **两条纪律**：
 
@@ -30,8 +30,9 @@
 - 本仓的行动工具改的是**运行中的树**（`hot_reload`，失败必须回滚）与**宿主进程**（`restart`，**不可逆**）→ 它们必须与判断**分开**：合起来会让「先判断再动手」这个决策点消失，而**错一次的代价不可撤销**。
 - 这条同时解释了 `sign_cookie` 为什么独立 —— 它可重试、可撤销，**不同在可逆性**，而在**输出里带凭证**。判据是第二条：**有没有秘密要经手**。
 
-**接缝**：观察层四个工具加一个 `dshHome` 参数（默认仍取配置）。隔离实例因此**本身可被观察**，不必给每个工具引入 `instance` 概念。
-⚠️ **本句按字面实现不了**，核不上的地方与候选替代见 §1.2 —— **先别照它实现，等维护者拍板。**
+**跨实例观察：做（D′）** —— 维护者 2026-10-14 拍板。原设想「观察层四个工具各加一个 `dshHome` 参数」**按字面核不上**（三条理由见 §1.2），所以改为**两块一起做**：**① 新增一个「列出活着的 DSH 宿主」的发现工具**；**② 给文件型工具加 `dshHome`（含把 `DSH_HOME` 注进子进程环境）**。`check_auth` 用 **authority**、`hot_reload` **不加**（跨不了，描述里诚实标注）。
+⚠️ **硬边界**：**发现只能给 authority，给不出 home** ⇒ 「让文件型工具指向别的实例」**只能调用方手填路径**，**不得承诺自动配对**。识别 DSH 靠**专有签名**（未认证 `GET /` → 401 且 body 逐字是那句），**不是「401 就是 DSH」**。细节与代价见 §1.2。
+**特例**：**「列」进本仓，「建 / 销毁」不进** —— 分界是**动不动手**（§1 实例类判据）。
 
 **工具名是冻结的模型可见 API**。加工具、改描述可以；改已有工具名不行。「描述层」因此是**唯一还能调路由的杠杆**。
 
@@ -41,7 +42,7 @@
 
 **先纠一个我上一轮含混的说法**：`[已核]` 比对 `dsh-web-app/presets/` 的 `cordis.patch.yml` 与 `standard.patch.yml` 的**工具行集合** ——
 `cordis` 独有 = **只有 `@deepseek-ai/dsh-tool-cordis` 一项**（即 `cordis_inspect_list` + `cordis_inspect_query` 两把）；`standard` 独有 = 空。
-**`plugin_manager` 两个 preset 都有**（`cordis:143` / `standard:135`），`cordis_define` 那批旧名字只存在于**客户端历史卡片**里、不在任何 tool schema 中。
+**`plugin_manager` 两个 preset 都有**（在 `@deepseek-ai/dsh-web-app` 的 `presets/cordis.patch.yml` 与 `presets/standard.patch.yml` 里各按检索串 `tool-plugin-manager` 定位），`cordis_define` 那批旧名字只存在于**客户端历史卡片**里、不在任何 tool schema 中。
 → 所以「创造模式多出来的工具」**精确地就是那两把 inspect**，不是一大簇。
 
 把它的设计与本方案对齐 —— **它们在每一根轴上几乎都是相反的**，这种相反必须是有意的：
@@ -84,10 +85,9 @@
    `cordis_inspect_*` 属于后者（它只查宿主有什么，判断在模型）；`plugin_manager` 也属于后者（列出来由模型决定装不装）。**我们的工具属于前者**：`--dump-config` 的退出码语义、`preset-*` 的已知误报、`hmr` 缺失导致一切降级 —— 这些**在原始数据里读不出来**，必须由工具判定。`verdict` 因此不是「替模型决策」，而是**把工具独有的宿主知识交出去**；`key` 才是留给模型决策的原料。
    → 若哪天某个工具的 `verdict` 变成「原始数据的一行摘要」，它就退化成多余的中间层，**该按官方的做法去掉它**。这条写在这里当**重开条件**。
 
-### 1.2 §1 那句「接缝」按字面实现不了（**待维护者拍板**）
+### 1.2 §1 那句「接缝」为什么按字面核不上、以及 **D′（已拍板）**
 
 §1 末尾那句「观察层四个工具加一个 `dshHome` 参数，隔离实例因此本身可被观察」**核不上**，没有按它的字面实现。
-**本节只标出「错在哪」与候选替代，不替维护者选** —— 选了才算实现决策。
 
 **三条核不上的理由**（架构评估）：
 
@@ -97,17 +97,59 @@
 
 **后果**：「隔离实例本身可被观察」今天**不成立**。四个观察工具里只有 `dump_config` 能看到另一个实例（它跑 `dsh --profile … --dump-config`），但换 home 要改**插件配置或环境变量**，**不是调用时给一个参数**；`diagnose` 跨不了，`check_auth` 喂不进。
 
-**候选替代（都还没被拍板）**：
+#### 已拍板
 
-- **按工具分**：只给「本来就走子进程 / 读目录」的那几个加 `dshHome`，`diagnose` 不给（它跨不了），`check_auth` 换成 `authority`。
-- **只承认进程内那半边**：`dshHome` 只用来定位**磁盘证据**（profile 目录、启动日志），Loader 半边显式标注「只覆盖本进程」。
-- **不做接缝**：隔离实例归 §6「另起插件」，本仓工具**恒定观察自己这一棵**。
+**不做**（原选项 C）**被维护者 2026-10-14 的决定取代**：改为 **D′**（见下）—— **发现工具可以进本仓**，因为「列」只读、不动手（§1 的实例类判据已按此改）。
+
+#### D′（**维护者 2026-10-14 拍板：做**）
+
+**两块，一起做：**
+
+1. **新增一个发现工具**：**列出活着的 DSH 宿主**。做法 = 扫本机监听者 + 用 DSH 的**专有签名**认领（不是「401 就是 DSH」——见下面的硬边界）。
+2. **给「文件型」工具加 `dshHome` 参数**（`dump_config` / `check_effect_mode` / `sign_cookie` / `diagnose`），**含把 `DSH_HOME` 注进子进程环境**这一层。`check_auth` 不加（它要的是 **authority**，本来就收 `host:port`）。`hot_reload` **不加** —— 它换的是**本进程内存**里的模块，跨实例**做不到**，描述里必须**诚实标注**。
+
+#### D′ 的硬边界（**必须写进工具描述，否则就是骗模型**）
+
+1. **发现只能给 authority（`host:port`），给不出 home。** 宿主 HTTP 面上没有任何路由能问出「我是谁 / 读哪个 home」；`$DSH_HOME` 里没有别的实例的登记文件；系统里也没有与 home 无关的全局登记处。
+2. ⇒ **「让文件型工具指向另一个实例」只能由调用方手填 home 路径**，**不得承诺自动配对**（发现结果与 home 之间没有可推导的关系）。
+3. **识别 DSH 要靠专有签名，不能只靠 401**（401 是「需要认证」的通用响应）。签名见下。
+
+#### 已核的识别签名（D′ 的地基）
+
+> 未认证 `GET /` → **401 且响应体逐字**为 `dsh web authentication required; reopen the URL printed by dsh web.\n`。
+> 对照：`/api`、`/api/session.export` 的 body 只是通用 `unauthorized`；`/health`、`/version` 是 **404**。
+> 证据与真源在 [HOST-CONTRACTS.md](HOST-CONTRACTS.md)（本文不重述）。
+
+⚠️ **401 本身不是签名** —— 任何要认证的服务都会返 401。判据是「**401 且 body 逐字等于那句**」。
+
+#### 三项代价（`[已核]`）
+
+1. **新增工具名 ⇒ B9 的闭集要同批改**。
+2. **系统提示多占一段描述**（§2 在数这个字符数，B20a / B20b 管它）。
+3. **三平台「列全部监听者」是新能力，不是开关**：现有实现只查「给定那一个端口」，且 **win32 分支的脚本不输出端口**（只输出 `pid|name|startedAt`）⇒ 要扩字段 + 同步改解析器，并**原样保住** `probed` / `listening` / `unidentified` 的**四态语义**（「查不了」≠「没人听」≠「有人听但读不到 pid」）。
+
+#### 跨实例输出必须标注两件事（维护者的硬要求）
+
+**看的是哪个实例** + **看到了哪几层**。半能看到不可怕，**半能看到却不说才可怕** —— 所以：
+
+- `resolved.dshHomeSource` 在参数生效时必须显式是 `tool-argument`（三值纪律：`config` / `env` / `default` / `tool-argument`，**不许把参数来的值印成 `default`**）。
+- `diagnose` 跨实例时**必须把两半分开报**：磁盘证据（日志、profile）= **目标实例的**；**插件树状态 = 仅本进程**（那半在别的进程内存里，跨不了）。
+- 其余文件型工具的结论句里要能看出**读的是哪个 home**。
+
+#### 原三个候选（保留为记录）
+
+原「不做接缝」的原因是**加一个参数做不到**；现在改做 D′ 后，原候选 A 变成 D′ 的第二块，判据如下：
+
+- **按工具分**（= D′ 采用的）：能跨的给 `dshHome`（并**注入 env**），`diagnose` 那半显式标注，`check_auth` 用 `authority`。代价：工具接口**不再对称**。
+- **只承认进程内那半边**：`dshHome` 只定位磁盘证据，Loader 半边标「只覆盖本进程」。代价：`diagnose` 变成「一半答案 + 一句免责」（D′ 实际就是这么处理它的）。
+- ~~**不做接缝**~~：**已被 D′ 取代**（原选项 C）。
 
 ---
 
 ## 2. 描述层：四段骨架
 
-现状：5 个工具的 description 在系统提示里**恒占约 3364 字符**（工具描述 2134 + 参数描述 1230，实测），其中相当一部分是**输出结构的复述**（每次调用都能看见的东西）。
+现状：**每个工具**的 description 都在系统提示里占一段固定开销，其中相当一部分是**输出结构的复述**（每次调用都能看见的东西）。
+⚠️ **不在这里抄字符数** —— 它是**实测值、会漂**（加一个工具就变），照 §9.3 那条纪律办。**要现测**：跑 `npm test`，`test/redlines.test.ts` 的 B20a 用例会把每个工具的实际字符数逐个打出来（上限常量在 `src/tools/describe.ts`，检索串 `DESCRIPTION_MAX_CHARS`）；工具**个数**的真源是注册处 `src/tools/index.ts`。
 
 固定骨架，**顺序不许换**：
 
@@ -157,7 +199,7 @@ function composeDescription(d: ToolDescription): string
 |---|---|---|
 | `what` / `useWhen` | 非空 | 缺任一段 = 模型不知道「这是什么」或「何时用」 |
 | 合成后**行数** | ≤4 | 骨架就是四段 |
-| 单工具 description 字符数 | **≤240** | 现状 371–575；五个工具描述合计 2134 → 目标 ≤1200 |
+| 单工具 description 字符数 | **≤240**（`DESCRIPTION_MAX_CHARS`，`src/tools/describe.ts`） | 上界是**判据**，不是现状快照。⚠️ **现状值不写在这里**：它随工具个数与文字漂（§9.3 的纪律），要现测就跑 `npm test` 的 B20a 用例——它逐个打印每个工具的实际字符数 |
 | **每个参数描述** | **非空，且合计 > 0** | 这是**唯一**的机械守卫（两条**下界**）；**上界已删**，见下 |
 | 禁止出现 | 输出结构复述（`exit code` 这类） | 见 §10 B20b（只抓逐字，同义改写归评审） |
 
@@ -194,7 +236,7 @@ function composeDescription(d: ToolDescription): string
 **判据**：「模型看不到它，会不会做出不同的下一步？」会 → L2；不会 → `audit`（§5）。
 **整块 JSON 不再进模型上下文**。模型需要细节时走**路径**：L2 给出日志路径 / 目录，它自己有读文件的工具。
 **L3 只装「这次特有」的下一步**（`[已核]` 对照 §1.1 得出）：**跨工具调用链里不随结果变的那段属于描述②，写一次；随结果变的那段才进 L3**。本仓的链几乎全是条件分支（`mode=restart-required` → `restart`；`401` → `sign_cookie`；包不在树里 → `dump_config`），所以实际仍主要落在 L3。
-**同一句不许印两遍**。现状 `dsh_diagnose_plugin_load.ts:338` 是 `ok({ ...data, verdict }, { why: verdict })` —— **同一个 `const` 绑了两次**，`buildVerdict` 的全部六个出口都这样。这不是措辞洁癖：根因是 **`nextStep` 允许没有动作**，而 `why` 的定义是「为什么建议这一步」，没有「这一步」可解释时只剩结论可写。修法：**`nextStep` 必须带动作，没有动作就不出现**。
+**同一句不许印两遍**。**这条曾经真的发生过**：`src/tools/dsh_diagnose_plugin_load.ts` 里的旧代码是 `ok({ ...data, verdict }, { why: verdict })` —— **同一个 `const` 绑了两次**，`buildVerdict` 的每个出口都这样（那次修正记在同文件头，检索串 `不再有`）。这不是措辞洁癖：根因是 **`nextStep` 允许没有动作**，而 `why` 的定义是「为什么建议这一步」，没有「这一步」可解释时只剩结论可写。修法：**`nextStep` 必须带动作，没有动作就不出现**。
 
 ### 3.1 冻结签名：渲染层（实现者照此写，不许各自解释）
 
@@ -213,8 +255,8 @@ function renderToolResultText<T>(toolName: string, value: unknown, table: Render
 `RenderTable` 因此**只有 `key` 一个投影**：`data.verdict` 已经是成品字符串，不需要再投影；
 `data.key` 是各工具自己的结构化 `T`，把 `T` 摊成 L2 文本行才需要逐工具的函数。
 
-> **为什么不能是 `verdict(data): string`（本轮自查抓到的自相矛盾）**：§3.1 原稿写于「L1 由 `summarize` 钩子产出」的年代
-> （现 `src/lib/render.ts:64,78` 就是这个钩子）；§4.1 把 L1 挪进了 `data.verdict` 并把它**定为必填非空**。
+> **为什么不能是 `verdict(data): string`（本轮自查抓到的自相矛盾）**：§3.1 原稿写于「L1 由 `summarize` 钩子产出」的年代；§4.1 把 L1 挪进了 `data.verdict` 并把它**定为必填非空**。
+> **那次修订已经落地**：`src/lib/render.ts` 现在**没有** `summarize` 钩子（检索串 `renderToolResultText` 就是它现在唯一的渲染入口），L1 直接读 `data.verdict`。
 > 两条都留 = **L1 有两个家**，正是本方案要消灭的那类重复。
 > **决定性理由不是偏好，是 §4.1 的兜底分支**：`ensureToolResult` 合成的 internal 失败
 > `data = { verdict: <形状错在哪>, key: {}, audit: {} }` 是**通用产物、没有专属的 `RenderTable`**
@@ -234,7 +276,7 @@ nextStep: <why>                         ← manual 支：**不印 `—`**，也�
 ```
 
 **两支的逐字形状（补，防实现各自解释）**：`tool` 支恒为 ``nextStep: <tool>(<args JSON>) — <why>``
-（`args` 缺省 → `()`；这与现状 `render.ts:98-105` 一致）；`manual: true` 支恒为 ``nextStep: <why>``
+（`args` 缺省 → `()`；与现状一致，见 `src/lib/render.ts` 的 `nextStepLine`）；`manual: true` 支恒为 ``nextStep: <why>``
 （现状那行 `nextStep: — <why>` 的空指代按规则 2 消失）。**B18b 比对的是这两支里 `<why>` 的正文**。
 
 **七条冻结规则**：
@@ -297,7 +339,8 @@ type NextStep =
 **复查（本轮）**：全仓 grep `isError` = **0 命中** → **本仓没有任何现存代码依赖它**，这条只约束**将来**写 `presentResult` 的人（也就是 §8.2 暂时不做的那件事）。顺带一条：宿主的 `tool/result` 还有一个 `error?: {name, code, reason?}` 字段、**只在 `isError: true` 时允许** —— 因为本仓从不 throw，这个字段对我们**永远是空的**。即：本仓的失败在会话日志里是「**内容里写着 failure 的成功事件**」。这是可接受的（模型看到的是 `render` 文本，一切照常），但要**记住**：谁要是按 `isError` 或 `error.code` 去统计「这个插件失败了几次」，会得到 0。
 
 **同一族里另一条更值得注意的推论**：既然宿主只把**抛出的异常**当失败，那「`execute` 绝不 throw」就不只是本仓的风格，而是**契约的承载条件** —— `{ok:false}` 能到达模型，全靠它不被包成 `toolErrorResult`。一旦有人让 `execute` 抛出去，模型看到的会是宿主的 `Error: <message>`（不带 `verdict` / `key` / `audit`），**而我们所有的失败形状当场失效、且不会有任何红线报警**。
-→ **已拍板落成 B24**（见 §10）：`[已核]` 五个工具里**只有 `hot_reload` 有顶层 `try/catch`**，四个观察工具都没有 —— 这条红线今天就有活干。
+→ **已拍板落成 B24**（见 §10）：`[已核]` **当时**「只有 `hot_reload` 有顶层 `try/catch`」，四个观察工具都没有 —— 那条红线**当时**就有活干。
+⚠️ **那句计数与那份分布都已过期**（2026-10-14 复核）：**六个工具的 `execute` 现在都有顶层 `try`**（逐个看 `src/tools/dsh_*.ts` 即可）。所以这条红线的是非**不以本节为真源** —— 真源是 `test/redlines.test.ts` 的 B24，工具**数目**以注册处 `src/tools/index.ts` 为准。
 
 ### 4.1 冻结签名：结果契约（W1–W4 一律照此实现，不许各自解释）
 
@@ -308,7 +351,7 @@ type ToolResult<T> =
   | { ok: false; error: ToolError; data: ToolData<T>; nextStep?: NextStep }
 
 interface ToolError { kind: ToolErrorKind; message: string }   // hint 已删，就两项
-type ToolErrorKind = …                                          // 闭枚举不变（现有 8 项）
+type ToolErrorKind = …                                          // 闭枚举，成员以 `src/lib/errors.ts` 的 `TOOL_ERROR_KINDS` 为准（**不在文档里抄条数**）
 
 type NextStep =
   | { tool: string; args?: JsonValue; why: string }             // ① 调一个工具
@@ -376,12 +419,15 @@ data
 **大 `audit` 的落点不是「写个文件」**：`[已核]` 宿主的两条既有机制决定了这件事：
 
 - **宿主 spill 策略作用在 `content` 上，不作用在 `meta` 上**（`dsh-spill-policy` 的 `maxInlineTokens` 是对 tool result **content** 的保留/省略策略）→ 放进 `meta` 的大 `audit` **不会被自动 spill**，只会撑大会话日志；
-- **本仓自己写文件违反 B10**（诊断半边只读，不许写 `$DSH_HOME`）。
+- **本仓自己写文件违反 B10**（只读半边，不许写 `$DSH_HOME`）。**这一条现在是机器判据**（2026-10-14 落地）：`test/redlines.test.ts` 的 B10 按**路径前缀**判——写动作一旦指向宿主数据目录（`profiles` / `sessions` / `storages` / `logs` / `cache` / `attachments` / `backups` / `integrations` / `mcp` / `settings.yaml` / `.credentials.yaml` / `.salt` / `.anonymous-user-id`）或取值为 `DSH_HOME` / `dshHome`，当场红。**读**这些路径不在禁止面里（那是诊断半边的本职）。
+  ⚠️ **同日维护者放宽了一处（见 §10.3 的形态 A）**：**只放过 `$DSH_HOME/<包名>/` 这一层**（目录名**逐字**等于包名），该层以下随便分；其余顶层项**一律照旧禁止**。注意别混：`$DSH_HOME/logs` **禁止**，`$DSH_HOME/<包名>/logs` **放过** —— 只看紧跟 home 的**第一段**。
 
-所以只剩两条合法通道，按优先级：**① 宿主 `spillStore` 服务**（是宿主在写，不是本仓在写；`data.audit` 换成 `{locator, bytes, retrievalHint}`）；**② `presentationMeta`（会话日志）**。**不要写进 `inject`**（缺席会把整个插件挂成 PENDING，`skills` 已经踩过这条），要用 `ctx.get('spillStore')` 探测，缺席就退回 ②。
-→ **待拍板**：B10 的措辞要精化为「不许**本仓自己**写 profile / `$DSH_HOME`；经宿主服务（spill）落盘不在此列」。不精化就只能走 ②。
+**合法通道，按优先级**：**① 宿主 `spillStore` 服务**（是宿主在写，不是本仓在写；`data.audit` 换成 `{locator, bytes, retrievalHint}`）；**② `presentationMeta`（会话日志）**。**不要写进 `inject`**（缺席会把整个插件挂成 PENDING，`skills` 已经踩过这条），要用 `ctx.get('spillStore')` 探测，缺席就退回 ②。
 
-### 5.1 `spillStore` 可达性：**已真机实测**（步骤 ⓪ 已完成）
+⚠️ **`spillStore` 不跨重启**（`[已核]` 源码）：它默认落**每进程私有临时目录**，并在启动时清扫 ⇒ **适合「这次会话里的大 `audit`」，不适合任何要活过重启的东西**（`dsh_restart` 的 marker 因此**不能**放这里 —— 见 §6.1）。
+→ **「放宽写自己的命名空间」已于 2026-10-14 拍板：做，形态 A（精确一层）** —— 清单与两种形态的差异见 §10.3。本仓因此多了一条**可持久**的自有落点：**`$DSH_HOME/<包名>/`**（子目录随便分）。
+
+### 5.1 `spillStore` 可达性：**已真机实测**
 
 **结论：可达。** 在本插件这一层的 `ctx` 上 `ctx.get('spillStore')` 解析得到 `LocalSpillStore`，`saveText` 真落盘并返回 `{ locator, bytes, retrievalHint }`。
 证据：隔离 bench（独立 `DSH_HOME`、端口 18441、探针与本插件行同为根层兄弟）。原始记录见 §C.3 的 `.local/plan/spill-store.md` 与 `.local/spill-bench/`。
@@ -429,8 +475,8 @@ data
 
 **「有没有在线页面」的可达性**（`[已核]`，只读源码 + 只读转储）：
 
-- 服务存在且**挂在同一个根层**：`dsh-api-gateway` 提供 `ctx.typertGateway`（`lib/index.js:618`），组合树 `- id: typert-gateway` 在第 27 行、与我们的行同级、无 `disabled`。
-- 语义**极简**：`hasLiveClient()` 就是「有没有一条未取消的 client 事件流」（`lib/index.js:663-666`）—— 它回答的是「**有没有页面连着**」，**不是**「页面健不健康」，也**不是**官方那句 `Client failure:` 的来源。
+- 服务存在且**挂在同一个根层**：`dsh-api-gateway` 提供 `ctx.typertGateway`（`@deepseek-ai/dsh-api-gateway` 的 `lib/index.js`，检索串 `typertGateway`）；组合树里有 `- id: typert-gateway`、与我们的行同级、无 `disabled`（用 `dsh --profile <p> --dump-config` 现查，**别按行号找**）。
+- 语义**极简**：`hasLiveClient()` 就是「有没有一条未取消的 client 事件流」（同包同文件，检索串 `hasLiveClient`）—— 它回答的是「**有没有页面连着**」，**不是**「页面健不健康」，也**不是**官方那句 `Client failure:` 的来源。
 - **它答不了「三态」**：`Client failure: <msg>` 是 **host-runner 那条查询路径**的措辞（`hasLiveClient()===false` → 另一句；超时且 handler 抛错 → `Client failure`；provider 未注册 → 第三句）。所以本仓若报它，只能报一个更弱的事实（「此刻没有在线页面」），措辞必须**用我们自己的话**，不能冒充官方那三句。
 - **依赖面**：它跨了模块（要 `ctx.get('typertGateway')`）。**它不在本仓既有的跨模块调用清单里**（本仓目前只有 `ctx.tools` / `ctx.get('loader')` / `ctx.agents` / `ctx.skills` 那几处，且每处都在 AGENTS 的活跃坑里记了代价）→ 用不用它是一次**新增依赖面的决策**，不是顺手加个字段。**建议：不在 v1.1 做**，先把三态措辞放进描述层③（零依赖）。
 | `dsh_sign_cookie` | **独立工具**（派生类） | 见 §1 |
@@ -447,7 +493,7 @@ data
 | 可恢复性 | 重试即可 | 需要 marker + 唤醒，且要看外部进程管理器脸色 |
 | 最难的部分 | 顺序（已解决） | **闸门与恢复**，不是动作本身 |
 
-**四道闸**（任一不过即拒绝，且**不提供绕过参数**）：
+**四道闸**（任一不过即拒绝；**只有闸②另有显式逃生口 `force`**，见本节末）：
 
 | 闸 | 判据 | 拒绝时的返回 |
 |---|---|---|
@@ -458,33 +504,64 @@ data
 
 闸②的判据已可落地（`agents.list` 的 `status` / `inbox`、`jobs.list`、`workspace/session-activity`），契约与一条 **fail-closed 要求**见 [HOST-CONTRACTS.md](HOST-CONTRACTS.md) §2.2。
 
-**流程（顺序是判据）**：闸门检查 → **写 marker（落盘，必须在拉起之前）** → 拉起新进程 → 本进程退出 →（新进程）读 marker → 恢复会话 → 注入 notice → 删 marker。
+**流程（顺序是判据）**：闸门检查 → **审批门** → **写 marker（落盘，必须在拉起之前）** → 拉起新进程 → **本进程退出** →（新进程）读 marker → 恢复会话 → 注入 notice → **把 marker 标为「已消费」**（**不是删除**：宿主 `fs` 缝上没有任何删除方法 —— 状态迁移替代删除的裁决见 §10.3 与 [HOST-CONTRACTS.md](HOST-CONTRACTS.md) §2.5）。
 
-- **拉起优先交给外部管理器**（supervisor / Windows 服务 / systemd）；插件只做「查闸门 → 落盘 marker → 退出」。自建 helper 是**降级路径**，且**必须两级 detached**。机制与 B1–B9 全部证据见 [HOST-CONTRACTS.md](HOST-CONTRACTS.md) §2.1 —— 不在这里重推。
-- **降级路径的第一选择不是「两级 detached」，而是「让一个不属于我们的父进程来拉」** `[已核 —— 本轮复查]`：参考实现用的是 **WMI `Win32_Process.Create`**，它的父进程是 **`WmiPrvSE.exe`**、**不在 DSH 的进程树里**，所以「DSH 被杀也不影响它」是结构性成立，不靠 detached 标志去赌。本机结论印证了它的必要性：**`taskkill /PID <A> /T /F` 会把 detached helper 一起带走**（`[已实测]` `.local/detached-spawn/treekill-results.json` S2），两级 detached 逃不过树杀。→ 两条并存：**能交给外部管理器就交**；退而求其次**用 WMI 这类「外来父进程」**；「两级 detached」是最后一档。`dsh-restart` 自 0.1.3-alpha.4 **移除**内置 detached watchdog 正是同一判例。
-- **绝不按进程名批量杀**：按**监听端口 + 精确 PID**，与本仓既有的「按端口找进程」一致。
-- **不拥有 watchdog**：参考实现曾移除内置 detached watchdog，理由是交给外部管理器。
+**四步的通道都已核过**（证据与分级在 [HOST-CONTRACTS.md](HOST-CONTRACTS.md) §2，这里只留结论）：
 
-**恢复逻辑**：marker 必须是**独立文件**，不能写进会话日志（自定义 `SessionEventMap` 成员 + `session.append()` 会**写坏会话日志**，见 [AGENTS.md](../AGENTS.md) 活跃坑 4）；注入的是**信息性 notice**，不是强制「继续」；唤醒走官方通道、按会话原有预设；**唤醒失败保留 marker**，下次启动继续重试。
+- **退出 = `ctx.get('appExit')`** —— `AppExit = (code: number) => void`，语义原话「**等树 dispose 完**再退」；`dsh web` 的启动器**实测真的 provide 它**（`provideCmdline(hostCtx, { …, exit: (code) => void shutdown.shutdown(code) })`）。⚠️ **别用 `process.exit`**（源码注释点名那条路 bypassing `ctx.appExit`）；取不到要**转成结构化失败**（B24：不许抛）。**顺序：先 `await` 完 marker 的写，再调 `appExit`** —— 反了就是「树都拆了、写还在飞」。
+- **审批门的位置本身是判据**：**四道确定性闸门全过之后**才轮到它 —— 反过来会出现「先弹窗让用户同意、再告诉用户闸③不过」。⚠️ 实现要**两段式**：先用 `dryRun` 探一遍闸门（**不落盘**），过了才走审批，再真正落盘 —— 因为 `planRestart` 把「四道闸」与「写 marker」收在**同一个入口**里，**不许**为了插审批而把那道顺序拆坏。
+- **审批语义（2026-10-14 改正一处写反的）**：**先读档位再决定问不问**。`ask` ⇒ 调 `request()`（只有 `allowed-once` 算允许；`rejected`/`cancelled`/`unavailable` 一律当拒绝）；**`never`（= `danger-full-access`）⇒ 不问、直接执行**；读不出来 ⇒ fail-closed。⚠️ **`never` 是「提示已关闭」，不是「拒绝一切」** —— 在那一档主动去问**必然被拒**，那会把「你什么都授权了」变成「什么都不许做」。
+- **拉起** = 首选外部管理器 / 计划任务（见下面那张降级路径表）。
+- **恢复** = 新进程读 marker → `resolveAgent` 唤醒 → `followup` 投 notice（**信息性，不是「请继续」**）→ 标记已消费。
 
-**工具草稿**：`{ reason, delayMs（默认 10s，留给回执落盘）, dryRun }` —— `dryRun` 是本仓新增（四道闸必须能单独演练）。
+- **拉起优先交给外部管理器**（supervisor / Windows 服务 / systemd）；插件只做「查闸门 → 落盘 marker → 退出」。**自建 helper 是降级路径**，而它的落地方式**已被本机实测改写**（见下条）。
+- **降级路径：`{detached: true}` 已实测不可用，改用「由一个不在宿主 job 里的进程代起」**（`[已实测]`，证据在 [HOST-CONTRACTS.md](HOST-CONTRACTS.md) §2）：
+
+  | 方式 | 结论 |
+  |---|---|
+  | `{detached: true}`（本插件自己的 `spawn`） | ❌ **子进程落在宿主的 job 里** ⇒ 宿主退出时被 `KILL_ON_JOB_CLOSE` 一起收掉。「两级 detached」同样不可靠 |
+  | **计划任务**（`schtasks`） | ✅ **首选** —— 无需提权、父进程是 `svchost.exe`、实测**不在宿主 job 里** |
+  | `explorer.exe` 代起 | ✅ 同样不在宿主 job 里 |
+  | PowerShell 中间进程 + `Add-Type` 代发 `CREATE_BREAKAWAY_FROM_JOB` | ✅ 机制成立（宿主 job 恰好有 `BREAKAWAY_OK`），但**更贵**（要 spawn + 编译 C#），非首选 |
+  | WMI `Win32_Process.Create` | ⚠️ **不能判定**（本机只验到「不在宿主 job 里」，其余未知）—— **别拿它当依据** |
+
+  **三种可用方式都能用现成的 `src/lib/exec.ts` 实现，不需要任何原生绑定。**
+  ⚠️ **仍未测**：「是否也在**另一个** job 里」（job 身份未知）⇒ **helper 的长期存活必须由插件内真机实测钉死**，不许当已排除风险。
+  **绝不按进程名批量杀**：按**监听端口 + 精确 PID**，与本仓既有的「按端口找进程」一致。**不拥有 watchdog**（参考实现曾移除内置 detached watchdog，理由是交给外部管理器）。
+
+- **marker 落点：`$DSH_HOME/<包名>/restart/marker.json`**（维护者 2026-10-14 拍板；那正是 §10.3 形态 A 开出的白名单，所以**不违反 B10**）。**必须是独立文件** —— 理由是**可发现性**：文件有固定路径，新进程启动即可读；若改放会话日志，得**逐会话扫日志**才能找到（宿主没有按类型索引的读入口）。
+  **顺带纠正一条过期理由**：本文原先写「不能写进会话日志，因为会写坏会话日志」——那条说的是**自定义 `SessionEventMap` 成员 + `session.append()`**；而**经 `appendPluginRecord()` 写 `plugin:` 记录是合法的**（它硬写 `ignorable: true`，读取侧不会拒绝解释日志，`[已核]` 源码）。**我们仍选独立文件，是因为上面那条可发现性，不是因为日志不能写。**
+  **两条实现裁决（2026-10-14）**：
+  1. **marker 是纯 JSON，不加「末尾哨兵行」**（决策笔记里曾提议）—— 数据里夹一行非 JSON 会**破坏 `JSON.parse` 与任何外部读者**；版本演进用「`version` 放第一个键 + 版本门 + 未知版本**结构化失败**（不许读成「没有 marker」）」足够。**这是有意的取舍，不是遗漏。**
+  2. **写 marker 不能走 `node:fs`** —— B10 的 `judgeFsWriteUsage` 判的是**来源**（用没用 `node:fs` 写 API），**与路径无关**，所以形态 A 的白名单在**真实写入**面前够不到（`[已核]`：探针实测过）。⇒ 走**宿主 `fs` 服务**（`ctx.get('fs')`，`dsh-fs` 包的 `FileSystem`；与 §5 的 `spillStore` 同族 —— **宿主在写**）。**别用放宽红线的方式解决。**
+  ⚠️ **「谁来写」在库半边是注入面**（`RestartFsPort`：`read` / `write` / `remove`，其中 `read` 是**三值**：有内容 / 不存在 / 读失败）——真实适配器单独一层。这样判定逻辑可单测、换实现不动判定。
+  **本半实现不了、但被有意保留的一条**：§3 的返回草稿里有 `newPid=<pid>` —— **库半边不拉起进程，所以没有 pid**，它的 verdict 明说「marker 已在任何拉起之前写好；本半不启动进程，因此尚无新 pid」。**宁可这么写，也不许凑一个 pid。**
+
+**恢复逻辑**：注入的是**信息性 notice**，不是强制「继续」；唤醒走官方通道、按会话原有预设；**唤醒失败保留 marker**，下次启动继续重试。
+
+**工具草稿**：`{ reason, delayMs（默认 10s，留给回执落盘）, dryRun, force }` —— `dryRun` 是本仓新增（四道闸必须能单独演练）；`force` **只对闸②有效**，且命中时**必须留痕**（见本节末）。
 **返回草稿**：`verdict: gates=4/4 passed · marker=<path> · newPid=<pid>`，`nextStep` **无**（本进程即将退出）；被闸门拒绝时按 §3 的三层输出，`L3` 给 `dsh_check_effect_mode`。
 **验收**：四道闸**各一条拒绝用例**；真机一条「重启 → 会话被唤醒 → notice 到达发起者」闭环；反向用例「marker 存在但新进程没起来」→ 下次启动仍能恢复或明确报「上次重启未完成」；真机判据由**独立角色**跑，写者不自己验自己（[ARCHITECTURE.md](ARCHITECTURE.md) §8）。
 
 **协作纪律（契约，不是建议）**：`dsh_check_effect_mode` 先行 —— `mode=hot` 且 `hmr=present` → 通常不需要写侧工具 `[已实测]`；`mode=hot` 但 `hmr=absent` → 改 config **必须重启** `[已实测]`；`mode=restart-required` → 走 `dsh_restart`。
-**拒绝不是失败**：闸门拒绝是设计的一部分，模型应原样报给用户（**没有 `force` 参数，这是判据**）。
+**拒绝不是失败**：闸门拒绝是设计的一部分，模型应原样报给用户。
+**闸②（别的会话在飞）另有一个显式逃生口 `force: true`**（维护者 2026-10-14 拍板）：
+它**只覆盖闸②** —— ①③④ 是「这件事根本做不成」，不是「用户知情后的选择」，因此**不可绕过**；
+而覆盖**必须留痕**（写日志 + 记进 marker），让「这次是覆盖过的」事后可查。
+拍板的理由：**打断在飞的任务不可逆，而拒绝的代价只是等；不可逆的那个该由用户显式决定，不该让工具静默决定。**
+（决策记录见 [.agents/notes/2026-10-13-restart-persistence-and-helper.md](../.agents/notes/2026-10-13-restart-persistence-and-helper.md) 的「拍板记录」。）
 **不把热重载与重启合并**：失败代价不同、闸门不同；合成一个「修复它」会让模型倾向选更重的那条路。
 
 **待实测清单**（本轮逐条复查过，结论见下表；「已降级」= 本轮查到东西、问题变了）
 
 | # | 待验证 | 本轮复查 | 影响 |
 |---|---|---|---|
-| 1 | 拉起形态在服务化场景（job object / 服务管理器）下的实际行为 | **已缩到环境里**：`[已核]` **宿主源码里没有任何 job object 代码**（全树无 `KILL_ON_JOB_CLOSE` / job 相关）；宿主自己的进程树只有 *终端子进程* 那条 `taskkill /T /F` 路径（`dsh-subprocess-local`），与宿主自身生命周期无关。→ 若真有 job object，它是**「谁启动了 dsh」**装上的（终端 / IDE / 服务管理器）**→ 这条不能从源码判定，只能在不同启动方式下各跑一次** | 自建 helper 能不能作为降级路径存在 |
+| 1 | 拉起形态在服务化场景（job object / 服务管理器）下的实际行为 | **本机已实测到一半，问题被缩到「谁启动的 dsh」**：`[已核]` **宿主确实在一个 job 里**，该 job 带 `KILL_ON_JOB_CLOSE`（证据与句柄验证在 [HOST-CONTRACTS.md](HOST-CONTRACTS.md) §2.2.1 —— 本文不重推）。**注意**：这里曾经写「宿主源码里没有任何 job object 代码」—— **那是假话，已被证伪**：`dsh-win32-process` 里有 `CreateJobObject` / `AssignProcessToJobObject`，而 `dsh-subprocess-local` 的 runner 正是用它的 Job-owning 路径。⇒ 剩下的未知是**服务化部署**（Windows 服务 / 计划任务常驻）下的行为，**本机测不了** | 自建 helper 能不能作为降级路径存在（**已另有实测，见下条与 §6.1 的降级路径表**） |
 | 2 | 父被 `/T` 树杀时两级 detached 的长期存活 | **已有本机实测，不再是待测**：`.local/detached-spawn/treekill-results.json` —— S1（父自己 exit）helper 活下来；**S2（`taskkill /PID A /T /F`）helper 被连带杀掉**。→ 两级 detached **逃不过树杀**，这是本机结论不是推断 | 同上 |
 | 3 | 工具**是否默认注册** | **已查参考实现，答案分裂**：`dsh-smart-restart` 默认 **true**、`dsh-desktop-auto-restart` 默认 **false**（关着时**根本不注册**，模型看不见）。本机是 Windows 桌面形态 → 与后者同场景。**这仍是产品决策，不是技术未知** | 装完即生效 vs 需显式开启 |
-| 4 | `appendPluginRecord()` 的可用性与前缀约束 | **已确认**：`dsh-session` 导出 `appendPluginRecord(session, type, data)`；类型语法是 `PLUGIN_RECORD_TYPE = /^plugin:[a-z0-9][a-z0-9._-]*(\/[a-z0-9][a-z0-9._-]*)*$/u`（`index.js:1246`），即**必须 `plugin:` 前缀**、只允许小写字母数字与 `._-` 和 `/`。**但有一条新发现**：`@deepseek-ai/dsh-session` **不在本仓 peer 里，也不在 profile 的 `node_modules` 顶层**（那里只有一个 `@deepseek-ai/dsh-mcp-client`）→ 我们的插件**解析不到它**。要用得先加 peer（抬高依赖面），或改用 `ctx.get('session')` 那条路（**未核**） | marker 之外要不要留会话记录 |
-| 5 | 「按会话原有预设」唤醒的语义 | **已确认机制**：预设是**持久化的会话事实** —— session header 有 `agentPreset?`（`types.d.ts:89-94`），且有一条 `agentPreset` 投影（`init: header.agentPreset`，`apply` 于 `agent-preset/selected` 事件，`dsh-agent-preset-registry:42-54`），其注释明确「重建读投影，不读 header」。→ **「按原预设恢复」在宿主设计里是可表达的**。未钉死的只剩「resume 时真的按它 mount 且结果一致」这一步 | 恢复逻辑能否保证「回来的是同一个上下文」 |
-| 6 | 重启后 notice 的投递时序 | **仍不确定**：参考实现给的是经验值（启动后等 3 秒 / 每 4 秒重试、最多 30 次）。可达的通道本机已确证（`agent.followup` 在 `dsh-agent-loop:806`），但**「多早拿得到会话」是运行时性质**，只能实测 | marker 删除时机与重试策略 |
+| 4 | `appendPluginRecord()` 的可用性与前缀约束 | **已确认**：`dsh-session` 导出 `appendPluginRecord(session, type, data)`；类型语法是 `PLUGIN_RECORD_TYPE = /^plugin:[a-z0-9][a-z0-9._-]*(\/[a-z0-9][a-z0-9._-]*)*$/u`（在 `@deepseek-ai/dsh-session` 的 `lib/index.js` 里按检索串 `PLUGIN_RECORD_TYPE` 找），即**必须 `plugin:` 前缀**、只允许小写字母数字与 `._-` 和 `/`。**但有一条新发现**：`@deepseek-ai/dsh-session` **不在本仓 peer 里，也不在 profile 的 `node_modules` 顶层**（那里只有一个 `@deepseek-ai/dsh-mcp-client`）→ 我们的插件**解析不到它**。要用得先加 peer（抬高依赖面），或改用 `ctx.get('session')` 那条路（**未核**） | marker 之外要不要留会话记录 |
+| 5 | 「按会话原有预设」唤醒的语义 | **已确认机制**：预设是**持久化的会话事实** —— session header 有 `agentPreset?`（`@deepseek-ai/dsh-session` 的 `lib/types/types.d.ts`，检索串 `agentPreset`），且有一条 `agentPreset` 投影（`init: header.agentPreset`，`apply` 于 `agent-preset/selected` 事件；`@deepseek-ai/dsh-agent-preset-registry` 的 `lib/index.js`，检索串 `agentPresetProjectionDefinition`），其注释明确「重建读投影，不读 header」。→ **「按原预设恢复」在宿主设计里是可表达的**。未钉死的只剩「resume 时真的按它 mount 且结果一致」这一步 | 恢复逻辑能否保证「回来的是同一个上下文」 |
+| 6 | 重启后 notice 的投递时序 | **仍不确定**：参考实现给的是经验值（启动后等 3 秒 / 每 4 秒重试、最多 30 次）。可达的通道本机已确证（`agent.followup`，`@deepseek-ai/dsh-agent-loop` 的 `lib/index.js`，检索串 `followup`），但**「多早拿得到会话」是运行时性质**，只能实测 | marker 删除时机与重试策略 |
 | 7 | 闸①的阈值怎么定 | **查到参考值**：`dsh-desktop-auto-restart` **硬编码 60 秒并发冷却**（且 README 写明「为安全起见不可配置」）；`dsh-restart` 的 `watchdogCooldownMs` 默认 **60000**。→ 两个独立实现都落在 60 秒 → **本仓取 60 秒有据可依**，不必先验后定 | 会不会把正常运维误判成循环 |
 
 **第 2 条降级后剩下一个真问题**：既然树杀会连带，「自建 helper」只在「父自然退出」这一种情况下成立；而重启恰恰是「父自己退出」→ 树杀那条路**只在别人杀我们时才发生**。这削弱了（但不消灭）对 job object 的担心 —— 见第 1 条。
@@ -511,7 +588,7 @@ data
 
 ### 8.1 `[已核]` 宿主的输出契约有三个投影，不是一个
 
-源码：`@deepseek-ai/dsh-tools`（本机运行时 `0.2.1-alpha.2`，`lib/types/index.d.ts:105-113, 182-205`）。
+源码：`@deepseek-ai/dsh-tools`（`lib/types/index.d.ts`，检索串 `ToolOutputDefinition` / `ToolDefinition`；本轮核对时本机运行时是 `0.2.1-alpha.2` —— **版本号与行号都会漂，按检索串重找**）。
 
 ```ts
 interface ToolOutputDefinition {
@@ -531,10 +608,10 @@ interface ToolResult { content: ContentBlock[]; isError: boolean; meta?: JsonVal
 **回答原问题**：
 
 1. **有 `presentationMeta`** —— 就是那次报错里 `must declare output { schema, render, presentationMeta? }` 的第三个，是**可选的**。它的自述是「tool-private **presentation** payload … persisted on `tool/result` … for Host presenters and Client renderers to narrow independently」。
-2. **它不是「只给人看」的旁路，而是「模型看不见」的旁路**：`[已核]` 会话日志的事件形状是 `'tool/result': { turn, step, message, error?, meta? }`，而 `deriveMessages()` 对 `tool/result` **只取 `event.data.message`**（`dsh-session/lib/index.js:225`）—— `meta` **不进模型上下文**。`[已核]` 客户端确实读它（`dsh-client-ui-tool/lib/client.js:66-73, 314, 394` 读 `block.meta`）。
+2. **它不是「只给人看」的旁路，而是「模型看不见」的旁路**：`[已核]` 会话日志的事件形状是 `'tool/result': { turn, step, message, error?, meta? }`，而 `deriveMessages()` 对 `tool/result` **只取 `event.data.message`**（`@deepseek-ai/dsh-session` 的 `lib/index.js`，检索串 `deriveMessages`）—— `meta` **不进模型上下文**。`[已核]` 客户端确实读它（`@deepseek-ai/dsh-client-ui-tool` 的 `lib/client.js`，检索串 `block.meta`）。
 3. **但 `data` 本身两条通道都到不了**：会话日志里**没有 `value`**（`appendToolResult` 只写 `{turn, step, message, error?, meta?}`）。完整 `value` 只活在进程内（`materializeFinalResult` 的返回值 + `tools/result` 事件的 `value`）。
    → **原先的假设「人通过 session log 看到完整 `data`」不成立**。人能看到的是：**`render` 文本** + **`meta`**。
-4. **今天人看到的就是模型看到的那段文本**：没有 `presentResult` 时，客户端落到 generic 卡片，卡片正文是 `resultText(node)` —— 把 `node.content` 的文本块原样拼起来（`dsh-client-ui-tool/lib/client.js:193-199`）。`node.content` 就是 `render` 的输出。
+4. **今天人看到的就是模型看到的那段文本**：没有 `presentResult` 时，客户端落到 generic 卡片，卡片正文是 `resultText(node)` —— 把 `node.content` 的文本块原样拼起来（`@deepseek-ai/dsh-client-ui-tool` 的 `lib/client.js`，检索串 `resultText`）。`node.content` 就是 `render` 的输出。
    → **「一稿两用」是当前事实，不是猜测。** 而且两边都不理想：模型被整块 JSON 拖累，人也在对话里读同一坨 JSON。
 5. `presentCall` / `presentResult` 在**当前 peer 下限** `@deepseek-ai/dsh-tools@0.1.7-rc.1` 里**已经存在**（已下载该版本 tarball 核对：`lib/types/presentation.d.ts` 367 行，`ToolCallView` / `ToolResultView` / `presentCall` / `presentResult` / `presentationMeta` 全在）→ **用它们不抬高 peer 下限**。
 
@@ -591,8 +668,8 @@ interface ToolResult { content: ContentBlock[]; isError: boolean; meta?: JsonVal
 
 | 名字 | 客户端有没有定制卡 | 证据 |
 |---|---|---|
-| `cordis_inspect_list` / `cordis_inspect_query`（**Inspect providers**，我们实际用的那几个） | **没有** → generic 文字卡 | 两者**都不在** `TOOL_VARIANTS` 里（`client.js:97-113`） |
-| `cordis_package_inspect` / `cordis_runtime_inspect` / `cordis_run` / `cordis_stop` / `cordis_undefine`（**上一代** define/run 那批） | **有** —— 全套定制行 + 交互面板 | `TOOL_VARIANTS` 里有它们（`package_inspect`/`runtime_inspect` → `read`，其余 → `others`）；`dsh-client-ui-cordis/lib/client.js:1446-1482` **keyed `tool.call.toolview`** 注册 `CordisDefineRow` / `CordisRunRow` / `CordisActionRow`；另有 `tool.view.cordis` 插槽（`slots.d.ts`，Package 可在卡片里渲染自己的交互区）与面板动作（`onApprove` / `onRun` / `onStop` / `onRemove`） |
+| `cordis_inspect_list` / `cordis_inspect_query`（**Inspect providers**，我们实际用的那几个） | **没有** → generic 文字卡 | 两者**都不在** `TOOL_VARIANTS` 里（`@deepseek-ai/dsh-client-ui-tool` 的 `lib/client.js`，检索串 `TOOL_VARIANTS`） |
+| `cordis_package_inspect` / `cordis_runtime_inspect` / `cordis_run` / `cordis_stop` / `cordis_undefine`（**上一代** define/run 那批） | **有** —— 全套定制行 + 交互面板 | `TOOL_VARIANTS` 里有它们（`package_inspect`/`runtime_inspect` → `read`，其余 → `others`）；`@deepseek-ai/dsh-client-ui-cordis` 的 `lib/client.js`（检索串 `tool.call.toolview` / `CordisDefineRow`）**keyed** 注册 `CordisDefineRow` / `CordisRunRow` / `CordisActionRow`；另有 `tool.view.cordis` 插槽（`slots.d.ts`，Package 可在卡片里渲染自己的交互区）与面板动作（`onApprove` / `onRun` / `onStop` / `onRemove`） |
 
 **所以「创造模式的 UI」指的应该是后者**（Plugin Manager 之前的那一代定义/运行卡片，那个包的 README 自己就写了 "Historical … New Creator plugins use Plugin Manager"）。我上一轮拿前者去问「有没有卡片」，**问错了对象**。
 
@@ -610,69 +687,82 @@ interface ToolResult { content: ContentBlock[]; isError: boolean; meta?: JsonVal
 
 | 视觉元素 | 谁决定 | 证据（`dsh-client-ui-tool/lib/client.js`，本机 `0.2.1-alpha.2`） |
 |---|---|---|
-| **标题文字** | 客户端的**工具名 → locale key** 表 | `TOOL_TITLE_KEYS:134` `cordis_inspect_query: "tool.title.queryRuntime"` → `dsh-client-ui-conversation:19846` `"Query runtime"` |
+| **标题文字** | 客户端的**工具名 → locale key** 表 | `@deepseek-ai/dsh-client-ui-tool` 的 `lib/client.js`（检索串 `TOOL_TITLE_KEYS`）里 `cordis_inspect_query: "tool.title.queryRuntime"` → 该 locale 串在 `@deepseek-ai/dsh-client-ui-conversation` 的 `lib/client.js`（检索串 `Query runtime`） |
 | **摘要 `host`** | 客户端从 **args** 推 | `deriveSummary(variant, argsRaw)` + `SUMMARY_KEYS`（args 派生；注释自己写明「result-derived summaries are a ledger item」） |
-| **粗体** | **CSS 按工具名前缀** | `client.js:1473`：`.o3BgMG_root[data-tool^=cordis_] .o3BgMG_title{font-weight:500}` / `.o3BgMG_title{font-weight:400}`；而 `data-tool` = `toolName`（`:1764`） |
-| **图标** | 客户端的**工具名 → variant → 图标**表 | `VARIANT_ICONS`（`:1789-1797`）+ `classifyTool`（`:169-171` 查 `TOOL_VARIANTS`）；另一条按前缀的路是 `detailIcon`（`:3990-4000`，`toolName.startsWith("cordis_")` → `IconCordisPluginOutlineRegular`）。`[已实测]` 那张卡走的是**后一条**（DetailsRow，见本节末） |
+| **粗体** | **CSS 按工具名前缀** | 同文件（检索串 `data-tool^=cordis_`）：`.o3BgMG_root[data-tool^=cordis_] .o3BgMG_title{font-weight:500}` / `.o3BgMG_title{font-weight:400}`；而 `data-tool` = `toolName`（同文件检索串 `data-tool`） |
+| **图标** | 客户端的**工具名 → variant → 图标**表 | `VARIANT_ICONS` + `classifyTool`（查 `TOOL_VARIANTS`）；另一条按前缀的路是 `detailIcon`（`toolName.startsWith("cordis_")` → `IconCordisPluginOutlineRegular`）。`[已实测]` 那张卡走的是**后一条**（DetailsRow，见本节末） |
+
+（上表三处的检索串都指 `@deepseek-ai/dsh-client-ui-tool` 的 `lib/client.js`：`TOOL_TITLE_KEYS` · `data-tool^=cordis_` · `data-tool` · `VARIANT_ICONS` · `classifyTool` · `detailIcon`。）
 
 **⚠️ 纠正本节原来那句结论**（原文：「那行粗体是 `cordis_` 前缀白拿的，我们的 `dsh_*` 前缀永远是 `400`；图标同理。工具侧没有任何字段能改这两样」）。
 
 - **错在后半句**：注册 keyed 条目之后，**那一行就是我们自己的组件** → `fontWeight:500` 直接写在行内样式里即可，**不是只能白拿**。原文把「宿主自己派发的那一行」当成了「我们注册的那一行」。
-- **改不了粗体的是宿主自己派发的 generic 行**：它按 `[data-tool^=cordis_]` 选择器决定（`data-tool` = `toolName`，`:1764`），而全文件**只有那两条** `font-weight`（`:1473`）。我们的工具名不落在 `cordis_` 前缀上，所以落在 `400`。
+- **改不了粗体的是宿主自己派发的 generic 行**：它按 `[data-tool^=cordis_]` 选择器决定（`data-tool` = `toolName`，同文件检索串 `data-tool`），而全文件**只有那两条**规则（检索串 `data-tool^=cordis_`）。我们的工具名不落在 `cordis_` 前缀上，所以落在 `400`。
 - **「工具侧没有任何字段能改」这半句仍成立**，但它的对象是 `presentCall`（§8.2 无人读），**不是**客户端组件的 props。
 
 **要复用，只有一条路：给本仓加客户端半边。**
 
-- 形态：`package.json` 的 `dsh.client` 声明 + `ctx.slots.register('tool.call.toolview', …)` 注册 **keyed** 条目（**范本：`dsh-client-ui-cordis/lib/client.js:1446-1482`**，它注册自己的 `CordisDefineRow` / `CordisRunRow`）。
+- 形态：`package.json` 的 `dsh.client` 声明 + `ctx.slots.register('tool.call.toolview', …)` 注册 **keyed** 条目（**范本：`@deepseek-ai/dsh-client-ui-cordis` 的 `lib/client.js`**，检索串 `tool.call.toolview` / `CordisDefineRow`，它注册自己的 `CordisDefineRow` / `CordisRunRow`）。
 - **图标可直接复用**（都在 `@deepseek-ai/dsh-client-ui-primitives` 的导出表里）：`IconCordisPluginOutlineRegular`（`cordis_` 前缀用的那个，`[已实测]` **就是截图里那颗**）、`IconBrowseOutlineRegular`（`read` variant 用）、`IconSparkleRegular`（`others` 兜底）。
 - **复用没有「双 React」风险**（`[已实测]`）：`dsh-client-ui-primitives` 走**浏览器模块表**（`window.__ModuleLoader__`）而不是 npm 解析 → 宿主内层的包在插件里同样可得（`dsh-client-ui-tool` 自己就这么 `require`），`require('react')` 拿到的是**同一个** React 实例。
 - **粗体照抄 500**（不自己发明一个新值），**结构照抄 `标题 · 摘要`**（`sep` 是 2px 圆点，`margin:0 8px`）。
 - **注意它不是 `presentResult` 的替代品**：keyed 条目拿的是**冻结的 call/result 切片 + `block.meta`**，所以 §5 的 `audit`（走 `presentationMeta`）正好是它的输入 —— 两条设计在这里接上。
 - **代价照实记**：新增一个客户端构建产物（要进 `files`、要过 `check:release`、多一份 HMR/replay 语义），且 keyed 条目必须在 **call/result 两侧都可重放**。→ 因此**排在形态改造之后**，不进 §9 的 ⓪–⑥。
-- **加 `dsh.client` 必须重启宿主一次**（`[已实测]`）：`dsh-client-modules` 把 **package.json 元数据缓存到重启为止**（其 README `:72`）。此后改**产物内容**走 HMR 的 `rebuilt()`，不用重启；⚠️ **但磁盘上删字段也要重启才生效** —— 缓存的反面同样成立。
+- **加 `dsh.client` 必须重启宿主一次**（`[已实测]`）：`dsh-client-modules` 把 **package.json 元数据缓存到重启为止**（其 README，检索串 `cached per Loader specifier`）。此后改**产物内容**走 HMR 的 `rebuilt()`，不用重启；⚠️ **但磁盘上删字段也要重启才生效** —— 缓存的反面同样成立。
 
 **`[已实测]` 那张卡走 DetailsRow、图标是 `IconCordisPluginOutlineRegular`**（原先这条「未定」销掉）。
 
-- **走哪条行**：**DetailsRow** —— `client.js:4074-4083` 给三个 `cordis_inspect_*` 逐个注册了 keyed 条目。所以走的是 `detailIcon`（`cordis_` 前缀那一支），**不是** `VARIANT_ICONS.others = IconSparkleRegular`。
+- **走哪条行**：**DetailsRow** —— `@deepseek-ai/dsh-client-ui-tool` 的 `lib/client.js` 里（检索串 `key: "cordis_inspect_list"`）给三个 `cordis_inspect_*` 逐个注册了 keyed 条目。所以走的是 `detailIcon`（`cordis_` 前缀那一支），**不是** `VARIANT_ICONS.others = IconSparkleRegular`。
 - **展开栏的结构**：`detailList`（`groups` / `items` / `fields` / `code`）+ 折叠 + 代码块复制 + hover 才现的 `Inspect` 按钮（`.o3BgMG_inspectButton`）。
 - **对方案的影响**：只影响「抄哪套结构与图标」。**不影响「必须加客户端半边」这个结论。**
 
 ---
 
-## 9. 推进顺序
+## 9. 推进顺序与当前队列
 
-一步一个 PR，每步都能独立验收。**第 ⓪ 步必须在 ① 之前**（它决定 `audit` 的设计空间），**第 ① 步先用一个工具做样板**再推广。
+**原则：一步一个 PR，每步都能独立验收。** 本节的「已完成」只写**形态上已经定下来**的东西；**具体验收以代码与 `test/redlines.test.ts` 为真源**，本节不重述判据（一处一事实）。
 
-| 步 | 内容 | 为什么排这里 |
+### 9.1 已落地（形态已定）
+
+| 项 | 形态 | 真源 |
 |---|---|---|
-| **⓪ 可达性探针** | 只判「`ctx.get('spillStore')` 在本插件的 `ctx` 上解析得到吗，`saveText` 能不能落一次盘」。**不做别的形状** | 它决定大 `audit` 有没有地方去（§5.1）。不可达 → `audit` 必须重新设计成有界，②③ 的形状都要跟着变 → **必须最先跑** |
-| **①a 单工具样板** | 只改 **`dsh_diagnose_plugin_load`** 一个：新契约（删 `hint`、并 `evidence`、`nextStep` 两分支）+ 三层输出 + 四段描述 + 按 §10 的红线脚手架 | 「三层输出 + 三段 `data` + 四段描述」是否真的可行，只有一个工具能回答；**改动面与全量一样，但回退只回一个文件**。样板跑通后再推广 |
-| **①b 推广到其余四个** | 把 ①a 定稿的骨架套到 `effect_mode` / `check_auth` / `dump_config` / `hot_reload` | ①a 已经把所有形状决策做完，这一步是**搬运**，不再做设计 |
-| **② 三个补字段** | 启动日志解析、`dsh.bundle` 检查、Client failure 措辞 | 无新机制；`diagnose` 已经读了同样的源（且它在 ①a 里已被改过，正好接上） |
-| **③ 双投影** | `data` 三段化收口 + `presentationMeta` 带 `audit`（**不再附带 `presentCall`** —— 对 Web 客户端无效，见 §8.2） | 依赖 ⓪ 的结论与 ①a 的三层渲染定稿 |
-| **⑦ 客户端半边**（形态之外，最后） | 加 `dsh.client` + keyed `tool.call.toolview`：**粗体标题（500）+ 复用宿主图标 + `标题 · 摘要` 结构**，读 `block.meta` 里的 `audit`（§8.5） | 它只影响**人**通道、不影响模型 → 排一切之后。代价分两类：**已实测** = 视觉来源已定（走 DetailsRow、图标、粗体可在自有组件内写、图标可复用且无双 React 风险、加 `dsh.client` 要重启宿主一次）；**仍是推断** = 新构建产物要进 `files` 并过 `check:release`、keyed 条目在 call/result 两侧都可重放、多一份 HMR 语义（§8.5） |
-| **④ `dsh_sign_cookie`（已完成）** | 独立工具 + 真机红线 | 算法是照抄（SKILL §3.4 已实测），但**错误信号是二值**、调试困难，值一条独立真机红线。实现与契约见 [ARCHITECTURE.md](ARCHITECTURE.md) §5 |
-| **⑤ `dsh_restart`** | 四道闸 + marker + 恢复 | 不可逆，排一切之后 |
-| **⑥ 隔离实例** | 另一个仓 | 与本仓边界已由 §1 划清 |
+| **契约** | `{verdict, key, audit}` 顶层恰好三键、成败同形；`hint` 已删、`evidence` 已并入 `data` | `src/lib/errors.ts` 的 `ensureToolResult` + §4.1 的冻结签名 |
+| **输出三层** | L1 判定 / L2 事实 / L3 指路（`nextStep` 两分支） | §3.1 + `src/lib/render.ts` |
+| **描述四段骨架** | 做什么 / 什么时候用我 / 边界 / 代价，段序不许换 | §2.1 + B20a / B20b |
+| **工具清单** | 四类角色的划分见 §1；**具体有哪几个、叫什么，真源是注册处**（本文不抄清单、也不抄个数）；**名字闭集由 B9 钉住** | `src/tools/index.ts` 注册处 |
+| **技能半边** | `SKILL.md` 已**解冻**（跟着插件演化），并已补「干预」一节（写侧 + 派生 + 写明 `restart` 尚不存在） | §9.3 的连带同步点 |
+| **超时预算** | 工具**只声明工作量档**（`quick` / `schemaDump`），预算收在 `src/lib/timeouts.ts` 的**唯一映射点**；工具里不许有毫秒字面量 | `test/tools/timeout-budgets.test.ts`（**扫源码**） |
+| **只读纪律** | 是**机器判据**：B10（杀进程 / fs 写入 / **写宿主数据路径** / 安装面，作用域**整个 `src/**`**）+ B15（写侧窄作用域、更严记号） | §10.3 与 `test/redlines.test.ts` |
+| **大 `audit` 的去处** | `spillStore` 可达性**已实测**（§5.1）；但它**不跨重启**（每进程临时目录 + 启动清扫）⇒ 只适合「这次会话里的大 `audit`」 | §5 / §5.1 |
 
-**为什么 ⓪ 可以很便宜**：`[已核]` 服务在同一次组合里、与我们的行同一作用域、且宿主自己的同级插件用的就是 `ctx.get` 这个写法（§5.1）。所以 ⓪ 不是「调研」，是一次**三行探针 + 一次真实落盘**，跑完即结案。
+### 9.2 剩余队列（按顺序）
 
-**`SKILL.md` 已解冻**（维护者 2026-10-13 拍板）：技能**跟着插件一起演化**，不再逐字冻结在 v2.1.4。
-→ 具体动作：**新增一节「干预」**，纳入写侧（`hot_reload` / `restart`）与派生（`sign_cookie`）工具 —— 原 SKILL 定位是「排障」、只含诊断，写侧与派生工具**在原文里没有家**。
-→ 排期：**与 ① 同批**（`hot_reload` 已经在跑，写侧的知识现在就该有落点，不必等到 ⑤）。
-→ 连带同步点：`AGENTS.md` 里「SKILL.md 是逐字复制的 v2.1.4 本体、修正与否待拍板」那条待办**同批改掉**；`test/redlines.test.ts` 的 **B12**（技能文件本体）断言的对象从「与原件逐字一致」改成**结构约束**（见 §10 的 B12 修订注）。
+| 序 | 内容 | 为什么排这里 | 前置 |
+|---|---|---|---|
+| **D′** | **新增发现工具**（列出活着的 DSH 宿主）+ **给文件型工具加 `dshHome`（含 `DSH_HOME` 注进子进程环境）** | 它是 §1.2 已拍板的一块，且**独立于 `restart`**；先做能让「跨实例观察」在 `restart` 之前就有用 | 见 §1.2 的三项代价（**B9 闭集同批改**、描述预算、**三平台「列全部」是新能力**） |
+| **④ `dsh_sign_cookie`** | ✅ **已完成**（独立工具 + 真机红线） | 算法是照抄（SKILL §3.4 已实测），但**错误信号是二值**、调试困难 ⇒ 值一条独立真机红线 | 实现与契约见 [ARCHITECTURE.md](ARCHITECTURE.md) §5 |
+| **⑤ `dsh_restart`** | 四道闸 + marker + 恢复 | **不可逆，排一切之后**；**先 dry-run** | 它的**前提本轮被大幅改写**：`{detached:true}` 已实测不可用、改用「由不在 job 里的进程代起」（§6.1）、marker 落 `$DSH_HOME/<包名>/restart/marker.json`。**机制证据见 [HOST-CONTRACTS.md](HOST-CONTRACTS.md) §2 —— 本文不重推** |
+| **⑦ 客户端半边**（形态之外） | 加 `dsh.client` + keyed `tool.call.toolview`：粗体标题（500）+ 复用宿主图标 + `标题 · 摘要`，读 `block.meta` 里的 `audit`（§8.5） | 只影响**人**通道、不影响模型 ⇒ 排一切之后 | 已实测：视觉来源已定；仍是推断：构建产物进 `files` 并过 `check:release`、keyed 条目在 call/result 两侧可重放、多一份 HMR 语义 |
+| **⑥ 隔离实例** | **建 / 销毁 → 另一个仓**（**「列」已收进本仓，见 D′**） | 与本仓边界已由 §1 划清 | 它要起长期进程、写**另一个** `DSH_HOME`、分配端口 |
+
+### 9.3 连带同步点（改上面任何一项都要同批看）
+
+- **`SKILL.md`**：它是**运行时载荷**，不是文档；但它**跟着插件一起演化**。**新增/改名工具、改动写侧语义、改动「干预」范围时，同批改它** —— 漏改是**静默**的（B12 只查 frontmatter 与正文长度，**不比对原件**）。
+- **`AGENTS.md` 的待办**：`SKILL.md` **已解冻**（2026-10-13 拍板，待办里已改成「跟着插件一起演化」）；配套的 **B12 断言对象**也已从「与原件逐字一致」改成**结构约束**（见 §10 的 B12 修订注）。**再改技能正文时，同批核那两条待办是否要跟着动。**
+- **两份门面**（[README.md](../README.md) / [README_zh.md](../README_zh.md)）：配置表、工具清单、只读纪律的措辞**成对改**。
+- **描述预算（§2）**：**加一个工具 = 系统提示多占一段** —— 那个字符数是**实测值、会漂**，别抄；加工具时同批复核 §2 的结论是否还成立。
 
 ---
 
 ## 10. 红线清单
 
-**原则：能断言的，不靠自觉。** 全部落在 `test/redlines.test.ts`，编号从 **B16** 起（B15 是改造前最后一条）。
-**下表不必与该文件的 `describe('B…')` 逐条核对** —— 那边才是真源；这里只放「为什么这么判」与容易踩空的边界。
+**原则：能断言的，不靠自觉。** 全部落在 `test/redlines.test.ts`。
+⚠️ **编号不在这里维护**：`describe('B…')` 的**闭集才是真源**，**别在这份文档里抄编号清单，也别抄条数**（抄一次就意味着每次加红线都得同批改这里，而漏改的那次就是一句假话 —— 本仓为此写错过一次）。本节只放「**为什么这么判**」与**容易踩空的边界**。
 
 **新增两条由本轮拍板/复查产生**：
 
 - **B24（拍板加）`execute` 全路径不抛** —— 见下表与下方说明。
-- **B12 修订（解冻的连带）**：现有 B12 断言的是「技能文件本体」的**结构**（frontmatter 合规 + 正文 >500 字符，`redlines.test.ts:1007-1060`），**并不断言与 v2.1.4 逐字一致** → `SKILL.md` 解冻后 **B12 无需改动**。反而要**补一条**：新增的「干预」一节必须**真的存在**（否则「解冻了但没写」是静默的）→ 归入 **B12b**。
+- **B12 修订（解冻的连带）**：现有 B12 断言的是「技能文件本体」的**结构**（frontmatter 合规 + 正文长度下界；`test/redlines.test.ts`，检索串 `describe('B12 技能文件本体'`），**并不断言与 v2.1.4 逐字一致** → `SKILL.md` 解冻后 **B12 无需改动**。反而要**补一条**：新增的「干预」一节必须**真的存在**（否则「解冻了但没写」是静默的）→ 归入 **B12b**。
 
 | # | 红线 | 怎么断言（机械判据） |
 |---|---|---|
@@ -702,7 +792,11 @@ interface ToolResult { content: ContentBlock[]; isError: boolean; meta?: JsonVal
   | `diagnose` × `loader` | 1 | **THREW** |
   | `hot_reload` × `reload` | 1 | 返回 `internal`，恒等 ✅ |
 
-  印证 §4 那句「五个工具里只有 `hot_reload` 有顶层 `try/catch`」—— 四个观察工具**真的会抛**。
+  印证 §4 那句（**当时的**分布在 2026-10-14 已变，见 §4 的更正注）：四个观察工具**真的会抛**。
+  ⚠️ **这张表是当时的实测记录，不是现状断言**（2026-10-14 加注）：**六条现在都是绿的** ——
+  六个工具的 `execute` 现在都有顶层 `try`（逐个看 `src/tools/dsh_*.ts` 即可）。
+  **本表不据此修改**：它记的是「这条红线当时红在哪」，改掉它会让「为什么要有这条红线」失去证据。
+  现状请**现跑** `test/redlines.test.ts` 的 B24 那一条。
 - **判据为什么不是「没报错」**：那是活跃坑 37 的形状（症状消失 ≠ 根因修好）。根因事实是「**返回的是一个结构合法的结果**」。
 - **它的声明边界（必须写明，否则下一个人会误以为它管得更多）**：**B24 抓不到「异常被吞掉」** —— `try{…}catch{ return fail({kind:'internal'}) }` 的返回值合法，B24 照样绿。那是坑 37 的地盘，不是这条红线的。
 - **配套硬要求（redline-verifier 实测踩出来的）**：**替身被调用次数 = 0 必须判红**，不许 skip。它的第一版探针在 `probe()` 里另造了一份 deps、注入被丢掉 → 六组**全部「通过」** → 差点得出「B24 今天已经是绿的」这个**反结论**。
@@ -721,7 +815,7 @@ interface ToolResult { content: ContentBlock[]; isError: boolean; meta?: JsonVal
 | **B19** / **B23** | import 闭包解析失效 → 闭包为空 → 「不含越界写法」恒真 | **闭包非空** |
 | **B20a**（口 1） | 把参数描述全删光 → 合计 0 → 通过 | **每个参数描述非空** |
 | **B20a**（口 2，本轮补） | `boundary` / `cost` 留空却**不滤空段** → 空行被算进行数 → 两段齐全也数出 4 行 → **`行数 ≥ 段数` 与 `行数 ≤ 4` 同时通过**，而描述里躺着两条空行 | **`composeDescription` 先滤空段再 `join`**（§2.1）+ 断言**不存在纯空白行** |
-| **B20a**（口 3，**实测确认，已咬到 4 个文件**） | **参数描述读错层级**：`defineTool` 把参数**编译**成 JSON schema（`{ type, properties }`，见活跃坑 11），而 `Object.values(tool.parameters)` 拿到的是 `'object'` **字符串**与 properties 对象本身 → 每条 `description` 都是 `undefined` → **合计恒为 0**。上界还在时这是**恒真的**（`0 ≤ 100`）；**上界删掉之后，接住它的正是那两条下界** —— 这反过来证明「**下界才是防空转的那一半**」。**实测：本仓 5 个工具的测试里 4 个是这种写法**（`hot-reload.test.ts` 是唯一写对的） | **点进 `.properties`**（照 `test/tools/hot-reload.test.ts` 的写法）+ **参数个数 > 0** + **每个参数描述非空** + **合计 > 0** |
+| **B20a**（口 3，**实测确认，已咬到 4 个文件**） | **参数描述读错层级**：`defineTool` 把参数**编译**成 JSON schema（`{ type, properties }`，见活跃坑 11），而 `Object.values(tool.parameters)` 拿到的是 `'object'` **字符串**与 properties 对象本身 → 每条 `description` 都是 `undefined` → **合计恒为 0**。上界还在时这是**恒真的**（`0 ≤ 100`）；**上界删掉之后，接住它的正是那两条下界** —— 这反过来证明「**下界才是防空转的那一半**」。**实测：当时本仓的工具测试里有四份是这种写法**（`hot-reload.test.ts` 是唯一写对的） | **点进 `.properties`**（照 `test/tools/hot-reload.test.ts` 的写法）+ **参数个数 > 0** + **每个参数描述非空** + **合计 > 0** |
 
 **统一硬要求：空转必须判红，不许 skip**（与活跃坑 18 同族；GitHub 把 skipped 当 Success）。
 **推论（可直接抄）**：写红线时，每条都要自问一句「**我怎么把它弄成空转**」；能空转的，就把「非空」写成断言的一部分。redline-verifier 的第一版 B24 探针就是栽在这上面（deps 接错 → 六组全「通过」 → 差点得出「B24 今天已经是绿的」这个**反结论**）。
@@ -767,6 +861,44 @@ interface ToolResult { content: ContentBlock[]; isError: boolean; meta?: JsonVal
 **第 4 条与 §10 的 B24 配套读**：B24 保证「抛出去」这条路不存在；「吞掉」那条路**没有红线**，只能靠评审与变异测试。
 
 **第 5 条与 §10 的 B26 配套读**：B26 抓的是「往返会丢的那些」，抓不到「往返碰巧没丢而宿主仍拒」的（**不可枚举自有属性**就是这么一个），也会把**宿主接受的值**误判红（**null 原型对象**）。宿主那份清单在 [HOST-CONTRACTS.md](HOST-CONTRACTS.md) **§0** —— **写新投影面之前先核那一节**，别拿「B26 绿」当「宿主会收」。
+
+### 10.3 已拍板：允许插件写**自己的命名空间**，形态 **A（精确一层）**（2026-10-14）
+
+**拍板结果：形态 A** —— **只放过 `$DSH_HOME/<包名>/` 这一层**，目录名**逐字等于包名**（`dsh-plugin-debugging`），**该层以下随便分**。维护者给的形状：
+
+```
+$DSH_HOME/dsh-plugin-debugging/
+    restart/marker.json      ← `dsh_restart` 即将用（§6.1）
+    cookie/                  ← 将来要用就加
+    logs/                    ← 将来要用就加
+```
+
+**判据的形态**（`[已核]`，落地中）：从「命中任一禁止前缀 ⇒ 红」改成「**写 `$DSH_HOME` 时，只有第一个路径段逐字等于包名才放过；否则红**」。
+
+**四条必须成立的边界**（每条都要有能判红的用例）：
+
+| 情形 | 判定 |
+|---|---|
+| `join(dshHome, '<包名>', 'restart', 'marker.json')` | **放过** |
+| `join(dshHome, '<包名>', 'restart', 'nested', 'marker.json')`（更深） | **放过**（子目录随便分） |
+| `join(dshHome, 'profiles', '<包名>')`（包名在**第二**位） | **红** —— **「行里出现了包名」≠「包名是第一段」** |
+| `.../<包名>-logs/x`（同前缀**兄弟**，不是逐字相等） | **红** —— 这正是 A 与 B 的分界 |
+
+**其余一律照旧禁止**：`profiles` / `sessions` / `storages` / **`logs`（指 `$DSH_HOME/logs`，不是 `.../<包名>/logs`）** / `cache` / `attachments` / `backups` / `integrations` / `mcp` / `settings.yaml` / `.credentials.yaml` / `.salt` / `.anonymous-user-id`，以及 `$DSH_HOME` 下**任何别的**顶层项。**判断只看紧跟 home 的第一段。**
+**读一律不受影响**：诊断半边合法地读 `$DSH_HOME`（凭据、启动日志、profile 清单）⇒ 读白名单**内外**都不报。
+
+**包名不许手抄**：从 `package.json` 的 `name` 取；若硬编码，必须配一条「该字面量 == `package.json` 的 `name`」的自证。
+
+**已知限度（同批进 `test/redlines.test.ts` 文末正典表）**：
+- **动态首段无法验证** —— `join(dshHome, name, …)`（`name` 是变量）时判据只能**保守判红**。
+- 前缀表是**手抄副本** + 用例里一份独立副本逐条比对；**删一行 ⇒ 第二副本判红**（响亮），但**两处同批删同一族 ⇒ 静默失守**。
+
+**落选形态（保留为记录）**：**形态 B 前缀族白名单**（放过 `^<包名>/` **或** `^<包名>[-_.]` 开头的顶层项）—— 它额外放过 `dsh-plugin-debugging-restart/`、`dsh-plugin-debugging.tmp/` 这类**同族兄弟目录**；**落选理由**：与本插件**无关**但恰好同前缀的目录会被一起放过（同一个 `$DSH_HOME` 下多插件的命名冲突面变大）。维护者选了 A。
+
+**本节只决定「往哪写」**；「**谁清理、什么时候清理**」是**另一件**决策（决策笔记 §一 的三段分层），**未拍板**。
+**与 §6.1 的 `force` 无关**：那件（闸②的显式逃生口）**已由维护者 2026-10-14 拍板落地**，不受本节影响。
+
+**判据先立、放宽后议**：本条落地时，B10 的路径判据**只加了一条更严的规则**（原先一条路径判据都没有），**没有削弱任何现有保护面** —— 放宽要动的正是这条新判据，届时必须同批改 `HOST_DATA_PATH_SEGMENTS` 的用法与「已知限度」表。
 
 ---
 
@@ -835,7 +967,7 @@ npm pack @deepseek-ai/dsh-tools@0.1.7-rc.1     # → 解出 package/lib/types/pr
 | 可复用的图标集（`Icon*OutlineRegular`） | `@deepseek-ai/dsh-client-ui-primitives` | `lib/index.js` | 末尾的 `export { … }` 表 |
 | 官方 **keyed 卡片**范本（将来客户端半边的样板） | `@deepseek-ai/dsh-client-ui-cordis` | `lib/client.js`、`lib/types/client/slots.d.ts` | `tool.call.toolview` · `tool.view.cordis` |
 | 客户端半边怎么声明 | **任一** `@deepseek-ai/dsh-*` | `package.json` | `dsh.client` |
-| **客户端包的元数据缓存到重启为止**（加 `dsh.client` 必须重启一次） | `@deepseek-ai/dsh-client-modules` | 包内 `README`（`:72`） | `cached per Loader specifier` · `rebuilt()` |
+| **客户端包的元数据缓存到重启为止**（加 `dsh.client` 必须重启一次） | `@deepseek-ai/dsh-client-modules` | 包内 `README` | `cached per Loader specifier` · `rebuilt()` |
 | 客户端半边走**浏览器模块表**（不是 npm 解析，故宿主内层的包可得、React 同实例） | `@deepseek-ai/dsh-client-ui-tool` | `lib/client.js` | `window.__ModuleLoader__.load` · `require("react")` |
 | client 查询三态措辞（`Client failure` 的真出处） | `@deepseek-ai/dsh-cordis-host-runner` | `lib/index.js` | `Client failure` · `hasLiveClient` |
 | 「有没有在线页面」 | `@deepseek-ai/dsh-api-gateway` | `lib/index.js` | `hasLiveClient` |
@@ -848,7 +980,7 @@ npm pack @deepseek-ai/dsh-tools@0.1.7-rc.1     # → 解出 package/lib/types/pr
 
 | 要找什么 | 路径 |
 |---|---|
-| 五个工具的实现（描述 / 参数 / 契约 / `nextStep`） | `src/tools/dsh_*.ts` |
+| 各工具的实现（描述 / 参数 / 契约 / `nextStep`） | `src/tools/dsh_*.ts`（**逐个列文件、别用 glob 数个数** —— 清单真源是 `src/tools/index.ts` 注册处） |
 | 工具共享依赖 + `effectiveConfig` + 输出 schema | `src/tools/shared.ts` |
 | 模型可见渲染（现状：摘要 + 整块 JSON） | `src/lib/render.ts` |
 | 契约（`ok` / `fail` / `nextStep` / `evidence` / `ensureToolResult`） | `src/lib/errors.ts` |
@@ -878,5 +1010,6 @@ npm pack @deepseek-ai/dsh-tools@0.1.7-rc.1     # → 解出 package/lib/types/pr
 
 ### C.4 本文里带版本的引用怎么读
 
-正文里的 `文件:行号`（例：`client.js:1473`、`config.js:97-113`）**都是本机运行时 `0.2.1-alpha.2` 的快照**。
-宿主换版本后行号必然漂 —— **按 C.1 的「检索串」重找，不要按行号找**。同一条纪律见 [AGENTS.md](../AGENTS.md) 的「不抄会漂的值」。
+**行号一律不写** —— 行号换版本必漂。所有宿主结论都写成 **C.1 的「包 → 包内路径 → 检索串」**形式（检索串可直接 `grep` 命中），本仓结论写成「**相对仓根的路径 + 检索串**」。这与 [AGENTS.md](../AGENTS.md) 的「不抄会漂的值」是同一条纪律。
+
+⚠️ **但版本号必须写**（这是 [AGENTS.md](../AGENTS.md) 的硬要求：引用宿主行为要说清是哪一份宿主、什么版本）—— 它标的是**核对的时点**，不是查找键。本文里凡出现 `0.2.1-alpha.2` 这类版本号，读作「**这条结论是在那个版本的运行时上核的**」；宿主升级后按 C.1 的**检索串**重找、重核，**不要按行号找**。

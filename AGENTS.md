@@ -6,11 +6,11 @@
 
 - 版本以 [package.json](package.json) 的 `version` 为准
 - **已发布到 npm**（当前版本见 [package.json](package.json)；`latest` 与 dist-tags 以 registry 为准）。**`0.2.0` 是第一个由 `release.yml` 发出的版本**（带 provenance）；`0.1.0` 是手动发的、**没有** provenance。SLSA 徽章的真实性判据写在 [README.md](README.md) 的徽章注释里（对**具体版本**查 attestations 端点）。版本线与判例见 [docs/PUBLISHING.md](docs/PUBLISHING.md)
-- **能力面 = 1 个技能 + 6 个工具**：4 个只读（`dsh_check_effect_mode` / `dsh_diagnose_plugin_load` / `dsh_check_auth` / `dsh_dump_config`）、**1 个写侧** `dsh_hot_reload`（已实现、已真机验证；算法与关键语义见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §5）、**1 个派生** `dsh_sign_cookie`（唯一会经手秘密的工具，**cookie 值刻意不进返回值**）。**目标形态与后续工具的归属见 [docs/SHAPE.md](docs/SHAPE.md)**（`dsh_restart` 有意推迟，排在最后）
+- **能力面 = 1 个技能 + 7 个工具**：5 个只读（`dsh_check_effect_mode` / `dsh_diagnose_plugin_load` / `dsh_check_auth` / `dsh_dump_config` / **`dsh_list_instances`** —— 最后一个是 D′ 的**发现**工具：列本机活着的 DSH，**只给 authority（`host:port`）、给不出 `DSH_HOME`**）、**1 个写侧** `dsh_hot_reload`（已实现、已真机验证；算法与关键语义见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §5）、**1 个派生** `dsh_sign_cookie`（唯一会经手秘密的工具，**cookie 值刻意不进返回值**）。**目标形态与后续工具的归属见 [docs/SHAPE.md](docs/SHAPE.md)**（`dsh_restart` 排在最后）
   —— 工具清单以 [src/tools/index.ts](src/tools/index.ts) 的注册处为真源，红线 B9 钉住名字闭集。
 - **本仓是两个半边**：工具半边（`src/tools/`，都是代码）与技能半边（正文 + [src/skills/](src/skills/README.md) 的注册代码）。
   技能正文在 [skills/](skills/README.md)，它**是运行时载荷而不是文档** —— 同一目录下那两份双件才是文档，区别见那条目录的说明。
-- **「只读」纪律只覆盖诊断半边**：写侧改动必须先落决策 —— 见 [.agents/notes/2026-10-13-write-side-tool-boundaries.md](.agents/notes/2026-10-13-write-side-tool-boundaries.md)；**边界由 `test/redlines.test.ts` 的 B10（诊断半边）与 B15（写侧只许碰进程内树）守着**
+- **「只读」纪律只覆盖诊断半边**：写侧改动必须先落决策 —— 见 [.agents/notes/2026-10-13-write-side-tool-boundaries.md](.agents/notes/2026-10-13-write-side-tool-boundaries.md)；**边界由 `test/redlines.test.ts` 的 B10（只读半边：杀进程 / fs 写入 / **写宿主数据路径** / 安装面，作用域是整个 `src/**`）与 B15（写侧只许碰进程内树，窄作用域 + 更严的记号判据）守着** —— 判据才是真源，规则的**唯一例外**写在下面「诊断半边保持只读」那一条里。
 - **输出契约 = `{ verdict, key, audit }`**（顶层恰好三键，成功失败同形）。冻结签名见 [docs/SHAPE.md](docs/SHAPE.md) §4.1；`hint` 已删、`evidence` 已并入 `data`；**`error.message` 不进模型文本**（它的角色与 `verdict` 不同，见 SHAPE §4.1 的字段角色表）
 
 ## 验证快照
@@ -27,7 +27,7 @@
 - **结论必须来自实测**，不来自文档推断。引用宿主行为时写清是**哪一份真源、什么版本**
   —— 本机「在跑的宿主」与「源码检出」常常不是同一个版本。
 - **能落成校验的就不写散文**：不变量做成 `test/` 下的红线或 `scripts/` 下的检查，这里只留指针。
-- **诊断半边保持只读**：不改 profile、不写 `$DSH_HOME`、不杀进程。**写侧只做「不杀进程」的那一种**（就地换模块，失败放回旧版本）；**会杀掉宿主的重启类动作不引入**。任何越界的「顺手修一下」先落决策。
+- **诊断半边保持只读**：不改 profile、不写 `$DSH_HOME`、不杀进程。**写侧只做「不杀进程」的那一种**（就地换模块，失败放回旧版本）；**会杀掉宿主的重启类动作不引入**。任何越界的「顺手修一下」先落决策。**这条规则本身由机器判据守着**（`test/redlines.test.ts` 的 B10：杀进程 / fs 写入 / **写宿主数据路径** / 安装面四类，作用域是整个 `src/**`）；写侧的窄作用域与更严的记号判据是 B15。**唯一的例外**（维护者 2026-10-14 拍板的**精确命名空间**）：`$DSH_HOME/<包名>/` 这一层可以写 —— **只有紧跟 home 的第一段逐字等于包名**才放过（该层以下随便分；`profiles/<p>/<包名>`、`<包名>-logs` 这类**不放**）。
 - **一处一事实，别处只留指针**：一个事实有两个落点时，删掉一个。
 - **改动连带同步点**：谁引用了你改过的路径 / 名字 / 规则，同批改。双语门面（[README.md](README.md)
   与 [README_zh.md](README_zh.md)）与两份 `locale/*.json` 是典型的成对件。
@@ -99,11 +99,35 @@ git diff --check
 
 ## 待办
 
-- [ ] **`dsh_restart`（有意推迟，排在最后）**：方案见 [docs/SHAPE.md](docs/SHAPE.md) §6.1，
-      动手前先读 [docs/HOST-CONTRACTS.md](docs/HOST-CONTRACTS.md) §2（拉起与恢复的契约）。
-      **先 dry-run**；`danger-full-access` 档下 `ask` 会被确定性拒绝，语义要先定。
+- [ ] **`dsh_restart`（做，分两卡）**：方案见 [docs/SHAPE.md](docs/SHAPE.md) §6.1，动手前先读
+      [docs/HOST-CONTRACTS.md](docs/HOST-CONTRACTS.md) §2（拉起与恢复的契约）。
+      **已拍板：做真拉起**。**审批语义 = 不声明静态审批，工具自己在动作前先读档位、再决定问不问**：
+      **`ask` 档**（`read-only` / `workspace-write`）⇒ 调 `ctx.get('approval').request(...)` 走官方审批门（弹窗），
+      **只有 `allowed-once` 才算允许**（`rejected` / `cancelled` / `unavailable` **一律当拒绝**，fail-closed）；
+      **`never` 档**（= `danger-full-access`）⇒ **不问、直接执行**（并在 `key`/`audit` 记 `policy=never, not required`）。
+      ⚠️ **`never` 的含义是「提示已关闭」，不是「拒绝一切」** —— 宿主 `decide()` 里 `policy==='never'` 直接返回 `rejected`，
+      所以**在那一档主动去问 = 必然被拒**，那会把「你什么都授权了」变成「什么都不许做」（**本仓踩过、已改正**）。
+      策略读不出来 / 服务缺席 ⇒ **fail-closed**（结构化拒绝，说清无法确定档位）。
+      机制真源见 `dsh-user-approval`（`decide()` 的 `never` 分支 + `effectivePolicy()`）、
+      档位接线见 profile 的 `cordis.yml`（`danger-full-access` ⇔ `sandbox: danger-full-access` + `approval: never`）、`[已核]`。**先 dry-run**。
+      **退出通道已核（2026-10-14）**：**`ctx.get('appExit')`** —— `AppExit = (code: number) => void`，语义「**等树 dispose 完**再退」；
+      `dsh web` 的启动器**实测真的 provide 它**（`provideCmdline(hostCtx, { …, exit: (code) => void shutdown.shutdown(code) })`）；
+      ⚠️ **别用 `process.exit`**（源码点名那条路 bypassing `ctx.appExit`），**取不到要转成结构化失败**（B24）；
+      **顺序：先 `await` 完 marker 的写，再调 `appExit`**。分级见 [docs/HOST-CONTRACTS.md](docs/HOST-CONTRACTS.md) §2.6。
+      **审批门的位置也是判据**：四道确定性闸门**全过之后**才轮到它，且实现要**两段式**（先 `dryRun` 探闸门不落盘 → 审批 → 再落盘）——
+      因为 `planRestart` 把「四道闸」与「写 marker」收在同一个入口里。**恢复是把 marker 标为已消费，不是删除**（宿主 `fs` 没有删除方法）。
+      落地分两卡：**库半边**（`src/lib/restart.ts`：marker 读写 + 四道闸 + 恢复判定，纯函数 + 注入面）与
+      **工具壳 + 注册**（壳要满足 `{verdict,key,audit}` 三键与 B24；注册要**同批**改 `EXPECTED_TOOLS` 的
+      **四份副本** + `toolShapes()` 等长，见 `test/redlines.test.ts` 的 B9）。
       （`dsh_hot_reload` 已完成并真机验证，已从本清单移除 —— 设计与宿主事实分别见
       [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §5 与 [docs/HOST-CONTRACTS.md](docs/HOST-CONTRACTS.md) §1。）
+- [ ] **`dsh_restart` 与「发现工具」的验证方式已定：隔离实例上验，不进 CI**（维护者 2026-10-14）。
+      理由同 [test/integration/README.md](test/integration/README.md) §0：要真起服务、要空闲端口、要 junction。
+      ⇒ 「重启 → 会话被唤醒 → notice 到达发起者」那条真机闭环**只能是本机红线**。
+- [x] **客户端半边（`dsh.client` + keyed `tool.call.toolview`）→ 维护者 2026-10-14 拍板：不做**。
+      它只影响**人**通道、不影响模型；而代价不小（新构建产物要进 `files` 并过 `check:release`、
+      keyed 条目要在 call/result 两侧可重放、加 `dsh.client` **要重启宿主一次**）。
+      [docs/SHAPE.md](docs/SHAPE.md) §8.5 / §9.2 的记录保留为「已评估、不做」，**不要再排进队列**。
 - [ ] **技能压过用户级同名技能**：已实现（**动态 scope 注入**：技能同时注册进全局层与每个活跃 agent
       的 preset 作用域，与 `skill-filesystem` 同层 → rank 250 才真正赢）。静态写进 preset 组合的方案
       **已实测否决**（坏包会让默认 standard 会话建不起来）。决策见
@@ -138,9 +162,11 @@ git diff --check
       `sharedSubstrings` 三条各从 5/5/3 份合成 1 份，`test/tools/helpers.ts` 只增不改既有导出。
       实测净减 **183 行**（此前估的 350–500 与更早的 800–1000 都偏高：这三条助手本体只有 3–18 行，
       大头是各自的注释，而接收方要一次性付掉定义成本）。**用例数前后未变**，即没有丢断言。
-      ⚠️ **尚余一处**：`test/redlines.test.ts` 里的 `withPlatformRedline` 与 `helpers.ts` 的
-      `withPlatform` 逐字同构，且该文件文末「已知限度」第 29 条写着「收敛那笔债时连它一起收」——
-      债还了要把那条**删掉**，不是留着。
+      ⚠️ **尚余一处**：`test/redlines.test.ts` 里的 `withPlatformRedline` 与 [test/tools/helpers.ts](test/tools/helpers.ts) 的
+      `withPlatform` **语义同构、但不是逐字同构**（2026-10-14 实测三处差异：`fn` 的类型一个是 `() => Promise<T>`、
+      另一个是 `() => Promise<T> | T`；拿不到属性描述符时的错误文案一个英文一个中文；一个 `export` 一个不导出）。
+      收敛时**按「语义同构」判**，别按逐字比对 —— 逐字比对会得出「要改」，而改哪一份都得先定这三处的取舍。
+      且该文件文末「已知限度」第 29 条写着「收敛那笔债时连它一起收」—— 债还了要把那条**删掉**，不是留着。
 - [ ] **两条独立复验留下的残余**（都不影响模型决策，方向安全，故未阻塞发布）：
       ① `resolvedDir` 对 `link:` 包报 realpath，偏离宿主的 `packageDirFromAnchor`（只进 `audit`，不进 `key`）；
       ② 凭据存在性扫描对 `records` 段内**更深层**的同名键会判 true（需 `grant` + 同名键同时出现才触发）。
@@ -348,3 +374,16 @@ git diff --check
     同族于第 11 条（`defineTool` 编译 schema）与第 18 条（假绿）。**取法**：读 `parameters.properties`，
     并配**两条下界** —— 「参数个数 > 0」「每个参数描述非空」「合计 > 0」，否则换个写法照样空转。
     **上界删掉之后，参数描述的质量归人工评审**（SHAPE §10.1 第 4 项：自问「模型看不到会不会填错」）。
+40. **测试替身被静默丢弃 ⇒ 判据退回真实世界**（本轮 `task-26` 真踩，且**危害形状是反的**）：
+    把 `signatureFetch` 塞进 `depsFor(config, { ... })` 的 **overrides 形参** —— 那个形参的**类型里没有它**，
+    而**对象展开不受多余属性检查**约束 ⇒ 替身**被静默丢掉**，探针退回**真的全局 `fetch`**。
+    于是那条判据打到了 `127.0.0.1:3080` 上的**活宿主**、真读回了签名 —— **它是靠真机通过的**。
+    ⇒ **绿得更有说服力，实际测的不是你的夹具**，而且**测试开始依赖外部世界的状态**（换台机器/宿主没起就红）。
+    **取法（照抄）**：① overrides 用**显式对象构造**（`{ ...deps, signatureFetch }`）而不是往窄类型的形参里塞多余字段；
+    ② **给替身配调用计数并断言它真被调用过** —— 本仓 B24 的注入组本来就是这么写的（`calls()` 计数）。
+    一般化：**「替身没生效」与「替身生效了」在绿的时候长得一样** —— 与第 18/27 条同族。
+    ⚠️ **这不是新坑，是本仓第二次踩**：[docs/SHAPE.md](docs/SHAPE.md) §10 里 B24 的那条配套硬要求记着同一个形状
+    （「替身被调用次数 = 0 必须判红，不许 skip」—— 那次是 **B24 探针**在 `probe()` 里另造了一份 deps、
+    注入被丢掉 ⇒ 六组全「通过」⇒ **差点得出「B24 今天已经是绿的」这个反结论**）。
+    ⇒ **两处合起来才是完整判据**：**替身要真的被接上**（构造方式）+ **被调用过**（断言计数）。
+    （附带一条**真实证据**：本机 3080 上的宿主确实返回那句 DSH 专有签名 —— 发现工具的判据因此顺带被真机确认过一次。）

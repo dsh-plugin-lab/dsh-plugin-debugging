@@ -162,8 +162,10 @@
    ⚠️ 这是**不可逆**失败（对话、进程、端口全丢），所以它必须是最先被测的一条。
 
 2. **端口等待不能用固定 sleep 当唯一手段**：`delayMs + 800` 是「先睡够，大概率够了」。
-   端口释放时间随机器而变 ⇒ 固定 sleep 在慢机上不够（`listen` 抛 EADDRINUSE，宿主**不重试**）。
-   推荐：**轮询直到端口可 bind，超时判失败**（失败要有 log 与 marker，不静默）。
+   端口释放时间随机器而变 ⇒ 固定 sleep 在慢机上不够。**真因是宿主根本不重试**：
+   `dsh-host-webserver/lib/index.js:438-448`（`0.2.1-alpha.2`）先 `this.server.once('error', reject)` 再 `listen(...)`
+   —— 任何 bind 失败（`EADDRINUSE`）⇒ **boot 直接失败**，不是「晚一点就好」。
+   推荐：**轮询直到端口可 bind，超时判失败**（失败要有 log 与 marker，不静默）。见台账 C11。
 
 3. **别的会话在飞时拒绝重启**（维护者 2026-10-14 拍板）。判据与它踩过的坑见第八节。
 
@@ -233,6 +235,76 @@ return { allowed: inFlight.length === 0 || force, inFlight }
 2. 该字段来自 `TurnBoundaryProjection`，**不是** `readSessionEvents`（后者在宿主里不存在）；真源是
    `ctx.sessionQuery.listEvents(sessionId)` / `readSession()`。
 
+## 九、job object：宿主**在** job 里；子进程在不在，**取决于走哪条 spawn 路径**（2026-10-14 补测；同日被独立复现改正**三次**）
+
+⚠️ **本节被 `gate-verifier` 的独立复现改正过三次**。真源 `0.2.1-alpha.2`、宿主 pid 612。
+**第一次（task-14）**：原结论写「宿主的孩子不在那个 job 里 ⇒ helper 不会被收掉」—— **那是错的**，错法是**样本偏差**（只查了「启动器 pwsh + 两个终端」，这三个**恰好**不在 job 里，却被推广成「宿主的子进程都不在」）。
+**第二次（task-18）**：**`task-8` 把 `err=5` 归因于「宿主 job 缺 `0x800`」—— 归因对象搞错**。宿主 job 其实**有** `0x800`。
+**第三次（task-21，性质不同：不是结论错，是读数本身无效）**：`task-17` 的「runner job」读数**已撤回**（`NULL` 句柄语义，见下表第一行）；**WMI 改判「不能判定」**；**代起三路线新增为可用**。⚠️ **宿主 job 那一侧的句柄是验证过的（`0x3C00`、对照 `explorer→0`/`host→1`）⇒ 关于宿主 job 的结论不撤。**
+
+| 事实 | 证据 | 对设计的含义 |
+|---|---|---|
+| ⚠️ **`NULL` 句柄语义（可复用的宿主语义）** | **`QueryInformationJobObject(NULL,…)` 问的是「调用者自己的 job」**；**`IsProcessInJob(x, NULL)` 问的是「任意 job」**。复现者自纠：`FindJob(pid)` 在**该 pid 不持有 job 句柄**时返回 `IntPtr.Zero`，于是把 `IsProcessInJob(x, NULL)` 当成了「x 在那个 job 里」，**静默降级成 `inAnyJob`**；**是它自己的对照组抓到的** —— `explorer` 也读出 `inRunnerJob=1`，不可能 `[task-19 自纠]` | ⚠️ **拿 `NULL` 当「目标进程的 job」会静默读成「任意 job」**。报 job 成员身份**必须持有那个 job 的句柄**，否则只能报 `inAnyJob` 并**标明它不是 job 专属** |
+| **宿主在 job object 里**（✅ 保留） | `IsProcessInJob(host, NULL)=1` + **复制宿主持有的句柄**读到 flags `[已实测]` | 前提成立，不能忽略 |
+| **那个 job 是 `0x00003C00`**（✅ 保留，句柄已验证） | `KILL_ON_JOB_CLOSE`/`SILENT_BREAKAWAY_OK`/`BREAKAWAY_OK`/`DIE_ON_UNHANDLED_EXCEPTION` **四位全开** `[已实测]` | 看着很危险 |
+| ⚠️ **改正：「孩子不在其中」不成立**（原写「宿主的孩子不在那个 job 里」，**已删**） | 按 `ParentProcessId=612` 取**真子进程**逐个查该 job：`20124`(imagegen-mcp) / `19960`(cli-proxy-api) / `21812`(runner.js) **全部 = 1（在）**；= 0 的是**启动器 pwsh（它是父）**与持久终端 `[已实测：task-14]` | **在不在 job 里是按进程 / 按 spawn 路径的** ⇒ **不许推广** |
+| ⚠️ **撤回：「持有者是沙箱 runner、`0x2000`」读数无效**（原 task-18 写的断言，**降级**） | 能站住的只有：**探针自己「在某个 job 里」、该 job `Flags=0x2000`**。**持有者身份**与**「哪些进程在那个 job 里」都没验证** —— 原判据用了 `NULL` 句柄（见本表第一行），而 `0x2000` 那个值也来自 `QueryInformationJobObject(NULL,…)`（= **调用者自己的 job**）`[读数无效 / 已撤回：task-19]` | **`task-8` 的 `err=5` 成因（调用者 job 缺 `0x800`）不受影响**（那是受控复现）；但**「谁持有那个 job」不许再当结论** |
+| **`CREATE_BREAKAWAY_FROM_JOB` 成因（受控复现夹死）**：调用者 job **缺 `0x800` ⇒ `err=5`；有 `0x800` ⇒ 成功** | 自建**与宿主逐位相同**的 job（`0x3C00`）、把 helper `AssignProcessToJobObject` 进去（先验 `InJob=1`）：`0x2000` 内不带 flag → OK（对照有效）；`0x2000` 内带 `0x01000000` → **err=5**（与 task-8 一致）；`0x3C00` 内不带 flag → OK 且不在 job；`0x3C00` 内带 `0x01000000` → **OK（无 err）** `[受控复现：task-17]` | ⚠️ 有信息量的是「**没有 err=5**」，不是成员判定。⚠️ **受控复现 + 规则一致，不是宿主上下文直接实测** |
+| **本插件自己的 spawn 也逃不出** | `src/lib/exec.ts` 的 spawn 产出：`--dump-config`(pid 12952) → `InJob(child, 宿主job)=1`；`--dump-config-schema`(pid 11016) → **1**；对照 `explorer=0`，宿主句柄表只有一个 job 句柄 `[已实测：task-16]` | ⇒ **`{detached:true}` 不能当逃生手段**；helper 若走 `exec.ts` 那条路，**它会落在宿主 job 里** |
+| ⚠️ **WMI `Win32_Process.Create` —— 改判「不能判定」**（原写「没脱离 ⇒ 不能当逃生依据」，**已撤**） | 有效读数只有 `inHostJob=**0**`、`inAnyJob=1` ⇒ **子进程不在宿主 job 里**；**它在哪个 job 未知** `[实测：task-19 改判]` | **既不能说它是逃生手段，也不能说它不是**。边界保留：`rc=0` 假成功**本次未复现**；只在**受限令牌**上下文测过 |
+| ✅ **降级路径三条「代起」路线实测能用**（task-21 新增） | **[A] 计划任务 `schtasks`**：`/create` `/run` `/delete` 全 `exit=0`；**受限令牌下不需提权**；被起进程 parent = **`svchost.exe`（Task Scheduler）**，`inHostJob=0`，其 `PING.EXE` 子进程同为 0 ⇒ **逃出宿主 job ✓**。**[B] `explorer.exe` 代起**：真起了（查了进程，非只看 rc），`inHostJob=0` ✓。**[C] 在-job 的 PowerShell 中间进程 + `Add-Type` + `CreateProcess(0x01000000)`**：`Add-Type` **346 ms**、受限令牌下可用；带 flag → **`OK`、无 `err=5`** `[实测：task-19]` | **三条都能用现成的 `src/lib/exec.ts` spawn 实现，不需要原生绑定**。⚠️ **边界不许省**：三条**都只对「宿主 job」验到 0**；**是否也在另一个 job 里未知**（`inAnyJob=1`）—— **若那个 job 也带 `KILL_ON_JOB_CLOSE` 且持有者会死，风险仍在（复现者明确说没测出来）**。⚠️ 没能在**宿主进程内发起**任何一条 ⇒「从宿主 job 内发起会怎样」仍是**受控复现 + 语义**；[C] 用的也是**自建同 flags job** |
+| **宿主 runner 的守卫行为**（顺带记） | 复现者触发过一次：`subprocess-local: Windows Job runner exited … before proving its managed range empty`；原因是**调用结束时还有子进程留在 runner 的 job 里** `[实测：task-19]` | **runner 退出前要求其 job 范围被证明为空；留下成员会触发该守卫** |
+| ⚠️ **一条未解释的冲突**（照实记，**不编机制**） | `task-16` 实测 `exec.ts` 的孩子**进了** `0x3C00` 宿主 job，而受控复现说「`0x3C00` 成员不带 flag 创建的**应当脱离**」—— 冲突，**复现者明确表示无法解释** `[无法判定]` | **待插件内实测钉死**；在此之前不许拿任一边当结论 |
+| **`detached` 逃不出 job；`Start-Process -WindowStyle Hidden` 也不是逃逸手段**（✅ 保留） | `DETACHED_PROCESS`(0x8) → 仍 `inJob=1`；`dsh-restart/src/relaunch-helper.ts:53-87` 全程无 breakaway 标志 `[已实测+源码]` | **`Start-Process` 只解决「不闪控制台」** |
+| ⚠️ **「在 job 里」推不出「会被收掉」**（✅ 保留） | detached 孙进程在持有 KILL job 的 runner 与我的 pwsh **都退出后仍存活并 LISTEN**；`dsh-subprocess-local/lib/runner.js:298-302` 只在 job **空**时关句柄，非空**不** `terminateJob` `[已实测+源码]` | 判据是「**谁持有句柄**」+「**那个具体进程在不在 job 里**」 |
+
+**删掉的两处**：
+- ❌ **`ActiveProcesses=3`** —— 复现者连续读到 **6→5→4**，且**每次都与全系统枚举当时的值一致**（⇒ API 可信，是我的单点采样不可用）。**任何「job 里有几个进程」都要同刻与枚举对照。**
+- ❌ **「必须用持久终端才能读 job」** —— 复现者从**工具调用的沙箱 runner** 里 `OpenProcess` 打宿主**成功**、整套探针跑通；我当初读到的 `err=87` **不可复现**。**两条路都能读。**
+
+**判据要求随之改（第三次补正）**：原来写「**两个 job 都 0** 才算逃出去」—— **现在只能是「宿主 job 必须 0」**；另一个 job **拿不到有效句柄 ⇒ 只能报 `inAnyJob` 并标明它不是 job 专属**。
+
+**保留的落地结论**：① **不用改插件就能读**（两条路都行）⇒ 没有「依赖解析不到 ⇒ 六把工具整个消失」的代价；② **插件侧读不到** `@deepseek-ai/dsh-win32-process` 与 `koffi`（都 `ERR_MODULE_NOT_FOUND`）—— **这条未被推翻**。
+
+**影响段（2026-10-14 第三次改写）**：
+**`CREATE_BREAKAWAY_FROM_JOB` 机械上成立（宿主 job 有 `0x800`），但 Node 的 `child_process.spawn` 无法传创建标志**（`detached:true` 只加 `DETACHED_PROCESS`；本仓 `src/lib/exec.ts:60` 就是原生 `spawn`），原生绑定（`dsh-win32-process` / `koffi`）**从本仓解析上下文都 `ERR_MODULE_NOT_FOUND`**；宿主树里也**没有** `child_process` 补丁。
+⇒ **降级路径的可行方案已实测出三条**：**计划任务（首选** —— 无需提权、parent 是 svchost、`inHostJob=0）与 **explorer 代起**；另有 **PowerShell 中间进程 + `Add-Type` 代发 breakaway**（机制成立但成本更高，`Add-Type` 约 **346 ms**）。三条都**能用现成的 `src/lib/exec.ts` spawn 实现，不需要原生绑定**。
+⚠️ **但「是否也在另一个 job 里」未测**（`inAnyJob=1`）⇒ **helper 的长期存活仍需在插件内真机实测钉死**，**不许把本条当已排除风险**。
+⇒ **helper 的存活路径不能靠「孩子会脱离」（已实测它在宿主 job 里），也不能直接靠 breakaway 标志（spawn 传不了）；必须单独实测钉死。**
+
+**仍测不了 / 待实测**：Windows **服务化**部署下 job 的归属与服务侧 `KILL_ON_JOB_CLOSE` 行为；按名杀 `taskkill /IM`（两者都会误伤维护者在用的进程 ⇒ 本机不做）；**helper 的长期存活（「是否也在另一个 job 里」未测）**。
+（**已不再待测**：代起三条路线 —— `task-19` 已实测能用，见上表。）
+
+## 十、恢复与投递：两条被推翻的前提（2026-10-14 补测）
+
+1. ⚠️ **Web profile 没有 `--resume`**：`dsh-web-app` / `dsh-web` 的 `lib/index.js` 里 `resume` **0 命中**，`dsh/lib/bin.js` 只在帮助里写 `dsh tui --resume <session>`。
+   ⇒ **「把 `sessionIds` 拼进 `launchCommand`」是死路**（原方案的隐含前提不成立）。进程内入口只有 `ctx.agents.resume({resumeSessionId})`；**真触发者是客户端重开会话**。
+2. ⚠️ **`agent/session-start` 在本机不存在**（全 `@deepseek-ai/*` grep 0 命中）⇒ **参考 README 的投递通道不可照抄**。本机可用的是 `agent.followup(UserMessage)` + source `form:'notice'`，宿主自己就这么投。
+3. **`sessionIds[]` 的角色要写准**：它是「**等哪些会话**」的名单，**不是**「怎么把它们拉起来」。等不到是**正常分支** ⇒ 必须留 log；`dsh-restart` 那种「60s 超时后清 marker」会把证据一起删掉。
+4. **重启耗时只有下界**：13:04:00 启动器创建 → 13:04:06 新宿主创建 ≈ **6.0 s**；「端口可服务」那一刻没抓到 ⇒ **别把 6 s 当 helper 该等的时间**（见台账 C14）。
+
+## 十一、marker 的落盘通道：会话日志**够用**，§6.1 那条理由已消解（2026-10-14 核）
+
+⚠️ **本节纠正第二节（目录结构）与 `SHAPE §6.1` 的一个前提**。原文说「marker **必须是独立文件**，不能写进会话日志」，理由是坑 4（自定义 `SessionEventMap` 成员 + `session.append()` 会写坏日志）。**核下来：坑 4 自己给的补救办法 `appendPluginRecord()` 是官方的、且读取侧真的放行。**
+
+| 环节 | 事实 | 源码 |
+|---|---|---|
+| 写入 | `appendPluginRecord(session, type, data)`，`dsh-session` **公开导出**；`type` 必须合 `plugin:` 文法；`data` 必须无损 JSON | `dsh-session/lib/index.js:1293-1295`、文法 `:1246`、`data` 校验 `:1547-1548` |
+| **强制 `ignorable`** | 记录里**硬写** `ignorable: true` | 同文件 `:1555` |
+| **读取侧放行**（这是关键） | `if (!KNOWN_SESSION_EVENT_TYPES.has(event.type) && event.ignorable !== true) throw unsupported("… not marked ignorable; refusing to interpret the log …")` ⇒ **未知类型 + `ignorable===true` 被保留并跳过，不拒绝整份日志** | `dsh-session-persistence/lib/index.js:184` |
+| 读回 | `pluginRecordOf(event)` → `{type, seq, time, data}`（要求 `ignorable===true` 且类型合文法） | `dsh-session/lib/index.js:1304-1313` |
+| 重启后找得到 | 宿主有列会话服务：`sessionQuery.listSessions()` | `dsh-session-query/lib/index.js:1043/1048/1072`；底层 `:107`/`:287` |
+| **`spillStore` 不行** | 每进程 `mkdtempSync(tmpdir()/dsh-spill-)`，且**启动时清扫**（"Startup cleanup mechanics"）⇒ **重启后不保证还在** | `dsh-spill-local/lib/index.js:35`、`:107-124`、`:311` |
+| `presentationMeta` ≠ 它 | 那是 `defineTool` 的**输出呈现回调**，**不写会话日志** | `dsh-tools/lib/index.js:843`、`:860-862` |
+
+**⇒ marker 有合法落点，且不必放宽任何东西**：通道 `appendPluginRecord(session, 'plugin:<包名>/restart-marker', data)` → 落在**会话日志**里（由 `dsh-session-persistence-jsonl` 持久化）→ 重启后 `sessionQuery.listSessions()` + `pluginRecordOf` 读回。**不写文件、不碰 `$DSH_HOME` ⇒ 不触发 B10。**
+
+⚠️ **两个还没定的设计点（别当成已解决）**：
+1. **没有找到「按类型索引」的读入口** ⇒ 可能要**逐会话读日志**找 marker，代价随会话数增长（未核）。
+2. **marker 记的是「等哪些会话」，而记录本身住在某个会话里** —— 「谁持有 marker」这一步**未定**（写进调用方会话？还是每个在飞会话各写一条？）。
+
+⇒ 给维护者的建议（**`docs/SHAPE.md` 是 Lead 独占，我没动**）：**§6.1 的「必须独立文件」前提可以撤**，改写成「marker 落**会话日志**（`appendPluginRecord`），读回走 `pluginRecordOf`」；第二节「目录结构」里那套 `$DSH_HOME/<包名>/restart/` 方案**随之不必**（也就不必放宽 B10）。
+
 ## 影响
 
 - B10 措辞 + 判据是**前置**（第一节），不是顺手。
@@ -243,6 +315,13 @@ return { allowed: inFlight.length === 0 || force, inFlight }
   本仓自己早就这么做了：`dsh_check_effect_mode` 的「产物 mtime vs 进程启动时刻」是同一族。
 - **不可照抄**：`delayMs + 800` 固定 sleep（端口释放时间随机器而变）。
   ~~`activeAgentGuard` 的 `status === 'running'`~~ —— **这条已撤**：`status` 本机读得到，那段判据可以照抄（见第八节）。
+  **新增两条（2026-10-14）**：① **别把 `Start-Process -WindowStyle Hidden` 当 job 逃逸** —— 它只解决「不闪控制台」（第九节）；
+  ② **别照抄参考 README 的 `agent/session-start` 投递通道** —— 本机没有这个事件名（第十节）。
+- ⚠️ **job 那条推理不能承重（2026-10-14 三轮独立复现改正后新增）**：原先想用「宿主的孩子不在 job 里」推出「helper 不会被 `KILL_ON_JOB_CLOSE` 收掉」——
+  **那条前提已被证伪**；而且**本插件 `src/lib/exec.ts` 的 spawn 已实测其孩子就在宿主 job 里**（task-16）。⇒ **helper 的存活判据必须落到「helper 实际那条 spawn 路径」上单独实测**，不许从「它是个子进程」推。
+  另外**别指望 `CREATE_BREAKAWAY_FROM_JOB` 救场**：它机械上成立（宿主 job 有 `0x800`），但 `child_process.spawn` **传不了创建标志**；
+  ⇒ **降级路径已有三条实测可用的代起方案**（计划任务首选 / explorer / PowerShell 中间进程 + `Add-Type`），**都能用现成的 `exec.ts` 实现**；
+  ⚠️ **但它们「是否也在另一个 job 里」未测** ⇒ **长期存活仍要插件内真机实测**。（全部读数见第九节。）
 
 ## 拍板记录（维护者，2026-10-14）
 
