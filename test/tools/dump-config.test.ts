@@ -41,6 +41,7 @@ import {
   tempDshHome,
 } from './helpers.ts'
 import type { CommandResult, RunCommandOptions } from '../../src/lib/exec.ts'
+import { toolBudgetMs, TRANSPORT_MARGIN_MS } from '../../src/lib/timeouts.ts'
 
 /** 组合树：第 181 个条目是 agent-preset-registry，182 是 preset-standard。 */
 function composedConfig(): string {
@@ -149,7 +150,9 @@ describe('dsh_dump_config', () => {
       }
       const props = parameters.properties ?? {}
       const names = Object.keys(props)
-      expect(names.length, '一个参数都没读到 —— 判据空转').toBe(1)
+      // 精确闭集（不是个数）：加/删参数都要同批改这里。`dshHome` 是跨实例观察那个接缝
+      // （`docs/SHAPE.md` §1.2 的 D′），它的存在本身就是契约的一部分。
+      expect(names, '一个参数都没读到 —— 判据空转').toEqual(['profile', 'dshHome'])
       for (const name of names) {
         expect(props[name]?.description ?? '', `参数 ${name} 的描述是空的`).not.toBe('')
       }
@@ -169,6 +172,85 @@ describe('dsh_dump_config', () => {
       expect(boundary).toContain('judge by path')
       // 旧的「每次输出都印一遍」的字段名不许再出现在描述里。
       expect(composeDescription(DUMP_CONFIG_DESCRIPTION)).not.toContain('exitCodeSemantics')
+    })
+  })
+
+  describe('跨实例（D′ 第②块）：dshHome 参数', () => {
+    it('给了 dshHome ⇒ 它进 resolved 且来源是 `tool-argument`（不许印成 config/default）', async () => {
+      const home = await tempDshHome()
+      const other = 'C:\\other-dsh-home'
+      const recorded = recordingSpawn(() => cmdResult({ stdout: composedConfig() }))
+      const tool = createDumpConfigTool(depsFor(configFor(home), { spawn: recorded.spawn }))
+      const data = expectOk(await run(tool, { dshHome: other }))
+      const resolved = data.key['resolved'] as Record<string, unknown>
+      expect(resolved['dshHome']).toBe(other)
+      // 三值纪律：参数来的值**不许**印成配置 / 默认值 —— 否则「它在读另一个实例」这件事消失。
+      expect(resolved['dshHomeSource']).toBe('tool-argument')
+    })
+
+    it('**子进程环境**真的注入了 DSH_HOME（只断言「参数进了返回值」是假绿）', async () => {
+      // 这是本卡最容易漏的那一层：`runDump` 走 `deps.spawn`，而 `lib/exec.ts` 的 `env`
+      // 默认 `process.env`。只加参数不注环境 ⇒ 子进程读回**本进程**的 home，
+      // 而 `resolved.dshHome` 印的却是参数值 —— 那正是「看着成功、读的是另一个目录」。
+      const home = await tempDshHome()
+      const other = 'C:\\other-dsh-home'
+      const recorded = recordingSpawn(() => cmdResult({ stdout: composedConfig() }))
+      const tool = createDumpConfigTool(
+        depsFor(configFor(home), { spawn: recorded.spawn, env: { PATH: '/x' } }),
+      )
+      expectOk(await run(tool, { dshHome: other }))
+      // 走**完整入口**（真跑一遍工具），断言的是**底层 spawn 收到的参数** ——
+      // 不是某个中间变量、也不是返回值里的影子字段。
+      expect(recorded.calls.length).toBeGreaterThan(0)
+      for (const call of recorded.calls) {
+        expect(
+          call.env?.['DSH_HOME'],
+          `子进程没拿到参数里的 home：${JSON.stringify(call.env)}`,
+        ).toBe(other)
+      }
+    })
+
+    it('没给 dshHome ⇒ 子进程照样拿到**本次认的** home（配置那个），来源仍是 config', async () => {
+      // 「永远注入」那一半：工具报的 home 与子进程读的 home 不许是两回事。
+      const home = await tempDshHome()
+      const recorded = recordingSpawn(() => cmdResult({ stdout: composedConfig() }))
+      const tool = createDumpConfigTool(
+        depsFor(configFor(home), { spawn: recorded.spawn, env: {} }),
+      )
+      const data = expectOk(await run(tool, {}))
+      const resolved = data.key['resolved'] as Record<string, unknown>
+      expect(resolved['dshHomeSource']).toBe('config')
+      for (const call of recorded.calls) expect(call.env?.['DSH_HOME']).toBe(home)
+      // 反面：环境是**新对象**，不是被就地改过的 `process.env`（那会跨调用泄漏、且是写侧动作）。
+      expect(recorded.calls[0]?.env).not.toBe(process.env)
+    })
+
+    it('空串 / 全空白与没给等价（不覆盖）：不许拿一个空 home 去读文件', async () => {
+      const home = await tempDshHome()
+      const recorded = recordingSpawn(() => cmdResult({ stdout: composedConfig() }))
+      const tool = createDumpConfigTool(depsFor(configFor(home), { spawn: recorded.spawn }))
+      const data = expectOk(await run(tool, { dshHome: '   ' }))
+      const resolved = data.key['resolved'] as Record<string, unknown>
+      expect(resolved['dshHome']).toBe(home)
+      expect(resolved['dshHomeSource']).toBe('config')
+    })
+
+    it('失败时重试参数带上 dshHome（否则重试会问到另一个实例，而输出长得一样）', async () => {
+      const home = await tempDshHome()
+      const other = 'C:\\other-dsh-home'
+      const recorded = recordingSpawn(() =>
+        cmdResult({ code: null, timedOut: true, stderr: 'boom' }),
+      )
+      const tool = createDumpConfigTool(depsFor(configFor(home), { spawn: recorded.spawn }))
+      const result = await run(tool, { dshHome: other })
+      const failed = expectFail(result)
+      const next = failed.nextStep
+      expect(next !== undefined && 'tool' in next ? next.tool : undefined).toBe(DUMP_CONFIG_TOOL)
+      if (next !== undefined && 'args' in next) {
+        expect(next.args).toMatchObject({ dshHome: other })
+      }
+      // B17：这个值必须在模型看得见的地方出现（L2 的 `resolved:` 行就是它出现的地方）。
+      expect(splitRender(renderText(tool, {}, result)).l2.join('\n')).toContain(other)
     })
   })
 
@@ -794,13 +876,21 @@ describe('dsh_dump_config', () => {
       const tool = createDumpConfigTool(depsFor(config, { spawn }))
 
       await run(tool, {})
+      // 本工具走**慢档**（它跑 `--dump-config-schema`），所以刀口在 `schemaDumpTimeoutMs`
+      // 上，而不是 `timeoutMs` —— 后者是快档工具那一档的数（见 `lib/timeouts.ts` 的唯一映射点）。
+      const budget = toolBudgetMs('schemaDump', config)
+      expect(budget).toBe(config.schemaDumpTimeoutMs)
+      expect(tool.timeoutMs).toBe(budget)
       const first = calls[0]?.timeoutMs ?? 0
       const second = calls[1]?.timeoutMs ?? 0
       expect(first).toBeGreaterThan(0)
       expect(second).toBeGreaterThan(0)
-      expect(first).toBeLessThan(config.timeoutMs)
-      expect(second).toBeLessThan(config.timeoutMs)
-      expect(tool.timeoutMs).toBe(config.timeoutMs)
+      // 「传输必须先于工具」：两条命令都得留出余量（`TRANSPORT_MARGIN_MS`）。
+      expect(first).toBeLessThan(budget)
+      expect(second).toBeLessThan(budget)
+      expect(budget - first).toBeGreaterThanOrEqual(TRANSPORT_MARGIN_MS)
+      // 只改了快档 ⇒ 慢档**不许**跟着动（两档是两件事）。
+      expect(toolBudgetMs('quick', config)).toBe(15_000)
     })
 
     it('profile 参数会传进两次 dump 的命令行', async () => {

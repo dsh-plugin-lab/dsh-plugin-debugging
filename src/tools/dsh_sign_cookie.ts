@@ -27,6 +27,7 @@
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools'
 
 import { fail, ok, toToolError, type JsonValue } from '../lib/errors.js'
+import { toolBudgetMs, type Workload } from '../lib/timeouts.js'
 import { readTextIfExists } from '../lib/profile.js'
 import { credentialsPath } from '../lib/profile.js'
 import {
@@ -43,12 +44,16 @@ import {
   resolvePort,
   toOutput,
   toolOutput,
+  withCallHome,
   type EffectiveConfigBlock,
   type ToolDeps,
 } from './shared.js'
 
 /** 工具名。 */
 export const SIGN_COOKIE_TOOL = 'dsh_sign_cookie'
+
+/** 本工具的工作量档：读一个文件 + 一次纯计算，**快档**。 */
+const WORKLOAD: Workload = 'quick'
 
 /** 401 那条路上「拿 cookie 去重试」的工具名。 */
 const CHECK_AUTH_TOOL = 'dsh_check_auth'
@@ -59,6 +64,14 @@ interface SignCookieArgs {
   host?: string
   /** cookie 寿命（天）。省略 = 30（宿主默认）。 */
   maxAgeDays?: number
+  /**
+   * 另一个实例的 `DSH_HOME`（跨实例观察，SHAPE §1.2 的 D′）。
+   *
+   * 它决定**读哪个 `.credentials.yaml`** —— 也就是「用谁的密钥签」。独立 `DSH_HOME`
+   * 意味着独立 credentials ⇒ 独立 cookie secret（SKILL §3.4 的边界），所以这个参数
+   * 真正能换出一个「另一个实例认的 cookie」。
+   */
+  dshHome?: string
 }
 
 /**
@@ -135,10 +148,15 @@ export function createSignCookieTool(deps: ToolDeps): ToolDefinition {
         type: 'integer',
         description: 'Cookie lifetime in days; omit for the host default of 30.',
       },
+      dshHome: {
+        type: 'string',
+        description:
+          "Another instance's DSH_HOME, whose signing key is used. Omit for the configured one.",
+      },
     },
     output: toolOutput(SIGN_COOKIE_TOOL, TABLE),
 
-    timeoutMs: deps.config.timeoutMs,
+    timeoutMs: toolBudgetMs(WORKLOAD, deps.config),
     isConcurrencySafe: () => true,
 
     async execute(rawArgs, exec) {
@@ -171,10 +189,14 @@ async function issueCookie(
   signal: AbortSignal,
   deps: ToolDeps,
 ): Promise<JsonValue> {
-  const missing = assertResolvedDshHome(deps.config)
+  // 本次调用认的实例（参数优先）。下面每一处 `deps.config` 都换成 `call.config` ——
+  // 唯一要保证的是**读密钥那条路径**跟着换，否则签出来的 cookie 属于另一个实例。
+  const call = withCallHome(deps, args.dshHome)
+
+  const missing = assertResolvedDshHome(call.config)
   if (missing !== undefined) return toOutput(missing)
 
-  const resolvedPort = resolvePort(args.port, deps.config.port, deps.env)
+  const resolvedPort = resolvePort(args.port, call.config.port, call.env)
   if (resolvedPort === undefined) {
     return toOutput(
       fail(
@@ -186,7 +208,7 @@ async function issueCookie(
           verdict:
             'no cookie was signed: no port could be determined, and a cookie is bound to one exact host:port — pass a port, set it in the plugin config, or run where DSH_WEB_URL is set',
           // ⚠️ 只有 `resolved` —— authority 连拼都拼不出来（它就是 host:port）。
-          key: { resolved: { ...effectiveConfig(deps.config), port: null, portSource: 'none' } },
+          key: { resolved: { ...effectiveConfig(call.config), port: null, portSource: 'none' } },
           audit: {},
         },
         {
@@ -201,8 +223,8 @@ async function issueCookie(
 
   const host = args.host ?? '127.0.0.1'
   const authority = `${host}:${String(resolvedPort.port)}`
-  const resolved = effectiveConfig(deps.config, resolvedPort)
-  const file = credentialsPath(deps.config.dshHome)
+  const resolved = effectiveConfig(call.config, resolvedPort)
+  const file = credentialsPath(call.config.dshHome)
 
   const maxAgeDays = normalizeMaxAgeDays(args.maxAgeDays)
   if (maxAgeDays === undefined) {

@@ -47,7 +47,7 @@ import {
   type EffectMode,
   type HmrProbe,
 } from '../lib/effect.js'
-import { budgetFor, createDeadline } from '../lib/timeouts.js'
+import { budgetFor, createDeadline, toolBudgetMs, type Workload } from '../lib/timeouts.js'
 import { detectHmrFromProfileFiles, profileDir } from '../lib/profile.js'
 import { resolveDshLaunch, runDump } from '../lib/dump.js'
 import type { RenderTable } from '../lib/render.js'
@@ -57,6 +57,7 @@ import {
   effectiveConfig,
   toOutput,
   toolOutput,
+  withCallHome,
   type EffectiveConfigBlock,
   type ToolDeps,
 } from './shared.js'
@@ -64,10 +65,26 @@ import {
 /** 工具名。 */
 export const EFFECT_MODE_TOOL = 'dsh_check_effect_mode'
 
+/**
+ * 本工具的工作量档：**快档**。
+ *
+ * 它确实会跑一次 `--dump-config`（复核 hmr 那条路），但那条命令实测 **0.4 s**
+ * （慢的是 `--dump-config-schema`，本工具不跑它）。
+ */
+const WORKLOAD: Workload = 'quick'
+
 /** 参数。 */
 interface EffectModeArgs {
   change: EffectChangeKind
   alreadyInDependencies?: boolean
+  /**
+   * 另**一个**实例的 `DSH_HOME`（跨实例观察，SHAPE §1.2 的 D′）。
+   *
+   * 它有两层作用：读 profile 文件层（`bundles` / `node_modules`）时用它当根，
+   * 以及**注入复核那次 `--dump-config` 的子进程环境** —— 只做前者的话，
+   * 文件层看的是 A、组合层问的是 B，两者的结论拼在一起是**两个实例的混合**。
+   */
+  dshHome?: string
 }
 
 /** 这个 profile 有没有**可用的** hmr（也就是有没有人在 watch patch 文件）。 */
@@ -159,19 +176,26 @@ export function createEffectModeTool(deps: ToolDeps): ToolDefinition {
         type: 'boolean',
         description: 'bundle-added only: already a dependency?',
       },
+      dshHome: {
+        type: 'string',
+        description:
+          'Read another instance instead: its DSH_HOME path. Omit to use the configured one.',
+      },
     },
     output: toolOutput(EFFECT_MODE_TOOL, TABLE),
 
-    timeoutMs: deps.config.timeoutMs,
+    timeoutMs: toolBudgetMs(WORKLOAD, deps.config),
     isConcurrencySafe: () => true,
 
     async execute(rawArgs, exec) {
+      const args = rawArgs as EffectModeArgs
       try {
-        return await classify(rawArgs as EffectModeArgs, exec.signal, deps)
+        return await classify(args, exec.signal, deps)
       } catch (error) {
         // 「绝不 throw」是契约的承载条件：一旦抛出去，宿主会把它包成 toolErrorResult，
         // 模型看到的是一句裸 `Error: …`，`verdict` / `key` / `audit` 全部失效（SHAPE §4）。
-        return toOutput(unexpectedFailure(error, deps.config))
+        // 兜底里也要写着**这次看的是哪个实例** —— 意外失败时那一格是唯一可判的定位信息。
+        return toOutput(unexpectedFailure(error, withCallHome(deps, args.dshHome).config))
       }
     },
   })
@@ -189,13 +213,17 @@ async function classify(
   signal: AbortSignal,
   deps: ToolDeps,
 ): Promise<JsonValue> {
-  const deadline = createDeadline(deps.config.timeoutMs, deps.now)
+  const deadline = createDeadline(toolBudgetMs(WORKLOAD, deps.config), deps.now)
 
-  const missing = assertResolvedDshHome(deps.config)
+  // 本次调用认的实例：路径解析与**子进程环境**一起换（见 `withCallHome` 的注释）。
+  // 预算不受影响（只换 home 与其来源），所以 deadline 用的仍是 `deps.config`。
+  const call = withCallHome(deps, args.dshHome)
+
+  const missing = assertResolvedDshHome(call.config)
   if (missing !== undefined) return toOutput(missing)
 
-  const dir = profileDir(deps.config.dshHome, deps.config.profile)
-  const probe = await probeHmrFor(deps, dir, deadline, signal, args.change)
+  const dir = profileDir(call.config.dshHome, call.config.profile)
+  const probe = await probeHmrFor(call, dir, deadline, signal, args.change)
   if (probe.kind === 'fail') return toOutput(probe.failure)
 
   const usable = probe.hmrProbe.present && probe.hmrProbe.disabled !== 'yes'
@@ -207,7 +235,7 @@ async function classify(
     hmrUsable: usable,
   })
 
-  const resolved = effectiveConfig(deps.config)
+  const resolved = effectiveConfig(call.config)
   const key: EffectModeKey = {
     stage: 'answered',
     mode: decision.mode,
@@ -244,7 +272,7 @@ async function classify(
   return toOutput(
     ok(
       { verdict: verdictFor(args.change, decision), key, audit },
-      nextStepFor(decision.mode, deps.config.profile),
+      nextStepFor(decision.mode, call.config.profile),
     ),
   )
 }
@@ -305,7 +333,7 @@ async function probeHmrFor(
 
   const dump = await runDump(resolveDshLaunch(), deps.config.profile, '--dump-config', {
     spawn: deps.spawn,
-    timeoutMs: budgetFor(deps.config.timeoutMs, deadline),
+    timeoutMs: budgetFor(toolBudgetMs(WORKLOAD, deps.config), deadline),
     signal,
   })
 

@@ -27,7 +27,7 @@
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools'
 
 import { fail, ok, toToolError, type JsonValue } from '../lib/errors.js'
-import { budgetFor, createDeadline } from '../lib/timeouts.js'
+import { budgetFor, createDeadline, toolBudgetMs, type Workload } from '../lib/timeouts.js'
 import { readCredentialsPresence, type CredentialsPresence } from '../lib/credentials.js'
 import { probeHttp, type HttpProbeKind, type HttpProbeResult } from '../lib/http.js'
 import { credentialsPath } from '../lib/profile.js'
@@ -46,6 +46,9 @@ import {
 
 /** 工具名。 */
 export const CHECK_AUTH_TOOL = 'dsh_check_auth'
+
+/** 本工具的工作量档：一次 HTTP 探测 + 读一个文件，**快档**。 */
+const WORKLOAD: Workload = 'quick'
 
 /** 让用户/模型去查宿主到底起没起、端口对不对的那一步。 */
 const DIAGNOSE_TOOL = 'dsh_diagnose_plugin_load'
@@ -145,7 +148,7 @@ export function createCheckAuthTool(deps: ToolDeps): ToolDefinition {
     },
     output: toolOutput(CHECK_AUTH_TOOL, TABLE),
 
-    timeoutMs: deps.config.timeoutMs,
+    timeoutMs: toolBudgetMs(WORKLOAD, deps.config),
     isConcurrencySafe: () => true,
 
     async execute(rawArgs, exec) {
@@ -186,7 +189,7 @@ async function probeAuthentication(
   signal: AbortSignal,
   deps: ToolDeps,
 ): Promise<JsonValue> {
-  const deadline = createDeadline(deps.config.timeoutMs, deps.now)
+  const deadline = createDeadline(toolBudgetMs(WORKLOAD, deps.config), deps.now)
 
   const missing = assertResolvedDshHome(deps.config)
   if (missing !== undefined) return toOutput(missing)
@@ -228,7 +231,7 @@ async function probeAuthentication(
   const url = `http://${authority}/`
   const resolved = effectiveConfig(deps.config, resolvedPort)
 
-  const probe = await probeHttp(url, budgetFor(deps.config.timeoutMs, deadline), {
+  const probe = await probeHttp(url, budgetFor(toolBudgetMs(WORKLOAD, deps.config), deadline), {
     fetch: deps.fetch,
     signal,
   })

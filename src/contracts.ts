@@ -4,6 +4,7 @@
  * 存在的理由只有一个：让「技能半边」与「工具半边」能在不碰对方文件的前提下并行开发。
  * 两份实现只共享这里的形状，谁都不许往这里塞逻辑。
  */
+import type { WorkloadBudgetConfig } from './lib/timeouts.js'
 
 /** 技能注册的结果。注册失败**不是**插件的失败 —— 工具半边照常工作。 */
 export interface SkillReport {
@@ -48,22 +49,31 @@ export interface PluginState {
   skill: SkillReport | null
 }
 
-/** 配置项补齐默认值后的形状：工具半边只认这个，不再关心「有没有配」。 */
-export interface ResolvedConfig {
+/**
+ * 配置项补齐默认值后的形状：工具半边只认这个，不再关心「有没有配」。
+ *
+ * **extends `WorkloadBudgetConfig`**（`lib/timeouts.ts`）而不是把两个预算字段再写一遍：
+ * 「工作量 → 预算」的映射住在那边，它期望的字段名因此与本接口是**同一份类型**，
+ * 改一边另一边就编译不过。这里只多一句说明，不重复定义。
+ */
+export interface ResolvedConfig extends WorkloadBudgetConfig {
   /** DSH_HOME 目录（绝对路径）。 */
   dshHome: string
   /**
    * `dshHome` 是怎么来的：`config` = 用户在插件配置里写了；`env` = 环境变量 `DSH_HOME`；
-   * `default` = 我们按宿主的默认值推的 `<homedir>/.dsh`。
+   * `default` = 我们按宿主的默认值推的 `<homedir>/.dsh`；`tool-argument` = **本次调用**的
+   * `dshHome` 参数覆盖了上面三者（跨实例观察，见 `docs/SHAPE.md` §1.2 的 D′）。
    *
    * **必须带出去给用户看**：诊断工具最怕「看着成功其实读错了目录」，读默认目录这件事
    * 本身要成为可见证据，而不是隐藏假设。
+   *
+   * ⚠️ `tool-argument` 是**四值里的第四值、不是 `config` 的一种**：参数来的值印成 `config`
+   * （或 `default`）会让「它在读另一个实例」这个最该被看见的事实消失 —— 三值纪律
+   * （「缺席」≠「空」）的同族错误。
    */
-  dshHomeSource: 'config' | 'env' | 'default'
+  dshHomeSource: 'config' | 'env' | 'default' | 'tool-argument'
   /** profile 名：用于拼 `<dshHome>/profiles/<profile>`。 */
   profile: string
   /** 要探测的宿主端口；`0` = 自己按监听端口推断。 */
   port: number
-  /** 单个外部命令 / 请求的超时（毫秒）。 */
-  timeoutMs: number
 }

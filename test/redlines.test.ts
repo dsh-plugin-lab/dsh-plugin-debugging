@@ -19,6 +19,7 @@ import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { afterAll, describe, expect, it } from 'vitest'
 
 import type { ResolvedConfig } from '../src/contracts.ts'
+import { WORKLOAD_DEFAULT_BUDGET_MS } from '../src/lib/timeouts.ts'
 import type { NextStep, ToolData, ToolErrorKind, ToolResult } from '../src/lib/errors.ts'
 import { ensureToolResult, toolResultProblem } from '../src/lib/errors.ts'
 import type { SpawnImpl } from '../src/lib/exec.ts'
@@ -61,6 +62,12 @@ import {
   SIGN_COOKIE_DESCRIPTION,
   SIGN_COOKIE_TOOL,
 } from '../src/tools/dsh_sign_cookie.ts'
+import {
+  createListInstancesTool,
+  DSH_UNAUTHORIZED_BODY,
+  LIST_INSTANCES_DESCRIPTION,
+  LIST_INSTANCES_TOOL,
+} from '../src/tools/dsh_list_instances.ts'
 import { encodeBase64Url } from '../src/lib/cookie-sign.ts'
 import { createToolDeps, type ToolDeps } from '../src/tools/shared.ts'
 
@@ -551,6 +558,7 @@ const EXPECTED_TOOLS = [
   'dsh_diagnose_plugin_load',
   'dsh_check_auth',
   'dsh_dump_config',
+  'dsh_list_instances',
   'dsh_hot_reload',
   'dsh_sign_cookie',
 ] as const
@@ -680,6 +688,8 @@ describe('B9 工具名是闭集', () => {
       // 第 6 个工具（W4 `dsh_sign_cookie`）走的是「常量 + defineTool 内联 name」两处，
       // 与上面五种形态同批 —— 所以这里也必须是**字面量**，不能用索引取。
       `export const SIGN_COOKIE_TOOL = 'dsh_sign_cookie'`,
+      // 第 7 个工具（D′ 的发现工具）同样走「常量 + defineTool 内联 name」两处。
+      `export const LIST_INSTANCES_TOOL = 'dsh_list_instances'`,
     ].join('\n')
     const found = [
       ...new Set(collectDeclaredToolNames([{ path: 'synthetic.ts', text: synthetic }])),
@@ -770,12 +780,17 @@ describe('B9 工具名是闭集', () => {
 })
 
 /**
- * B10 判据：**诊断半边只读** —— 那四个诊断工具不许杀进程 / 写文件 / 走 `dsh plugin` 安装面。
+ * B10 判据：**只读半边** —— 不许杀进程 / 写文件 / 写宿主数据目录 / 走 `dsh plugin` 安装面。
  *
- * **它管的是诊断半边，不是「整个 `src/**` 只读」。** v1.1 起本仓有了**写侧**
- * （`dsh_hot_reload`），写侧的边界是**另一条**红线 —— B15（写侧只许碰进程内树）。
- * 两条的分工：B10 = 诊断半边不许改系统状态；B15 = 写侧不许越出进程内。
- * **这里三类扫描（杀进程 / fs 写入 / 安装面）一个字都没有放宽。**
+ * ## 作用域是**整个 `src/**`**，不只是诊断半边（2026-10-14 改：注释与实现曾不一致）
+ *
+ * 标题里的「诊断半边」说的是**动机**（那四个只读工具），而扫描面**刻意取全部 `src/**`**：
+ * 写侧那两个文件若只由 B15 管，就会漏掉 B10 独有的那条安装面规则（`dsh plugin add/remove/…`）
+ * —— B15 不管安装面。收窄成「只有诊断半边」= **削弱保护面**，本仓明确禁止
+ * （见文末「已知限度」里关于「不要为了显得别的红线更值钱而放宽 B10」的告诫）。
+ * 作用域本身有一条判据钉着（`B10 的作用域是整个 src/**`），谁想收窄都会红。
+ * 两条的分工：**B10 = 只读半边不许改系统状态（宽作用域）；B15 = 写侧不许越出进程内（窄作用域、更严）**。
+ * **这里四类扫描一个字都没有放宽。**
  *
  * 允许与禁止的边界**要划准**，否则这条会变成噪声：
  * - 允许 `child_process.spawn` —— 本仓的诊断要起 `dsh --dump-config` 这类**只读**子进程，
@@ -788,10 +803,17 @@ describe('B9 工具名是闭集', () => {
  * - 禁止 fs 写入 API —— **只在确实从 `node:fs` 导入的名字上判定**（见 {@link fsBindingsOf}），
  *   否则 `src/lib/render.ts` 里那个同名的本地 `truncate` 字符串助手会被误报，
  *   而「因为会误报所以整族不查」等于不设防（上一版就是这么漏掉 `fs.truncate` 家族的）。
+ * - 禁止**写进宿主自有路径** —— 见 {@link judgeHostDataWrites}：判据落在**路径前缀**上
+ *   （`profiles` / `sessions` / `storages` / `logs` / `cache` / `attachments` / `backups`
+ *   + `.credentials.yaml` / `.salt` / `.anonymous-user-id` / `settings.yaml`），
+ *   或写入目标取自宿主家目录（`DSH_HOME` / `dshHome`）。**读**这些路径是诊断半边的本职，
+ *   不在禁止面里（判据只绑在写 API 的实参上）。
  *
  * **已知未覆盖**（明确列出来，不静默排除）：`node:fs` 之外的写入通道，例如
- * `process.binding`、原生 addon、`require()`（本仓是纯 ESM）、以及把 `fs` 方法先赋给
- * 别的变量再调用（`const w = writeFileSync`）。这些在本仓不出现；真出现时靠人看出来。
+ * `process.binding`、原生 addon、`require()`（本仓是纯 ESM）、把 `fs` 方法先赋给
+ * 别的变量再调用（`const w = writeFileSync`）、经 `ctx.subprocess` / `ctx.shell` 发起的
+ * 写命令、以及用 shell 重定向写文件（`cmd /c … > file`）。这些在本仓不出现；
+ * 真出现时靠人看出来，或把判据扩成 AST 级。
  */
 const FORBIDDEN_PROCESS_VIOLATIONS: ReadonlyArray<{ label: string; pattern: RegExp }> = [
   { label: 'process.kill', pattern: /\bprocess\.kill\b/ },
@@ -924,6 +946,261 @@ function judgeFsWriteUsage(sources: readonly { path: string; text: string }[]): 
   return offenders
 }
 
+/**
+ * 宿主自有路径的**一级前缀** —— 写进这些地方就是改宿主状态（B10 禁止）。
+ *
+ * 表取自**真机 `$DSH_HOME` 的一级目录/文件**（2026-10-14 实读本机 `~/.dsh`）：
+ * `attachments` / `backups` / `cache` / `integrations` / `logs` / `mcp` / `profiles` /
+ * `sessions` / `storages` + `.credentials.yaml` / `.salt` / `.anonymous-user-id` / `settings.yaml`。
+ *
+ * **逐条前缀、不用通配**（硬要求）：写成通配（`any-dir/logs/any-file` 那种）会**漏掉**
+ * `profiles/<p>/logs` —— 前缀里那一层会被通配吃掉，而 `logs` 恰恰是最该禁的目录之一。
+ * 判据是「路径片段里出现这一段」，所以 `join(home, 'profiles', p)` 与
+ * `home + '/logs/x'` 两种写法都命中，而 `'logs'` 作为普通词出现在别的语境里
+ * （例如变量名 `logStartup`）不会 —— 判据只认**路径分隔符构成的那一段**
+ * （见 {@link hasHostDataPathSegment}）。
+ *
+ * ## 它现在只管**没有** `$DSH_HOME` 参与的那一类写
+ *
+ * `$DSH_HOME` 参与的写走**白名单**判据（见 {@link firstSegmentAfterHome} 与
+ * {@link judgeHostDataWrites}）：只有「**紧跟 home 的第一个路径段逐字等于本包名**」才放过。
+ * 两条通道合起来的语义：**写宿主目录 ⇒ 红，除非写的是本包自己那一层**。
+ */
+const HOST_DATA_PATH_SEGMENTS = [
+  'profiles',
+  'sessions',
+  'storages',
+  'logs',
+  'cache',
+  'attachments',
+  'backups',
+  'integrations',
+  'mcp',
+  'settings.yaml',
+  '.credentials.yaml',
+  '.salt',
+  '.anonymous-user-id',
+] as const
+
+/** 取值为「宿主家目录」的表达式：一旦它出现在**写** API 的实参里，就进入白名单判定。 */
+const HOST_HOME_EXPRESSION = /\bDSH_HOME\b|\bdshHome\b|process\.env\.DSH_HOME/
+
+/**
+ * 本包的包名 —— **从 `package.json` 读，不手抄**（本仓规矩：不抄会漂的值）。
+ *
+ * 白名单就是「`$DSH_HOME/<这个串>/`」这一层。包名改了就自动跟着改。
+ */
+const OWN_PACKAGE_NAME = packageJson.name ?? ''
+
+/**
+ * 取出「跟在宿主家目录表达式**某一次出现**之后的第一个路径段」——**只在它是字面量时**给得出值。
+ *
+ * 认得的写法（都是本仓会出现的形态）：
+ * - `join(dshHome, 'seg', …)` —— 逗号之后的第一个实参；
+ * - `join(process.env.DSH_HOME ?? '', 'seg', …)` —— 先跨过 `?? ''` 这个兜底；
+ * - `` `${dshHome}/seg/…` `` —— 插值之后的第一个段（`}` 是桥）；
+ * - `dshHome + '/seg/…'` —— `+` 之后的第一个段。
+ *
+ * **取不出来就返回 `undefined`**（= 不知道），调用方据此**保守判红**：
+ * 首段是变量（`join(dshHome, name, …)`）时判据验不了它是不是包名 —— 这是放宽的
+ * **已知限度**（记在文末正典表），不是漏写。
+ *
+ * 取段时**要求前面有引号 / 分隔符 / `}` 之类的桥**：同一行里 `dshHome` 还可能出现在
+ * **类型标注**（`function f(dshHome: string)`）或解构里，那时它后面跟的是 `:` 而不是路径 ——
+ * 不要求桥的话会把 `:` 当成段名（实测踩到：接线断言里那个一行的 fixture 因此被误判成红）。
+ *
+ * @param line 一行源码（已 stripComments）。
+ * @param from 从哪个下标开始看（= 家目录表达式那一次匹配的**结尾**）。
+ */
+function segmentAfter(line: string, from: number): string | undefined {
+  let rest = line.slice(from)
+  // 桥：`??` 的兜底、空串兜底、`)`、`,`、`+`、`-`、`}`、空白。**不跨过任何标识符。**
+  for (;;) {
+    const before = rest
+    rest = rest.replace(/^\s*(?:\?\?\s*(?:''|""|``)\s*)?[)\s,+-]*\s*/u, '')
+    rest = rest.replace(/^\s*\}/u, '')
+    if (rest === before) break
+  }
+  // 现在应当直接是「引号 / 分隔符 / 可选引号 + 段名」。
+  // 引号要在这一步吃掉：`join(dshHome, 'seg')` 里 `'seg'` 是从引号开始的，
+  // 不吃掉的话取出来是 undefined（= 验不了 ⇒ 保守判红），正例会被误杀。
+  const segment = /^(?:['"`]|[/\\]|\})\s*[/\\]?([^/\\'"`\s),}:]+)/u.exec(rest)
+  if (segment?.[1] === undefined) return undefined
+  return segment[1]
+}
+
+/**
+ * 判一行里的**每一次**家目录出现，汇总成三值结论。
+ *
+ * 为什么要看**每一次**而不是第一次：同一行常见「签名 + 调用」并存
+ * （`function f(dshHome: string) { mkdirSync(join(dshHome, '…', 'x')) }`），
+ * 只看第一次会把类型标注那处当目标。所以逐次取段，再按**安全优先**汇总：
+ *
+ * - 只要有一次取出了**不等于包名**的确定段 ⇒ `other`（红）—— 确定的可疑段**压过**白名单；
+ * - 否则只要有一次取出的是包名 ⇒ `in-namespace`（绿）；
+ * - 一次都取不出确定段（首段是变量 / 写法认不出）⇒ `unknown`（**保守判红**）。
+ *
+ * @param line 一行源码（已 stripComments）。
+ */
+function classifyHomeWrite(line: string): 'in-namespace' | 'other' | 'unknown' {
+  if (OWN_PACKAGE_NAME === '') return 'other'
+  const pattern = new RegExp(HOST_HOME_EXPRESSION.source, 'gu')
+  let sawOwn = false
+  let sawOther = false
+  for (const match of line.matchAll(pattern)) {
+    const segment = segmentAfter(line, match.index + match[0].length)
+    if (segment === undefined) continue
+    if (segment === OWN_PACKAGE_NAME) sawOwn = true
+    else sawOther = true
+  }
+  if (sawOther) return 'other'
+  return sawOwn ? 'in-namespace' : 'unknown'
+}
+
+/**
+ * 一段文本里有没有「宿主自有路径」。
+ *
+ * 判据 = **被路径分隔符包住的**那一段（`'/logs/'`、`'\\logs\\'`、引号紧邻的 `` `logs/` ``、
+ * `join(home, 'logs')` 里的 `'logs'`）—— 而不是「文本里出现过 logs 这个词」。
+ * 两道都要过：`segment` 命中**且**该行还有路径味道（分隔符 / `join(` / 反引号路径）。
+ *
+ * @param line 一行源码（已 stripComments）。
+ */
+function hasHostDataPathSegment(line: string): boolean {
+  return HOST_DATA_PATH_SEGMENTS.some((segment) => {
+    const escaped = segment.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    // ① 前后有分隔符：`/logs/`、`\\logs\\`、`'logs/'`、`"logs"` 收尾于 `join(…)`
+    const withSeparator = new RegExp(
+      `[/\\\\]${escaped}[/\\\\]|['"\`]${escaped}['"\`]|[/\\\\]${escaped}['"\`]|['"\`]${escaped}[/\\\\]`,
+    )
+    if (withSeparator.test(line)) return true
+    // ② `join(home, 'logs')` 这类：`join(` 在**同一行**、且该段是引号包着的独立实参
+    const asJoinArg = new RegExp(`\\b(?:join|resolve)\\([^)]*['"\`]${escaped}['"\`]`)
+    return asJoinArg.test(line)
+  })
+}
+
+/**
+ * **宿主数据写入**的判定（B10）—— 「不许写 `$DSH_HOME`」的机械判据。
+ *
+ * ## 只绑在**写** API 的实参上
+ *
+ * 诊断半边**合法地读**这些路径（`lib/profile.ts` 的 `credentialsPath`、
+ * `listStartupLogs`、`readProfileManifest` 全在读宿主目录），所以判据不能是
+ * 「源码里出现 `DSH_HOME` 就红」（那是 B15 的做法，只在写侧两个文件的窄作用域上才安全）。
+ *
+ * ## 两条通道，语义合起来是一句话
+ *
+ * 1. **写动作的实参里出现宿主家目录表达式** ⇒ 走**白名单**：首段逐字等于本包名才放过
+ *    （`$DSH_HOME/<包名>/…`，该层以下随便分）；其余一律红 —— 包括 `$DSH_HOME` 本身、
+ *    `$DSH_HOME/<别的任何顶层项>`、以及首段是变量（验不了，保守判红）。
+ * 2. **没有家目录表达式、但写动作指向宿主数据前缀**（`.../logs/...` 这类）⇒ 照旧红。
+ *
+ * 通道 1 的放宽是维护者 2026-10-14 拍板的**精确命名空间**（形态 A）：只放过本包自己那一层，
+ * **同前缀兄弟**（`<包名>-logs`）不放过 —— 那正是它与「前缀族白名单」（形态 B）的分界。
+ *
+ * @param sources 源码（相对路径 + 内容）。
+ * @returns 违规清单（`路径:行号 → 说明`）。
+ */
+function judgeHostDataWrites(sources: readonly { path: string; text: string }[]): string[] {
+  const offenders: string[] = []
+  for (const { path, text } of sources) {
+    const lines = stripComments(text).split('\n')
+    lines.forEach((line, index) => {
+      const at = `${path}:${index + 1}`
+      // 写类 API 的调用行：`writeFile(…)` / `fs.writeFileSync(…)` / `mkdir(…)` …
+      // 用**通用**形态（不依赖 import 来源）：这里判的是「这一行有写动作」，
+      // 来源判定由 `judgeFsWriteUsage` 负责，两者互补。
+      const writes = WRITE_CALL_NAMES.some((api) => new RegExp(`\\b${api}\\s*\\(`).test(line))
+      const shellWrites = SHELL_WRITE_SHAPES.some((shape) => shape.test(line))
+      if (!writes && !shellWrites) return
+      if (HOST_HOME_EXPRESSION.test(line)) {
+        const verdict = classifyHomeWrite(line)
+        if (verdict !== 'in-namespace') {
+          const why =
+            verdict === 'unknown'
+              ? '首段取不出来（可能是个变量）—— 判不了就保守判红'
+              : `首段不等于本包名 ${OWN_PACKAGE_NAME}`
+          offenders.push(`${at} → 写动作指向 $DSH_HOME，但不在本包命名空间内（${why}）`)
+        }
+        return
+      }
+      if (hasHostDataPathSegment(line)) {
+        offenders.push(`${at} → 写动作指向宿主数据路径（${line.trim()}）`)
+      }
+    })
+  }
+  return offenders
+}
+
+/** 写类 API 的名字（判「这一行有写动作」；来源是否来自 `node:fs` 由另一条判据管）。 */
+const WRITE_CALL_NAMES = [
+  'writeFile',
+  'writeFileSync',
+  'appendFile',
+  'appendFileSync',
+  'truncate',
+  'truncateSync',
+  'ftruncate',
+  'ftruncateSync',
+  'createWriteStream',
+  'mkdir',
+  'mkdirSync',
+  'mkdtemp',
+  'mkdtempSync',
+  'rm',
+  'rmSync',
+  'rmdir',
+  'rmdirSync',
+  'unlink',
+  'unlinkSync',
+  'rename',
+  'renameSync',
+  'copyFile',
+  'copyFileSync',
+  'cp',
+  'cpSync',
+  'chmod',
+  'chmodSync',
+  'chown',
+  'chownSync',
+  'utimes',
+  'utimesSync',
+  'symlink',
+  'symlinkSync',
+  'link',
+  'linkSync',
+  'writev',
+  'writevSync',
+] as const
+
+/**
+ * 经 shell 写文件的形态（重定向 / `Set-Content` / `Out-File` / `New-Item`）。
+ *
+ * 为什么要有它：本仓的 `.ps1` 与 `execSync` 都是一等公民，而「用 shell 重定向写进
+ * `$DSH_HOME`」绕过了所有 fs API 判据。这是**已知未覆盖**里最容易真发生的一种，
+ * 所以顺手堵上（只认能看出写方向的形态，不做通用 shell 解析）。
+ */
+const SHELL_WRITE_SHAPES: readonly RegExp[] = [
+  />>?\s*['"`]?[^|]*[/\\]/,
+  /\bSet-Content\b/,
+  /\bOut-File\b/,
+  /\bNew-Item\b/,
+]
+
+/**
+ * B10 的**扫描面**（唯一出处）：整个 `src/**`，**不许在调用处再收窄**。
+ *
+ * 为什么把它抽成函数而不是各处直接 `readSourcesUnder('src')`：注释里那句作用域声明
+ * （「不是只有诊断半边」）必须有个**可判的落点**。抽出来之后，判据可以断言
+ * 「这个扫描面就是全量 `src/**`」—— 收窄它就会红。
+ * 残余限度如实记在文末「已知限度」里：在**调用处**临时加 `.filter()` 是任何
+ * 同一文件内的判据都防不住的（红线自己也在那个文件里）。
+ */
+function readOnlyScope(): Array<{ path: string; text: string }> {
+  return readSourcesUnder('src')
+}
+
 /** B10 判据：扫源码，返回违规（`路径:行号 → 记号`）。 */
 function judgeReadOnly(sources: readonly { path: string; text: string }[]): string[] {
   const offenders: string[] = []
@@ -936,17 +1213,262 @@ function judgeReadOnly(sources: readonly { path: string; text: string }[]): stri
       }
     })
   }
-  return [...offenders, ...judgeFsWriteUsage(sources)]
+  return [...offenders, ...judgeFsWriteUsage(sources), ...judgeHostDataWrites(sources)]
 }
 
-describe('B10 诊断半边只读：不含杀进程 / 写文件 / 走安装面的动作', () => {
-  it('真实源码里没有杀进程 / 写文件 / 碰安装面的动作', () => {
-    const sources = readSourcesUnder('src')
+describe('B10 只读半边：不含杀进程 / 写文件 / 写宿主数据目录 / 走安装面的动作', () => {
+  it('真实源码里没有杀进程 / 写文件 / 写宿主数据目录 / 碰安装面的动作', () => {
+    const sources = readOnlyScope()
     // 非空自证：真的扫到了源码（0 个文件时这条会假绿）。
     expect(sources.length, 'src/** 下没扫到 TS 源码 —— 判据没跑到').toBeGreaterThan(5)
 
     const offenders = judgeReadOnly(sources)
-    expect(offenders, describeOffenders('诊断半边只读被破坏', offenders)).toEqual([])
+    expect(offenders, describeOffenders('只读半边被破坏', offenders)).toEqual([])
+  })
+
+  it('B10 的作用域是整个 src/**（收窄它 = 削弱保护面）', () => {
+    // 这条不是「测实现」，是把**注释里那句作用域声明**钉住：块注释 2026-10-14 之前
+    // 写的是「它管的是诊断半边」，而实现扫的是全部 `src/**` —— 两者矛盾。
+    // 选定的方向是**保留宽作用域**（收窄会漏掉 B10 独有的安装面规则，B15 不管那一条），
+    // 所以这里断言：扫描面就是全量 `src/**`（按文件数比，写法无关），
+    // 写侧文件也在里面，而且同一个 `judgeReadOnly` 对写侧文件里的安装面动作也判红。
+    const scanned = readOnlyScope()
+    const everything = readSourcesUnder('src')
+    expect(
+      scanned.length,
+      `B10 的扫描面被收窄了：只扫了 ${String(scanned.length)} 个文件，src/** 有 ${String(everything.length)} 个`,
+    ).toBe(everything.length)
+
+    const paths = scanned.map((source) => source.path)
+    for (const writeSide of ['src/tools/dsh_hot_reload.ts', 'src/lib/hot-reload.ts']) {
+      expect(paths, `${writeSide} 不在 B10 的扫描面里 —— 作用域被收窄了`).toContain(writeSide)
+    }
+    // 而且**同一个 `judgeReadOnly`** 对写侧文件也要能判红（安装面规则是 B10 独有的）。
+    const syntheticWriteSide = [
+      { path: 'src/tools/dsh_hot_reload.ts', text: "execSync('dsh plugin add ' + pkg)" },
+    ]
+    expect(
+      judgeReadOnly(syntheticWriteSide),
+      '写侧文件里的安装面动作没被 B10 照出来 —— 作用域声明与实现又对不上了',
+    ).not.toEqual([])
+  })
+
+  it('判据可被否证：写进宿主数据目录的各种形态都必须红（B10 路径判据）', () => {
+    const forms: Array<[string, string]> = [
+      [
+        "import { writeFile } from 'node:fs/promises'\nwriteFile(join(home, 'profiles', p), 'x')",
+        'profiles',
+      ],
+      ['writeFileSync(`${dshHome}/logs/out.log`, x)', 'dshHome + /logs/'],
+      ["fs.mkdirSync(home + '/sessions/abc', { recursive: true })", 'sessions'],
+      [
+        "writeFile(path.join(process.env.DSH_HOME, 'storages', 'a.json'), x)",
+        'env.DSH_HOME + storages',
+      ],
+      ["writeFileSync(join(dshHome, '.credentials.yaml'), y)", 'credentials'],
+      ["writeFileSync(home + '/cache/x', y)", 'cache'],
+      ["writeFileSync(home + '/attachments/v1/x', y)", 'attachments'],
+      ["writeFileSync(join(dshHome, 'backups', 'b'), y)", 'backups'],
+      ["writeFileSync(home + '/integrations/x', y)", 'integrations'],
+      ["writeFileSync(join(dshHome, 'settings.yaml'), y)", 'settings.yaml'],
+      // shell 重定向写宿主目录（本仓 .ps1 与 execSync 都是一等公民）
+      ["execSync('echo x > $DSH_HOME/logs/out.log')", 'shell 重定向'],
+    ]
+    for (const [source, label] of forms) {
+      expect(
+        judgeHostDataWrites([{ path: 'synthetic.ts', text: source }]),
+        `${label} 漏了 —— 写宿主数据目录没被照出来`,
+      ).not.toEqual([])
+    }
+  })
+
+  it('新判据真的**接进了** B10（只写一个判据、不接线的话，上面那些否证用例全在空转）', () => {
+    // 实测踩过（本任务自己的变异）：把 `judgeHostDataWrites` 从 `judgeReadOnly` 的返回里摘掉，
+    // 上面那些「否证用例」**照样全绿** —— 因为它们直接调判据函数，不经过 B10。
+    // 于是「判据立起来了」是假的：真实源码扫描里那条根本没跑。
+    // 这条断言专治那种空转：拿一段**合成源码走完整入口**，必须报出来。
+    const violation = "writeFileSync(join(dshHome, 'sessions', 'x'), y)"
+    expect(
+      judgeReadOnly([{ path: 'src/tools/synthetic.ts', text: violation }]),
+      '路径判据没接进 B10 的返回 —— 真实扫描对它完全瞎（假绿）',
+    ).not.toEqual([])
+    // 反向：合法源码走同一个入口，必须一条都不报（否则这条判据是恒真的）。
+    expect(
+      judgeReadOnly([
+        {
+          path: 'src/tools/synthetic.ts',
+          text: "export function f(home: string) { return readFileSync(join(home, 'profiles', 'web'), 'utf8') }",
+        },
+      ]),
+      '只读的宿主目录访问被 B10 误报了',
+    ).toEqual([])
+    // **白名单的正例也必须走完整入口**：放宽若只落在一个没人调用的函数里，
+    // 「本包命名空间可写」就是假的 —— 真实扫描会把它判红（写侧一落地就红）。
+    expect(
+      judgeReadOnly([
+        {
+          path: 'src/tools/synthetic.ts',
+          text: `export function f(dshHome: string) { writeFileSync(join(dshHome, '${OWN_PACKAGE_NAME}', 'restart', 'marker.json'), 'x') }`,
+        },
+      ]),
+      '本包命名空间的写走完整入口时被判红了 —— 白名单没接进 B10',
+    ).toEqual([])
+  })
+
+  it('白名单判据（拍板形态 A）：只有**紧跟 home 的第一段逐字等于包名**才放过', () => {
+    // 包名从 `package.json` 读（不手抄）。自证它真的读到了 —— 读成空串会让**每一条**
+    // 写 home 的动作都判红，于是下面那些「正例必须绿」全部变成恒真的反例。
+    expect(OWN_PACKAGE_NAME, 'package.json 没有 name —— 白名单判据会全红').not.toBe('')
+    // 自证包名形状（与 B9 的 kebab 断言同族）：它会被拼进路径，形状不对说明读错了字段。
+    expect(OWN_PACKAGE_NAME).toMatch(/^[a-z0-9][a-z0-9-]*$/)
+    const own = OWN_PACKAGE_NAME
+
+    // ① **正例**：本包命名空间内 —— 首段逐字等于包名，**该层以下随便分** ⇒ 必须绿。
+    const inside = [
+      `writeFileSync(join(dshHome, '${own}', 'restart', 'marker.json'), y)`,
+      `writeFileSync(join(dshHome, '${own}', 'restart', 'nested', 'marker.json'), y)`,
+      `mkdirSync(join(dshHome, '${own}', 'logs'), { recursive: true })`,
+      `writeFileSync(\`\${dshHome}/${own}/cookie/x\`, y)`,
+      `writeFileSync(dshHome + '/${own}/x', y)`,
+      `writeFileSync(join(process.env.DSH_HOME ?? '', '${own}', 'restart', 'm'), y)`,
+      // ⚠️ 白名单内的 `logs` 是被放过的 —— 与 `$DSH_HOME/logs`（禁止）**不是同一个东西**：
+      // 只看紧跟 home 的那一段，不看整行里出现过什么词。
+      `writeFileSync(join(dshHome, '${own}', 'logs', 'x'), y)`,
+      // 同一行里 `dshHome` 先出现在**类型标注**里、路径在后 —— 判据逐次取段，不被标注带偏。
+      `function f(dshHome: string): void { mkdirSync(join(dshHome, '${own}', 'restart'), { recursive: true }) }`,
+    ]
+    for (const source of inside) {
+      expect(
+        judgeHostDataWrites([{ path: 'synthetic.ts', text: source }]),
+        `本包命名空间内的写被误报：${source}`,
+      ).toEqual([])
+    }
+
+    // ② **反例**：包名在**第二位**不算 —— 「行里出现了包名」不等于「包名是第一段」。
+    expect(
+      judgeHostDataWrites([
+        { path: 'synthetic.ts', text: `writeFileSync(join(dshHome, 'profiles', '${own}'), y)` },
+      ]),
+      '包名在第二位被当成白名单了（这正是写成子串包含的错法）',
+    ).not.toEqual([])
+
+    // ③ **反例**：同前缀兄弟（`<包名>-logs`）不是逐字相等 ⇒ 红。**这条正是形态 A 与 B 的分界**。
+    expect(
+      judgeHostDataWrites([
+        { path: 'synthetic.ts', text: `writeFileSync(join(dshHome, '${own}-logs', 'x'), y)` },
+      ]),
+      '同前缀兄弟被放过了 —— 那是形态 B（前缀族），不是拍板的形态 A',
+    ).not.toEqual([])
+    expect(
+      judgeHostDataWrites([
+        { path: 'synthetic.ts', text: `writeFileSync(join(dshHome, '${own}.tmp', 'x'), y)` },
+      ]),
+    ).not.toEqual([])
+
+    // ④ **反例**：写 `$DSH_HOME` 本身（没有下一段）⇒ 红。
+    expect(
+      judgeHostDataWrites([
+        { path: 'synthetic.ts', text: 'mkdirSync(dshHome, { recursive: true })' },
+      ]),
+      '写 $DSH_HOME 本身被放过了',
+    ).not.toEqual([])
+
+    // ⑤ **反例**：首段是**别的**顶层项 ⇒ 红（每一种都要照得出来，靠 home 通道而不是靠前缀表）。
+    for (const segment of ['profiles', 'sessions', 'storages', 'logs', 'cache', 'attachments']) {
+      expect(
+        judgeHostDataWrites([
+          { path: 'synthetic.ts', text: `writeFileSync(join(dshHome, '${segment}', 'x'), y)` },
+        ]),
+        `写 $DSH_HOME/${segment} 没被照出来`,
+      ).not.toEqual([])
+    }
+
+    // ⑥ **保守判红**：首段是变量 ⇒ 判据说它「验不了」，**不许**当成合法放过（本次的已知限度）。
+    expect(
+      judgeHostDataWrites([
+        { path: 'synthetic.ts', text: "writeFileSync(join(dshHome, name, 'x'), y)" },
+      ]),
+      '首段是变量却放过了 —— 判据只能保守判红',
+    ).not.toEqual([])
+  })
+
+  it('路径前缀表非空自证：单条前缀被删 = 那一族**静默失守**（判据只看表）', () => {
+    // 为什么必须有这一条：`HOST_DATA_PATH_SEGMENTS` 是**手抄的一份表**，判据完全依赖它。
+    // 删掉表里一行（例如 `logs`），真实扫描照样全绿 —— 而那一族就再没人管了。
+    //
+    // ⚠️ 第一版这条写错了：它**遍历被保护的表本身**造样本，于是删掉一行时
+    // 「样本」也一起消失 ⇒ 恒绿（自指的假绿，和「断言自己写自己」同一族）。
+    // 现在用**独立的一份副本**（下面这张字面量表）当样本来源：删表里的行 ⇒ 副本还在 ⇒ 红。
+    //
+    // ⚠️ 第二版（白名单落地后）改了样本形状：**不能再用 `join(dshHome, …)` 造样本** ——
+    // 那条路现在走**白名单**通道，与「表里有没有这一行」无关（表被删它也照样红）。
+    // 样本改成**没有 home 表达式**的写法（`home + '/logs/x'`），才真的在测这张表。
+    const required = [
+      'profiles',
+      'sessions',
+      'storages',
+      'logs',
+      'cache',
+      'attachments',
+      'backups',
+      'integrations',
+      'mcp',
+      'settings.yaml',
+      '.credentials.yaml',
+      '.salt',
+      '.anonymous-user-id',
+    ]
+    // 表与副本必须**逐条相同**（多一条少一条都红，逼人同批改两处）。
+    expect([...HOST_DATA_PATH_SEGMENTS].sort()).toEqual([...required].sort())
+
+    for (const segment of required) {
+      // 两种写法各测一次：`home + '/seg/x'`（前缀表通道）与 `join(dshHome, 'seg', …)`
+      // （白名单外的 home 通道）。**两条通道都要能照出这一族** —— 只测一条的话，
+      // 另一条被拆掉时这条自证还是绿的。
+      const viaConcat = `writeFileSync(home + '/${segment}/x', y)`
+      const viaJoin = `writeFileSync(join(dshHome, '${segment}', 'x'), y)`
+      for (const sample of [viaConcat, viaJoin]) {
+        expect(
+          judgeHostDataWrites([{ path: 'synthetic.ts', text: sample }]),
+          `前缀 ${segment} 没被照出来（样本：${sample}）—— 表与判据脱节了`,
+        ).not.toEqual([])
+      }
+    }
+  })
+
+  it('路径判据不误报：**读**宿主目录、以及与本仓无关的写，都必须放过', () => {
+    // ① 读宿主目录是诊断半边的本职（本仓 `lib/profile.ts` 全在读）——**白名单内外都不报**。
+    const reads = [
+      "import { readFile } from 'node:fs/promises'\nreadFile(credentialsPath(dshHome), 'utf8')",
+      "readFileSync(join(dshHome, 'profiles', p, 'package.json'), 'utf8')",
+      "await readdir(join(dshHome, 'logs'))",
+      // 白名单内也是读 ⇒ 同样不许报（判据只绑写动作）。
+      `readFileSync(join(dshHome, '${OWN_PACKAGE_NAME}', 'restart', 'marker.json'), 'utf8')`,
+    ]
+    for (const source of reads) {
+      expect(
+        judgeHostDataWrites([{ path: 'synthetic.ts', text: source }]),
+        `读被误报了：${source}`,
+      ).toEqual([])
+    }
+    // ② 写**别处**（本仓将来真会有的写侧动作）不该被路径判据误伤。
+    const otherWrites = [
+      "writeFileSync(join(tmpdir(), 'x.log'), y)",
+      "writeFileSync('/tmp/scratch/out.json', y)",
+      "writeFile(join(repoRoot, '.local', 'notes.md'), y)",
+    ]
+    for (const source of otherWrites) {
+      expect(
+        judgeHostDataWrites([{ path: 'synthetic.ts', text: source }]),
+        `误报了本仓自己的写入：${source}`,
+      ).toEqual([])
+    }
+    // ③ 反面对照：把 ② 的路径换成宿主数据目录 ⇒ 必须报（证明上面两条不是恒真）。
+    expect(
+      judgeHostDataWrites([
+        { path: 'synthetic.ts', text: "writeFileSync(join(dshHome, 'cache', 'x'), y)" },
+      ]),
+    ).not.toEqual([])
   })
 
   it('判据可被否证：安装面的三种命令形态都必须红（含字符串与模板字符串）', () => {
@@ -1583,7 +2105,12 @@ const WRITE_SIDE_FORBIDDEN: ReadonlyArray<{ label: string; pattern: RegExp }> = 
   { label: 'Stop-Process', pattern: /\bStop-Process\b/i },
   { label: 'SIGKILL', pattern: /\bSIGKILL\b/ },
   { label: 'SIGTERM', pattern: /\bSIGTERM\b/ },
-  { label: 'DSH_HOME（写侧不碰宿主主目录）', pattern: /\bDSH_HOME\b/ },
+  // ⚠️ 这条是**记号**判据（写侧连读都不许读宿主主目录），比 B10 的**路径**判据更严 ——
+  // 两条都留着、不合并成一条，因为语义不同：
+  // - 这里：写侧**碰都不许碰** `DSH_HOME`（连 `process.env.DSH_HOME` 读也不行）；
+  // - B10：只禁止**写**宿主数据路径（诊断半边必须读那些目录，那是它的本职）。
+  // 同一条路径判据（`judgeHostDataWrites`）两条红线共用，见 `judgeWriteSide` 的返回。
+  { label: 'DSH_HOME（写侧不碰宿主主目录，读也不碰）', pattern: /\bDSH_HOME\b/ },
 ]
 
 /** B15 判据：扫写侧文件，返回违规（`路径:行号 → 记号`）。 */
@@ -1598,8 +2125,25 @@ function judgeWriteSide(sources: readonly { path: string; text: string }[]): str
       }
     })
   }
-  return [...offenders, ...judgeFsWriteUsage(sources)]
+  // 写侧与 B10 **共用同一套** fs 写入 / 宿主数据路径判据（一处一事实：两条红线不许各写一份，
+  // 各写一份必然漂 —— 漂出来的形状就是「一条红一条绿」）。
+  return [...offenders, ...judgeFsWriteUsage(sources), ...judgeHostDataWrites(sources)]
 }
+
+/**
+ * 写侧机制的**入口**（谁 import 它，谁就在改进程内树）。
+ *
+ * 用它把 `WRITE_SIDE_FILES` 那类**手抄清单**钉住：清单漏一个文件，写侧边界对那个文件
+ * 就不生效，而失败是**静默**的（红线照样绿）。判据见下面「写侧文件清单不是手抄孤本」。
+ */
+const WRITE_SIDE_MECHANISM_IMPORT = /from\s+['"`][^'"`]*hot-reload\.js['"`]/
+
+/**
+ * 允许 import 写侧机制、但**自身不改树**的文件（注册点：它只把端口绑给工具）。
+ *
+ * 白名单必须**非空自证**（见用例）：这条判据靠它区分「注册点」与「新的写侧实现」。
+ */
+const WRITE_SIDE_NON_IMPLEMENTATIONS = ['src/tools/index.ts'] as const
 
 describe('B15 写侧工具只许碰进程内树', () => {
   it('写侧两个文件都在（不在 = 响亮失败，要求显式改这条红线）', () => {
@@ -1612,7 +2156,39 @@ describe('B15 写侧工具只许碰进程内树', () => {
     ).toEqual([])
   })
 
-  it('真实写侧源码里没有 fs 写入 / 子进程 / 杀进程 / DSH_HOME', () => {
+  it('写侧文件清单不是手抄孤本：谁 import 写侧机制、谁就必须在清单里', () => {
+    // `WRITE_SIDE_FILES` 是闭集，而「新写侧文件没加进来 ⇒ 边界对它不生效」是**静默**的
+    // （红线照样绿）。所以判据不靠人记得改清单，而是从**机制入口**反推：
+    // 凡 import 了写侧重载机制、且不当注册点的文件，都必须出现在清单里。
+    const sources = readSourcesUnder('src')
+    const importers = sources
+      .filter((source) => WRITE_SIDE_MECHANISM_IMPORT.test(stripComments(source.text)))
+      .map((source) => source.path)
+      .filter((path) => !WRITE_SIDE_NON_IMPLEMENTATIONS.includes(path as never))
+
+    // 下界：机制入口一个都找不到 ⇒ 判据空转（机制改名时会走到这里）。
+    expect(
+      importers.length,
+      '没有任何文件 import 写侧机制 —— 入口正则失效了，这条判据在空转',
+    ).toBeGreaterThan(0)
+
+    const missing = importers.filter(
+      (path) => !(WRITE_SIDE_FILES as readonly string[]).includes(path),
+    )
+    expect(
+      missing,
+      `这些文件 import 了写侧机制却不在 WRITE_SIDE_FILES 里：${missing.join(', ')}\n` +
+        '写侧边界按清单限定作用域，漏一个 = 那个文件不被 B15 覆盖（静默假绿）。',
+    ).toEqual([])
+
+    // 白名单非空自证：注册点真的存在（否则上面那半条过滤是恒真的）。
+    expect(
+      WRITE_SIDE_NON_IMPLEMENTATIONS.filter((path) => existsRepo(path)).length,
+      '注册点白名单里的文件都不在 —— 这条判据的过滤条件失效了',
+    ).toBe(WRITE_SIDE_NON_IMPLEMENTATIONS.length)
+  })
+
+  it('真实写侧源码里没有 fs 写入 / 子进程 / 杀进程 / 写宿主数据路径', () => {
     const sources = WRITE_SIDE_FILES.map((rel) => ({ path: rel, text: readRepo(rel) }))
     // 非空自证：两处都真读到了内容（读成空串会让这条假绿）。
     for (const { path, text } of sources) {
@@ -1625,6 +2201,31 @@ describe('B15 写侧工具只许碰进程内树', () => {
       describeOffenders('写侧越出了进程内', offenders) +
         '\n写侧只许改进程内的模块缓存与 fiber：不写文件、不起子进程、不杀进程、不碰 $DSH_HOME。' +
         '（诊断半边起 `dsh --dump-config` 是合法的，那条由 B10 管 —— 别放宽 B10。）',
+    ).toEqual([])
+  })
+
+  it('判据可被否证：写进宿主数据路径的写侧代码必须红（与 B10 共用同一套判据）', () => {
+    const phases: Array<[string, string]> = [
+      ["writeFileSync(join(dshHome, 'logs', 'x'), y)", 'logs'],
+      ["writeFile(join(process.env.DSH_HOME, 'profiles', p), y)", 'env.DSH_HOME'],
+      ["mkdirSync(home + '/sessions/x')", 'sessions'],
+      // 白名单**只**放过本包那一层：写侧往别处写照样红。
+      [`writeFileSync(join(dshHome, '${OWN_PACKAGE_NAME}-logs', 'x'), y)`, '同前缀兄弟'],
+    ]
+    for (const [source, label] of phases) {
+      expect(
+        judgeWriteSide([{ path: 'src/lib/hot-reload.ts', text: source }]),
+        `${label} 漏了 —— 写侧写宿主数据路径没被照出来`,
+      ).not.toEqual([])
+    }
+    // 反向：写侧写**自己的命名空间**是唯一被放过的形态（白名单对 B15 同样生效）。
+    expect(
+      judgeWriteSide([
+        {
+          path: 'src/lib/hot-reload.ts',
+          text: `writeFileSync(join(dshHome, '${OWN_PACKAGE_NAME}', 'restart', 'm.json'), y)`,
+        },
+      ]),
     ).toEqual([])
   })
 
@@ -2775,7 +3376,10 @@ function redlineConfig(dshHome: string, overrides: Partial<ResolvedConfig> = {})
     dshHomeSource: 'config',
     profile: 'web',
     port: 0,
-    timeoutMs: 15_000,
+    // 两个预算**引用唯一那处默认值**（`lib/timeouts.ts`）：红线夹具不该把数字抄一遍，
+    // 否则默认值一改，这里就静默按旧值跑（判据滞后于实现）。
+    timeoutMs: WORKLOAD_DEFAULT_BUDGET_MS.timeoutMs,
+    schemaDumpTimeoutMs: WORKLOAD_DEFAULT_BUDGET_MS.schemaDumpTimeoutMs,
     ...overrides,
   }
 }
@@ -3010,6 +3614,45 @@ function signCookieWith(kind: 'granted' | 'no-grant'): ToolDefinition {
   return createSignCookieTool(redlineDeps(redlineConfig(home, { port: 3080 }), { env: {} }))
 }
 
+/**
+ * `list_instances`：**只给端口**，不去读 socket 表（`scan.status = 'skipped'`）——
+ * 夹具因此与平台无关，也不必伪造 socket 表命令。探针替身按脚本回答。
+ *
+ * @param answer 探针的回答（状态码 + body）。
+ */
+function listInstancesWith(
+  answer: () => Promise<{ status: number; body: string }>,
+): ToolDefinition {
+  const home = makeTempRoot('dsh-redline-listinstances-')
+  const base = redlineDeps(redlineConfig(home, { port: 0 }))
+  return createListInstancesTool({
+    ...base,
+    signatureFetch: async () => {
+      const result = await answer()
+      return { status: result.status, text: async () => result.body }
+    },
+  })
+}
+
+/**
+ * `list_instances` 的**失败** fixture：socket 表读不出来，且**没给 `port`** ⇒
+ * 连候选都形不成 ⇒ `not-configured`。
+ *
+ * 与平台无关：任何平台上那条命令拿到的都是一段**认不出的输出**（stdout 非空、stderr 空、
+ * 一行都没认清）⇒ 每一条尝试都不可信 ⇒ `probed: false`。没有已知命令的平台更快走到同一结论。
+ */
+function listInstancesScanUnavailable(): ToolDefinition {
+  const home = makeTempRoot('dsh-redline-listinstances-')
+  const spawn: SpawnImpl = async () => ({
+    code: 0,
+    stdout: 'this is not a socket table\n',
+    stderr: '',
+    timedOut: false,
+    aborted: false,
+  })
+  return createListInstancesTool(redlineDeps(redlineConfig(home), { spawn }))
+}
+
 /** 造一个可控的 entry 端口。 */
 function reloadEntryFixture(): ReloadEntryPort {
   return {
@@ -3150,6 +3793,18 @@ async function buildRedlineCorpus(): Promise<RedlineRun[]> {
       'sign_cookie · 凭证文件里没有那一条 grant',
       { port: 3080, host: '127.0.0.1' },
     ),
+    await runFixture(
+      listInstancesWith(async () => ({ status: 401, body: DSH_UNAUTHORIZED_BODY })),
+      LIST_INSTANCES_TOOL,
+      'list_instances · 回环端口上认出了 DSH 签名',
+      { port: 3080 },
+    ),
+    await runFixture(
+      listInstancesScanUnavailable(),
+      LIST_INSTANCES_TOOL,
+      'list_instances · socket 表读不出来（没给 port ⇒ 连候选都形不成）',
+      {},
+    ),
   ]
 }
 
@@ -3200,6 +3855,9 @@ function toolShapes(): RedlineToolShape[] {
     shapeOf(DUMP_CONFIG_TOOL, DUMP_CONFIG_DESCRIPTION, createDumpConfigTool(deps)),
     shapeOf(HOT_RELOAD_TOOL, HOT_RELOAD_DESCRIPTION, createHotReloadTool({ ...deps, reload })),
     shapeOf(SIGN_COOKIE_TOOL, SIGN_COOKIE_DESCRIPTION, createSignCookieTool(deps)),
+    // 发现工具：它的 HTTP 依赖多一个 body 读取，但构造它同样不需要真 IO
+    // （默认 `signatureFetch` 只在这一行被引用，不在这里被调用）。
+    shapeOf(LIST_INSTANCES_TOOL, LIST_INSTANCES_DESCRIPTION, createListInstancesTool(deps)),
   ]
   return shapesCache
 }
@@ -4379,11 +5037,25 @@ function nullPrototypeToPlain(value: unknown): unknown {
  * | 35 | B26 用 `isDeepStrictEqual` 比往返结果（**不是** `toEqual`） | `toEqual` 忽略值为 `undefined` 的属性 —— 恰好放过本条要抓的头号违规 | 换成 `toEqual` → 本条只剩 `isGuardFallback` 那一半在起作用（**已实测**：换掉之后 M3 变异不红了）。**别换** |
  * | 36 | B26 的 `isGuardFallback` 认的是 `data.audit.received` 这个键 | 它是 `src/lib/errors.ts` 的 `malformedResult` 独有的字段 | 某个工具自己开始往 `audit` 里写 `received` → **误报**（红，需同步改这一条）；反过来，`malformedResult` 改了合成形状而不再写 `received` → 本条对兜底**失明**（假绿）。改 `malformedResult` 时必须同批看 B26。【已探明】 |
  * | 37 | B12b 的**四条下界**（正文 ≥200 字符 / ≥4 条要点 / 提到 `dsh_hot_reload` / 提到 `dsh_sign_cookie`）与「标题里含『干预』」 | 阈值与**工具名清单**都是我定的：它们把「解冻了却没写」这一种缺口挡住，但**不是**「内容不许变」 | 那三个阈值是**量级**而非合同：正文明显更短（拆得更碎）→ **红**（响亮，人来看）；工具名清单是**手抄的一份**，写侧 / 派生出第二个工具而没加进 `INTERVENTION_REQUIRED_TOOLS` → **漏**（假绿），加工具时必须同批改它。**刻意不做的**：与任何原文的逐字比对 —— 那会把解冻又变成冻结 |
+ * | 38 | **`test/tools/timeout-budgets.test.ts` 的源码扫描**（预算字面量 / 直接读配置的预算字段）：判据 = `stripComments` + **逐行**正则 | 逐行扫描 + 正则形态匹配（不解析表达式） | 三条**假绿**方向：① **跨行字面量**（`timeoutMs:` 与数字分在两行）漏；② **别名**（`const c = deps.config` 之后 `c.timeoutMs`）漏；③ **字符串拼字段名**（`cfg['timeout' + 'Ms']`）漏。本仓格式化与写法下都不出现；要收紧得上 AST。【已探明】 |
+ * | 39 | **B10 的作用域**（整个 `src/**`，由 `readOnlyScope()` 唯一出处） | 判据是「扫描面的文件数 == `readSourcesUnder('src')` 的文件数」 | 在**调用处**再 `.filter()` 收窄（`readOnlyScope()` 之外另写一份过滤）是**同一文件内的判据防不住**的 —— 红线自己也在那个文件里。它能抓的是「改 `readOnlyScope()` 这个唯一出处」。【已探明】 |
+ * | 40 | **B10 的宿主数据路径前缀表** `HOST_DATA_PATH_SEGMENTS` | 手抄的一份表（取自真机 `~/.dsh` 一级项），另有一份**独立副本**（用例里的 `required` 字面量）与之逐条比对。**（2026-10-14 语义变了）** 表只管**没有** `$DSH_HOME` 参与的那一类写；写了 `$DSH_HOME` 的走**白名单**判据（见 #43） | 只删表里一行 → 第二副本的逐条比对**判红**（响亮，逼人同批改两处）；两处**同批**删同一族 → 静默失守。表外新增的宿主目录（宿主以后加一个）也不在覆盖面内 —— 需人来补。**前缀判据本身不认通配**（`profiles/<p>/logs` 那种嵌套靠逐条前缀覆盖）。⚠️ **自证的样本形态要跟着通道走**：白名单落地前样本是 `join(dshHome, 'seg', …)`，现在那种写法走白名单通道 —— 表被删它也照样红，于是「表还在不在」就**测不出来**了（本任务第二次踩到自指假绿）。现在的样本**两条通道各一个**（`home + '/seg/x'` 走表、`join(dshHome, 'seg', …)` 走白名单）【已探明】 |
+ * | 41 | **B15 的写侧文件清单** `WRITE_SIDE_FILES` | 不再只靠手抄：判据从**机制入口**反推（`WRITE_SIDE_MECHANISM_IMPORT` 认 `from '…hot-reload.js'` + `WRITE_SIDE_NON_IMPLEMENTATIONS` 注册点白名单），并自证白名单文件存在 | 换一种拿机制的方式（`await import()` 动态导入 / 间接 re-export）→ **漏**（假绿）；把新写侧实现塞进白名单文件里 → 也漏。清单里的文件被删/改名 → 判红（响亮）【已探明】 |
+ * | 42 | **B10 的「写宿主数据」判据是接进 `judgeReadOnly` 的**（不是孤立的判据函数） | 判据从 `judgeReadOnly` 的返回里摘掉后，那批「喂一条违规」的否证用例**照样全绿** | 本任务实测踩到过：**自指的假绿** —— 否证用例直接调判据函数、不经过 B10，于是「判据立起来了」是假的。现由三条接线自证守着（违规走完整入口必须红 / 只读必须不报 / **白名单正例走完整入口必须绿**）。**新增判据时照抄这个形状**：否证用例之外**必须**有一条走完整入口的接线断言【已探明】 |
+ * | 43 | **B10 白名单的首段判定**（`classifyHomeWrite` + `segmentAfter`）：`$DSH_HOME/<包名>/` 逐字相等才放过 | 靠**文本**认写法：`join(home, 'seg')` / `` `${home}/seg` `` / `home + '/seg'` / `join(env.DSH_HOME ?? '', 'seg')` 四种桥各有一条正则式；段名靠「不以分隔符/引号/空白/逗号/冒号结尾的连续字符」切 | ① **首段是变量取不出**（`join(dshHome, name, …)`）⇒ 判**unknown** ⇒ **保守判红**（要放过就得写字符串字面量，或把判据扩成能解析 const）；② **写法认不出**（多层拼接、先算好路径再传）同样落进 unknown ⇒ 红（响亮，不是漏）；③ 同一行里 `dshHome` 出现多次时**逐次取段、安全优先**（出现任一「不等于包名的确定段」⇒ 红），所以 `function f(dshHome: string) { … join(dshHome, 'pkg', …) }` 不会因类型标注被误判；④ 包名从 `package.json` 读（**没有手抄副本**），`name` 缺失/形状不对由用例自证判红【已探明】 |
  *
  * **B10 已知未覆盖的写入通道**（明确列出，不静默排除）：
  * `process.binding`、原生 addon、`require()`（本仓纯 ESM）、把 fs 方法先赋给别的变量再调用
  * （`const w = writeFileSync`）、以及经 `ctx.subprocess`/`ctx.shell` 发起的写命令。
  * 这些在本仓目前不出现；真出现时要靠人看出来，或把判据扩成 AST 级。
+ * **（2026-10-14 补）** shell 重定向 / `Set-Content` / `Out-File` / `New-Item` 这几族
+ * **已纳入** `judgeHostDataWrites`（本仓 `.ps1` 与 `execSync` 都是一等公民）；其余 shell
+ * 拼装方式（`cmd /c copy …`、`Start-Process -RedirectStandardOutput`）仍在未覆盖之列。
+ *
+ * **B10 的宿主数据路径判据是「禁止」那一半，不是全部纪律**（2026-10-14 立）：
+ * 「要不要允许插件写**自己的命名空间**」是**维护者的未决事**，留在这里等拍板 ——
+ * 两种放宽写法（精确命名空间 vs 前缀族白名单）与差异见 SHAPE 的对应小节。
+ * **判据先立、放宽后议**：立起来时只加了一条更严的规则，没有削弱任何现有保护面。
  *
  * **B23 的定位（别读错）**：`[已核]` **B10 已经在扫整个 `src/**`**，且 `FS_WRITE_APIS` 里已含
  * `writeFile` / `mkdir`。所以 B23 的 **fs 部分是 B10 的子集**，它**不提供 B10 没有的 fs 覆盖**。

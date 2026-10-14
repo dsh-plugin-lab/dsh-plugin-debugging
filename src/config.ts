@@ -14,6 +14,7 @@ import { join } from 'node:path'
 import z from '@deepseek-ai/schemastery'
 
 import type { ResolvedConfig } from './contracts.js'
+import { WORKLOAD_DEFAULT_BUDGET_MS } from './lib/timeouts.js'
 
 /** 用户在配置卡片里能改的东西。 */
 export interface Config {
@@ -23,15 +24,30 @@ export interface Config {
   profile?: string
   /** 宿主端口；`0` = 由工具从监听端口推断。 */
   port?: number
-  /** 外部命令与 HTTP 探测的超时（毫秒）。 */
+  /** **快档**工具的工具预算（毫秒）：读文件 / 一条快命令 / 一次 HTTP 探测。 */
   timeoutMs?: number
+  /** **慢档**工具的预算（毫秒）：会跑 `--dump-config-schema` 的那些。 */
+  schemaDumpTimeoutMs?: number
 }
 
 export const Config = z.object({
   dshHome: z.string().default(''),
   profile: z.string().default(''),
   port: z.number().default(0),
-  timeoutMs: z.number().default(15_000),
+  // 两个预算的**默认值住在 `lib/timeouts.ts`**（一处一事实，连理由与实测数字一起）：
+  // 这里只引用，不再把数字抄一遍 —— 抄一遍就意味着「改默认值时总有一处会忘」。
+  //
+  // ⚠️ **刻意不加 `.min()`**（2026-10-14 判）：
+  // - 用户填一个很小的值（如 `1`）时，不变量「传输先于工具」**不会**静默破 ——
+  //   `lib/timeouts.ts` 的 `transportTimeoutMs` 有一道封顶，保证传输预算永远小于工具预算；
+  // - 而 `.min(MIN_TOOL_BUDGET_MS)` 会**新拒掉**今天能装的配置，代价有二：① 判别不了
+  //   宿主把 schema 拒绝呈现成什么（响亮报错，还是坑 1 那一族「被 catch 进 skippedBundles ⇒
+  //   插件像没装一样消失」，后者更坏）；② 与本仓「不静默夹取用户的数」同族 —— 拒绝也是
+  //   一种夹取，只是更响。
+  // - 因此边界数只作为**推导出来的常量**（`MIN_TOOL_BUDGET_MS`）与**判据**存在，
+  //   要不要在配置面上强加它是维护者的决定。
+  timeoutMs: z.number().default(WORKLOAD_DEFAULT_BUDGET_MS.timeoutMs),
+  schemaDumpTimeoutMs: z.number().default(WORKLOAD_DEFAULT_BUDGET_MS.schemaDumpTimeoutMs),
 })
 
 /** 默认 profile 名：`ctx.cmdlineArgs` **不含** `--profile`（启动器自己吃掉了），只能读 env。 */
@@ -77,6 +93,8 @@ export function resolveConfig(
     dshHomeSource,
     profile,
     port: config?.port ?? 0,
-    timeoutMs: config?.timeoutMs ?? 15_000,
+    timeoutMs: config?.timeoutMs ?? WORKLOAD_DEFAULT_BUDGET_MS.timeoutMs,
+    schemaDumpTimeoutMs:
+      config?.schemaDumpTimeoutMs ?? WORKLOAD_DEFAULT_BUDGET_MS.schemaDumpTimeoutMs,
   }
 }
