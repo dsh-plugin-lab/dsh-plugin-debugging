@@ -66,25 +66,37 @@ function schemaOut(diagnostics: unknown[]): string {
 const CARRIER_MESSAGE =
   'unrecognized Loader tree carrier; use cordis:group or cordis:include for native child collection'
 
-/** 一个按 flag 分派的 spawn。 */
-function dumpSpawn(
-  schema: { exitCode: number; stdout: string; stderr?: string },
-  configDump: { exitCode?: number; stdout?: string; stderr?: string } = {},
-) {
+/**
+ * 一次 dump 的结果旋钮。
+ *
+ * `timedOut` 是**必须**有的那一格：没有它就构造不出「config 成功 + schema 超时」——
+ * 而那正是真机上出事的那条路径（`--dump-config` 退出码 0、stderr 带组合期错，
+ * 紧接着 `--dump-config-schema` 传输层超时）。夹具缺这一格时，缺陷整条不可测。
+ */
+interface DumpStub {
+  exitCode?: number
+  stdout?: string
+  stderr?: string
+  /** 传输层超时：进程被杀 ⇒ 退出码是 `null`（不是某个数）。 */
+  timedOut?: boolean
+}
+
+/** 把旋钮转成一次命令结果（`timedOut` 时退出码必须按契约置 `null`）。 */
+function dumpResult(stub: DumpStub, fallback: { exitCode: number; stdout: string }): CommandResult {
+  const stdout = stub.stdout ?? fallback.stdout
+  const stderr = stub.stderr ?? ''
+  return stub.timedOut === true
+    ? cmdResult({ code: null, stdout, stderr, timedOut: true })
+    : cmdResult({ code: stub.exitCode ?? fallback.exitCode, stdout, stderr })
+}
+
+/** 一个按 flag 分派的 spawn：两次调用各有一套旋钮。 */
+function dumpSpawn(schema: DumpStub, configDump: DumpStub = {}) {
   return recordingSpawn((options: RunCommandOptions): CommandResult => {
     const flag = options.args[options.args.length - 1]
-    if (flag === '--dump-config-schema') {
-      return cmdResult({
-        code: schema.exitCode,
-        stdout: schema.stdout,
-        stderr: schema.stderr ?? '',
-      })
-    }
-    return cmdResult({
-      code: configDump.exitCode ?? 0,
-      stdout: configDump.stdout ?? composedConfig(),
-      stderr: configDump.stderr ?? '',
-    })
+    return flag === '--dump-config-schema'
+      ? dumpResult(schema, { exitCode: 0, stdout: '' })
+      : dumpResult(configDump, { exitCode: 0, stdout: composedConfig() })
   })
 }
 
@@ -178,9 +190,11 @@ describe('dsh_dump_config', () => {
       expect(invocations[0]?.['exitCode']).toBe(0)
       expect(invocations[1]?.['exitCode']).toBe(0)
       expect(data.key['actionable']).toEqual([])
+      // 覆盖完整 ⇒ 这个空数组才**是** `none`（不是「没读到」）。
+      expect(data.key['notScreened']).toEqual([])
       // 全量记录在 audit（模型不读）。
       expect((data.audit['diagnostics'] as unknown[]).length).toBe(0)
-      expect((data.audit['configDump'] as Record<string, unknown>)['entryCount']).toBe(183)
+      expect(data.audit['entryCount']).toBe(183)
       expect(String(data.verdict)).toContain('can be ruled out')
       // 没有动作可做 → nextStep 不出现（§3.1：没有动作就不出现）。
       expect(result.nextStep).toBeUndefined()
@@ -345,6 +359,102 @@ describe('dsh_dump_config', () => {
     })
   })
 
+  describe('覆盖完整性：`actionable: none` 只有一种合法情形', () => {
+    /** 真机那条组合期错（活跃坑 14 的第二种形状：不带严重级、只带来源）。 */
+    const COMPOSITION_STDERR =
+      'dsh: [C:\\x\\cordis.patch.yml] patch: name mismatch for "llm-deepseek" (expected "a", got "b"), skipping\n'
+
+    it('config 成功（stderr 带组合期错）+ schema 超时 → 已读到的错进 actionable，且明示 schema 未读', async () => {
+      const dshHome = await tempDshHome()
+      // 真机形状：第一次 dump 退出码 0 且 stderr 上有组合期错；第二次传输层超时。
+      const { spawn } = dumpSpawn(
+        { exitCode: 0, stdout: '', timedOut: true },
+        { stderr: COMPOSITION_STDERR },
+      )
+      const tool = createDumpConfigTool(depsFor(configFor(dshHome), { spawn }))
+
+      const result = await run(tool, {})
+      const failure = expectFail(result)
+      expectShape(result)
+      expect(failure.kind).toBe('timeout')
+
+      // ① 已跑成的那次 dump 里的诊断**不许因为第二次失败而消失**（根因造成的那个事实）。
+      const actionable = failure.data.key['actionable'] as Record<string, unknown>[]
+      expect(actionable).toHaveLength(1)
+      expect(actionable[0]?.['classification']).toBe('composition-error')
+      expect(String(actionable[0]?.['message'])).toContain('name mismatch')
+      // ② 覆盖不全是一等值：只差 schema 那一份。
+      expect(failure.data.key['notScreened']).toEqual(['--dump-config-schema'])
+      // ③ 两者都要出现在 L1（`error.message` 不进模型文本）。
+      expect(String(failure.data.verdict)).toContain('1 actionable diagnostic(s)')
+      expect(String(failure.data.verdict)).toContain('--dump-config-schema')
+
+      // ④ 渲染：真错逐条列出，**并另起一行**说明未读来源。
+      const parts = splitRender(renderText(tool, {}, result))
+      expect(
+        parts.l2.some(
+          (line) =>
+            line.startsWith('actionable: [composition-error]') && line.includes('name mismatch'),
+        ),
+      ).toBe(true)
+      expect(parts.l2).toContain('screening: incomplete (not read: --dump-config-schema)')
+      expect(parts.l2).not.toContain('actionable: none')
+    })
+
+    it('config 成功（stderr 干净）+ schema 超时 → **不得**渲染 `actionable: none`', async () => {
+      const dshHome = await tempDshHome()
+      const { spawn } = dumpSpawn({ exitCode: 0, stdout: '', timedOut: true })
+      const tool = createDumpConfigTool(depsFor(configFor(dshHome), { spawn }))
+
+      const result = await run(tool, {})
+      const failure = expectFail(result)
+      expectShape(result)
+      // 空数组是**没读到**，不是「筛过了、是空的」。
+      expect(failure.data.key['actionable']).toEqual([])
+      expect(failure.data.key['notScreened']).toEqual(['--dump-config-schema'])
+      expect(String(failure.data.verdict)).toContain('the screening is incomplete')
+      expect(String(failure.data.verdict)).toContain('this is not a "none"')
+
+      const parts = splitRender(renderText(tool, {}, result))
+      expect(parts.l2).not.toContain('actionable: none')
+      expect(parts.l2).toContain(
+        'actionable: unknown (--dump-config-schema was not read, so this is not a "none")',
+      )
+    })
+
+    it('config 自身超时 → 两个来源都没读到，第二次 dump 也不跑（读不出组合树就判不了）', async () => {
+      const dshHome = await tempDshHome()
+      const { spawn, calls } = dumpSpawn({ exitCode: 0, stdout: schemaOut([]) }, { timedOut: true })
+      const tool = createDumpConfigTool(depsFor(configFor(dshHome), { spawn }))
+
+      const result = await run(tool, {})
+      const failure = expectFail(result)
+      expectShape(result)
+      expect(failure.kind).toBe('timeout')
+      expect(failure.data.key['notScreened']).toEqual(['--dump-config', '--dump-config-schema'])
+      // 实测：只起过一次子进程 —— 「跑过哪几次」是观测，不许假装跑了两次。
+      expect(calls).toHaveLength(1)
+
+      const parts = splitRender(renderText(tool, {}, result))
+      expect(parts.l2).not.toContain('actionable: none')
+      expect(parts.l2).toContain(
+        'actionable: unknown (--dump-config and --dump-config-schema were not read, so this is not a "none")',
+      )
+    })
+
+    it('Screening 的「筛过了、是空的」那一侧：`--dump-config` 干净、schema 退出码 0 → 才印 none', async () => {
+      const dshHome = await tempDshHome()
+      const { spawn } = dumpSpawn({ exitCode: 0, stdout: schemaOut([]) })
+      const tool = createDumpConfigTool(depsFor(configFor(dshHome), { spawn }))
+
+      const result = await run(tool, {})
+      const data = expectOk(result)
+      // 正例也被钉住：否则「一律印 unknown」这种过度修正也会全绿。
+      expect(data.key['notScreened']).toEqual([])
+      expect(splitRender(renderText(tool, {}, result)).l2).toContain('actionable: none')
+    })
+  })
+
   describe('错误路径（每条可达 kind）', () => {
     it('internal：dshHome 空串是**契约被违反**的防御性断言（不再是 not-configured）', async () => {
       const tool = createDumpConfigTool(depsFor(configFor('')))
@@ -393,7 +503,13 @@ describe('dsh_dump_config', () => {
       expectShape(result)
       expect(failure.kind).toBe('timeout')
       expectSubstantiveVerdict(failure.data.verdict)
+      // ⚠️ 这一条**不改**成 `none`：这次一次 dump 都没读成 ⇒ 空数组是「没读到」，
+      // 不是「筛过了、是空的」。旧断言 `toEqual([])` 只钉住了数组本身，
+      // 真正要钉住的是「它不许被渲染成 none」（下一条用例管渲染）。
       expect(failure.data.key['actionable']).toEqual([])
+      expect(failure.data.key['notScreened']).toEqual(['--dump-config', '--dump-config-schema'])
+      // 第二次 dump 根本没跑：读不出组合树 ⇒ schema 的 `path` 解析不了 ⇒ 判不了（不是少一份材料）。
+      expect(failure.data.key['invocations']).toHaveLength(1)
       expect(failure.nextStep).toEqual({
         tool: DUMP_CONFIG_TOOL,
         args: { profile: 'web' },
@@ -440,6 +556,9 @@ describe('dsh_dump_config', () => {
       expect(String(failure.data.verdict)).toContain('contradicts its always-0 contract')
       // 只跑了第一次 dump —— 「跑过哪几次」是本次观测，不许假装跑了两次。
       expect(failure.data.key['invocations']).toHaveLength(1)
+      // 而「这一次没读到」同样要说出来：这条路上什么都没筛，`actionable` 为空
+      // **不是** `none`（覆盖不全 ⇒ 渲染成 `unknown`）。
+      expect(failure.data.key['notScreened']).toEqual(['--dump-config', '--dump-config-schema'])
     })
 
     it('command-failed：--dump-config-schema 退出码不在 {0,1} 内（且带上第一次的观测）', async () => {
