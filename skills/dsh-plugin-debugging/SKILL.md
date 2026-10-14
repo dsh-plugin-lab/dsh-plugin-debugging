@@ -33,7 +33,7 @@ author: Zayn
 按序问，命中即停：
 
 1. **改完没生效？** 分类：客户端 / 宿主端 / 配置，对照 §一。**别先重装**——重装只改安装形态，不改生效时机。配置存疑 → §3.8。
-2. **插件加载了吗？** 有 `cordis_inspect_list` 就自检（`Config.listConfigs` 看 entry 在不在）；没有就外部查三处：`bundles`、形态（link/copy 见 §3.2）、进程。**三处都只证前置条件，不证加载成功**——Fiber 状态没有查询入口；启动失败看 `$DSH_HOME/logs/startup-*.log`（§3.8）。
+2. **插件加载了吗？** 有 `cordis_inspect_list` 就自检（`Config.listConfigs` 看 entry 在不在）；没有就外部查三处：`bundles`、形态（link/copy 见 §3.2）、进程。**三处都只证前置条件，不证加载成功**——Loader 树上的 fiber 状态可由**插件侧自己投影**（§3.8），但 `cordis_inspect_list` 那套看不到；启动失败看 `$DSH_HOME/logs/startup-*.log`（§3.8）。
 3. **401？** 先分「连接被拒」（没启动）与「401」（服务在、认证没过）。401 再问端口变没变，见 §3.3。
 4. **重装 / 重启 / 隔离？** 依次看 §3.2（重装）／§一（重启）／§3.6（隔离）。判断完之后要动手，见 §3.9。
 5. **需要访问网页但没有 token / cookie？** → §3.4。（与 401 不同：可能还没访问过。）
@@ -97,7 +97,7 @@ client 查询的三态措辞在工具描述里可见，不重复。**只记这�
 
 ### 3.8 插件真的加载失败了吗
 
-**Fiber 级状态没有查询入口**。`Config.listConfigs` 的 **Config 状态**（`schema` / `absent` / `unsupported` / `tree` / `inactive`）运行期可查，但 `inactive` 混合了「禁用 / 未导入 / 已销毁」三义，**从不报 FAILED**——它答不了"崩没崩"。要确认得看：
+**Fiber 级状态能查，只是不在 `Config.listConfigs` 里**。插件侧可直接观测：`ctx.get('loader')` **无需声明 `inject`** 就可见、`loader.entries()` 可枚举，`entry.fiber.state` 实测 `2`=active / `3`=apply 失败（还能读到 `fiber._error`）/ `0`=pending；⚠️ **import 期就失败的 entry，其 `entry.fiber` 是 `undefined`**——只看 `state===3` 会漏掉它（宿主把它归为 `failed to import`）。而 `Config.listConfigs` 的 **Config 状态**（`schema` / `absent` / `unsupported` / `tree` / `inactive`）运行期也可查，但 `inactive` 混合了「禁用 / 未导入 / 已销毁」三义，**从不报 FAILED**——它答不了"崩没崩"。要确认得看：
 
 - **启动期**有硬证据：必需插件没激活会让启动直接失败，并把完整诊断写到 `$DSH_HOME/logs/startup-<ISO>-<uuid>.log`（**只在启动失败时生成**，不是常驻日志），同时把路径打到终端。
 - **运行期**：查该插件应有的注册面（工具、slot、服务）是否缺失，并回看它在启动报告里是否已被点名。
