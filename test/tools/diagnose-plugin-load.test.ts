@@ -17,6 +17,7 @@ import { describe, expect, it } from 'vitest'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 
 import {
+  ARTIFACT_FRESHNESS_VALUES,
   createDiagnosePluginLoadTool,
   DIAGNOSE_PLUGIN_LOAD_DESCRIPTION,
   DIAGNOSE_PLUGIN_LOAD_TOOL,
@@ -149,7 +150,7 @@ describe('dsh_diagnose_plugin_load', () => {
       const pkg = (data.key['packages'] as Record<string, unknown>[])[0]
       expect(pkg?.['inBundles']).toBe(true)
       expect(pkg?.['entryState']).toBe('present')
-      expect(pkg?.['artifactNewerThanProcess']).toBeDefined()
+      expect(pkg?.['artifactFreshness']).toBeDefined()
       // 安装形态只在 audit 里（人复核用，模型不需要）。
       const audited = (data.audit['packages'] as Record<string, unknown>[])[0]
       expect((audited?.['entry'] as Record<string, unknown>)['entryState']).toBe('present')
@@ -361,12 +362,12 @@ describe('dsh_diagnose_plugin_load', () => {
       })
     })
 
-    it('win32：产物比进程新 → artifactNewerThanProcess=true', async () => {
+    it('win32：产物比进程启动时刻新 → `artifactFreshness=changed-after-process-start`', async () => {
       await withPlatform('win32', async () => {
         const dshHome = await tempDshHome()
         const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
         await writeInstalledPackage(profileDir, 'pkg-a')
-        // 进程启动时间设成 2020 年，产物是「现在」写的 → 产物更新。
+        // 进程启动时间设成 2020 年，产物是「现在」写的 → 产物晚于进程启动。
         const { spawn, calls } = recordingSpawn(() =>
           cmdResult({ stdout: '4242|node|2020-01-01T00:00:00.0000000+08:00\n' }),
         )
@@ -376,13 +377,16 @@ describe('dsh_diagnose_plugin_load', () => {
 
         const data = expectOk(await run(tool, {}))
         const pkg = (data.key['packages'] as Record<string, unknown>[])[0]
-        expect(pkg?.['artifactNewerThanProcess']).toBe(true)
-        // 这条判据成立的前提就是「那次 spawn 的输出被消费了」。
+        expect(pkg?.['artifactFreshness']).toBe('changed-after-process-start')
+        // ⚠️ 这一档**不是**「宿主跑的是旧产物」的结论（热替换会让两者同时成立），
+        // 所以那个旧布尔字段不许再出现 —— 出现即是把「推不出来」印成了结论。
+        expect(pkg?.['artifactNewerThanProcess']).toBeUndefined()
+        // 这条判据成立的前提就是「那次 spawn 的输出被消费了」（替身必须真的被调用）。
         expect(calls).toHaveLength(1)
       })
     })
 
-    it('非 win32：`ss` 那张表给不出进程启动时间 → artifactNewerThanProcess=null（未知，不是 false）', async () => {
+    it('非 win32：`ss` 那张表给不出进程启动时间 → `artifactFreshness=undated`（未知，不是「没变」）', async () => {
       await withPlatform('linux', async () => {
         const dshHome = await tempDshHome()
         const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
@@ -396,9 +400,9 @@ describe('dsh_diagnose_plugin_load', () => {
 
         const data = expectOk(await run(tool, {}))
         const pkg = (data.key['packages'] as Record<string, unknown>[])[0]
-        // 关键区分：`null` = **判不了**（拿不到进程启动时间），不是 `false` = 「产物不比进程新」。
-        // 把未知报成 false 会在非 Windows 上给出**反向结论**。
-        expect(pkg?.['artifactNewerThanProcess']).toBeNull()
+        // 关键区分：`undated` = **判不了**（拿不到进程启动时间），
+        // 不是「产物没在进程启动后变过」—— 把未知报成后者会给出**反向结论**。
+        expect(pkg?.['artifactFreshness']).toBe('undated')
         // 非 win32 上命令**跑了**（linux 走 `ss`），但喂的是 Windows 那张表 ⇒ 认不出 ⇒
         // 启动时间取不到。承重的是「认不出那张表」，不是「一次都没跑」。
         expect(calls.length).toBeGreaterThan(0)
@@ -902,12 +906,12 @@ describe('dsh_diagnose_plugin_load', () => {
       expect(shared, `两份 fixture 共有的恒定行：${shared.join(' | ')}`).toEqual([])
     })
 
-    it('产物比进程新（无别的症状）→ 下一步是**可派发**的 dsh_check_effect_mode', async () => {
+    it('产物在进程启动后变过（无别的症状）→ 下一步是**可派发**的 dsh_check_effect_mode', async () => {
       await withPlatform('win32', async () => {
         const dshHome = await tempDshHome()
         const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
         await writeInstalledPackage(profileDir, 'pkg-a')
-        // 进程启动时间设成 2020 → 产物比进程新。
+        // 进程启动时间设成 2020 → 产物晚于进程启动。
         const { spawn } = recordingSpawn(() =>
           cmdResult({ stdout: '4242|node|2020-01-01T00:00:00.0000000+08:00\n' }),
         )
@@ -920,7 +924,7 @@ describe('dsh_diagnose_plugin_load', () => {
 
         const result = await run(tool, {})
         const data = expectOk(result)
-        expect(String(data.verdict)).toContain('artifacts are newer than the process')
+        expect(String(data.verdict)).toContain('artifacts changed after this process started')
         // 这一支**有工具可派**，所以不许退回 `manual`（Lead 2026-10-13 裁决）：
         // `change: 'host-code'` 是目标工具自己的封闭枚举，不必出现在本次输出里。
         expect(result.nextStep).toEqual({
@@ -1020,6 +1024,171 @@ describe('dsh_diagnose_plugin_load', () => {
       expect(String(observation['reason']).length).toBeLessThan(40)
       const text = renderText(tool, {}, await run(tool, {}))
       expect(text).toContain('reason: no host context')
+    })
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // E · 产物相对进程的判定：**「产物比进程新」推不出「宿主跑的是旧产物」**
+    //
+    // 成因（方向由维护者给定，本机**无法复现**，只在本仓判据里钉住形状）：
+    // 宿主 `alpha.3` 的 `feat(hmr): replace plugins whose package files changed
+    // during profile recomposition` 让 HMR 在重组合时**就地驱逐模块缓存并替换插件** ——
+    // 进程 `startedAt` 不变，磁盘上已是新代码。于是修复前那条判据
+    // （产物 mtime > 进程启动时间 ⇒ `stale=yes`、L1 断言「跑的是旧产物」）
+    // 在「刚做完一次热替换之后跑诊断」时给出**假阳性**。
+    //
+    // 修法不是换一个同样不可靠的参照系，而是**让判据承认「这里推不出来」**：
+    // 中间那一档从 `stale=yes` 变成 `changed-after-process-start` + L1 明说推不出来。
+    // ⚠️ 本机跑的是 alpha.2，所以这里**不假装这个 bug 在本机复现**：
+    // 钉的是「**形状与结论方向**」，不是「alpha.3 上的真机行为」。
+    // ══════════════════════════════════════════════════════════════════════════
+
+    describe('E · 产物那一档必须表达「推不出来」，不许再印成「跑的是旧产物」', () => {
+      /**
+       * 造一份「产物 mtime 与进程启动时刻由入参决定」的夹具（返回**工厂**，理由同
+       * `freshnessFixture`：`withPlatform` 必须把执行一起包住，坑 25）。
+       *
+       * @param artifactAgeMs 产物 mtime 相对现在的偏移（正数 = 未来，即晚于进程启动）。
+       * @param startedOffsetMs 进程启动时间相对现在的偏移（负数 = 过去）。
+       */
+      async function artifactFixture(
+        artifactAgeMs: number,
+        startedOffsetMs: number,
+      ): Promise<() => ToolDefinition> {
+        const dshHome = await tempDshHome()
+        const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
+        const packageDir = await writeInstalledPackage(profileDir, 'pkg-a')
+        const artifact = new Date(Date.now() + artifactAgeMs)
+        await utimes(join(packageDir, 'lib', 'index.js'), artifact, artifact)
+        const startedAt = new Date(Date.now() + startedOffsetMs).toISOString()
+        const { spawn } = recordingSpawn(() => cmdResult({ stdout: `4242|node|${startedAt}\n` }))
+        return () =>
+          createDiagnosePluginLoadTool(
+            depsFor(configFor(dshHome, { port: 3080 }), {
+              spawn,
+              loader: loaderWith([entrySnapshot({ moduleName: 'pkg-a', fiberState: 2 })]),
+            }),
+          )
+      }
+
+      it('产物在进程启动之后变过 ⇒ 那一档**不带**任何「跑的是旧产物」的结论', async () => {
+        await withPlatform('win32', async () => {
+          // 进程 5 分钟前起，产物 1 分钟前才改过 ⇒ 产物晚于进程启动。
+          const tool = (await artifactFixture(-60 * 1000, -5 * 60 * 1000))()
+
+          const result = await run(tool, {})
+          const data = expectOk(result)
+          const pkg = (data.key['packages'] as Record<string, unknown>[])[0]
+
+          // ① 形状：那一档是**独立的一档**，不是布尔（判据的主承重）。
+          expect(pkg?.['artifactFreshness']).toBe('changed-after-process-start')
+          // ② 「推不出来」必须**说出口**：不许只给一个看起来已经是结论的取值。
+          expect(String(data.verdict)).toContain('does not say the host runs older artifacts')
+          // ③ 断言的是**行为**（L1 的结论方向），不是某句措辞在不在：修复前那句
+          //    「the host is running stale artifacts」在这里出现 ⇒ 判红。
+          expect(String(data.verdict)).not.toMatch(/running stale artifacts/u)
+          // ④ L2 同样不许把这一档印成一个「是/否」结论。
+          const l2 = splitRender(renderText(tool, {}, result)).l2.join('\n')
+          expect(l2).toContain('artifact=changed-after-process-start')
+          expect(l2).not.toContain('stale=')
+          // ⑤ 下一步仍是「派去分类」而不是「去重启」，但措辞不许断言跑的是旧产物。
+          const step = result.nextStep as { why?: string } | undefined
+          expect(step?.why).toContain('undetermined')
+          expect(String(step?.why)).not.toMatch(/running artifacts older than/iu)
+        })
+      })
+
+      it('热替换过的那一次：树里那条是 active，但仍**不许**说宿主跑的是旧产物', async () => {
+        await withPlatform('win32', async () => {
+          // ⚠️ 这一条是**假阳性的对照**：产物确实在进程启动后变过，
+          // 而宿主自己的树说这条 entry 现在是 active —— 即「跑的很可能就是新产物」
+          // （热替换过）。修复前 L1 会在**这个形状**上说「跑的是历史遗留」。
+          const tool = (await artifactFixture(-60 * 1000, -5 * 60 * 1000))()
+
+          const data = expectOk(await run(tool, {}))
+          const pkg = (data.key['packages'] as Record<string, unknown>[])[0]
+          // 下界（防空转）：loader 替身**真的被调用过** —— `phase=active` 只可能来自它，
+          // 而它是被 `depsFor` 显式构造进去的（不是往窄类型形参里塞多余字段，坑 40）。
+          expect(pkg?.['phase']).toBe('active')
+          // 承重：**宿主自己的树说这条此刻是 active**（它正在跑），
+          // 而产物确实变过 —— 这两份数据不许被合并成「跑的是历史遗留」。
+          expect(String(data.verdict)).not.toMatch(/stale artifacts/iu)
+          // 事实照报，只是**带限定**：说清这个比较推不出宿主跑的是哪一份。
+          expect(String(data.verdict)).toContain('cannot be decided from the process start time')
+        })
+      })
+
+      it('三值闭集：三档都真被造出来过、互不相同，且都在闭集里（不许塌成两值）', async () => {
+        await withPlatform('win32', async () => {
+          const changed = (await artifactFixture(-60 * 1000, -5 * 60 * 1000))()
+          const unchanged = (await artifactFixture(-30 * 60 * 1000, -5 * 60 * 1000))()
+
+          const changedValue = String(
+            (expectOk(await run(changed, {})).key['packages'] as Record<string, unknown>[])[0]?.[
+              'artifactFreshness'
+            ],
+          )
+          const unchangedValue = String(
+            (expectOk(await run(unchanged, {})).key['packages'] as Record<string, unknown>[])[0]?.[
+              'artifactFreshness'
+            ],
+          )
+
+          // 拿不到参照（不给端口 ⇒ 不做端口查询 ⇒ 没有进程启动时间）⇒ 第三档。
+          const noPort = await (async () => {
+            const dshHome = await tempDshHome()
+            const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
+            await writeInstalledPackage(profileDir, 'pkg-a')
+            const { spawn, calls } = recordingSpawn(() => cmdResult({ stdout: '' }))
+            const built = createDiagnosePluginLoadTool(
+              depsFor(configFor(dshHome), {
+                spawn,
+                loader: loaderWith([entrySnapshot({ moduleName: 'pkg-a', fiberState: 2 })]),
+              }),
+            )
+            return { built, calls }
+          })()
+          const undatedValue = String(
+            (
+              expectOk(await run(noPort.built, {})).key['packages'] as Record<string, unknown>[]
+            )[0]?.['artifactFreshness'],
+          )
+          // 下界：那个 spawn 替身一次都没被调用的话，「没给端口就不查端口」就成了恒真的假设。
+          expect(noPort.calls, '没给端口却仍去查端口了').toHaveLength(0)
+
+          // 三档互不相同（塌成两档就是反向结论），且每档都在**运行时闭集**里。
+          expect(new Set([changedValue, unchangedValue, undatedValue]).size).toBe(3)
+          expect(ARTIFACT_FRESHNESS_VALUES).toContain(changedValue)
+          expect(ARTIFACT_FRESHNESS_VALUES).toContain(unchangedValue)
+          expect(ARTIFACT_FRESHNESS_VALUES).toContain(undatedValue)
+          // 闭集本身不许被悄悄改成两档（那条契约是「三值」这条纪律的载体）。
+          expect(ARTIFACT_FRESHNESS_VALUES).toHaveLength(3)
+          expect(new Set(ARTIFACT_FRESHNESS_VALUES).size).toBe(3)
+          // 三档的 L2 逐字不同（渲染不许把两档印成同一行）。
+          const texts = await Promise.all(
+            [changed, unchanged].map(async (tool) =>
+              splitRender(renderText(tool, {}, await run(tool, {}))).l2.join('\n'),
+            ),
+          )
+          expect(texts[0]).not.toBe(texts[1])
+        })
+      })
+
+      it('「没变过」那一档不许顺带断言「跑的就是这份」（它只说没变过，不说正在跑哪份）', async () => {
+        await withPlatform('win32', async () => {
+          // 产物 30 分钟前写的，进程 5 分钟前才起 ⇒ 启动那一刻盘上就是这份文件。
+          const tool = (await artifactFixture(-30 * 60 * 1000, -5 * 60 * 1000))()
+
+          const data = expectOk(await run(tool, {}))
+          const pkg = (data.key['packages'] as Record<string, unknown>[])[0]
+          expect(pkg?.['artifactFreshness']).toBe('unchanged-since-process-start')
+          // 「没有改完没重启的信号」≠「它正在跑的就是这份」—— 后者是另一条观测（树）。
+          expect(String(data.verdict)).not.toMatch(/is running the current artifacts/iu)
+          // 这一档**不**产出任何 nextStep（没有「需要有人去判」的事）。
+          expect(data.verdict).toContain('really did load')
+          const result = await run(tool, {})
+          expect(result.nextStep).toBeUndefined()
+        })
+      })
     })
   })
 
@@ -1450,7 +1619,7 @@ describe('dsh_diagnose_plugin_load', () => {
      * 造一份 fixture：真机日志 + 一个「5 分钟前启动」的监听进程。
      *
      * 进程启动时间从**端口查询**取（`PortListener.startedAt`）—— 与同工具的
-     * `artifactNewerThanProcess` 用的是**同一个**参照物。
+     * `artifactFreshness` 用的是**同一个**参照物。
      *
      * @param logAgeMs 日志文件 mtime 相对现在的偏移（负数 = 过去）。
      */
@@ -1922,7 +2091,7 @@ describe('dsh_diagnose_plugin_load', () => {
      * S1：跨实例调用后 `nextStep.args` **丢掉 `dshHome`** ⇒ 把模型引到**另一个实例**，
      * 而「两次调用输出长得一模一样」⇒ **看起来像成功**。
      *
-     * 三个 tool 支（absent / pending / stale）都要带 —— 三处各有一条用例，
+     * 三个 tool 支（absent / pending / 产物那一档）都要带 —— 三处各有一条用例，
      * 这样「只改了一处」的变异也会被抓到。判据同时带下界（坑 18）：值必须真的印在
      * 模型看得见的地方（`resolved:` 行），否则 B17 也不成立。
      */
@@ -1978,7 +2147,7 @@ describe('dsh_diagnose_plugin_load', () => {
       expect(renderText(tool, { dshHome: other }, result)).toContain(other)
     })
 
-    it('S1 · stale 支：跨实例时 nextStep.args 必须带上 dshHome', async () => {
+    it('S1 · 产物那一档：跨实例时 nextStep.args 必须带上 dshHome', async () => {
       await withPlatform('win32', async () => {
         const configured = await tempDshHome()
         const other = await tempDshHome()
@@ -1986,7 +2155,7 @@ describe('dsh_diagnose_plugin_load', () => {
         await writeInstalledPackage(configuredProfile, 'pkg-config')
         const otherProfile = await writeProfile(other, 'web', { bundles: ['pkg-other'] })
         await writeInstalledPackage(otherProfile, 'pkg-other')
-        // 进程启动时间设成 2020 年、产物是「现在」写的 ⇒ artifactNewerThanProcess=true（stale 支）。
+        // 进程启动时间设成 2020 年、产物是「现在」写的 ⇒ 产物晚于进程启动（那一档）。
         const { spawn } = recordingSpawn(() =>
           cmdResult({ stdout: '4242|node|2020-01-01T00:00:00.0000000+08:00\n' }),
         )

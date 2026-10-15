@@ -96,6 +96,19 @@ export async function writeInstalledPackage(
 }
 
 /**
+ * 造一个**活引用**（`Volatile<T>` 就是 `{ get(): T }`）。
+ *
+ * 为什么夹具里手搓而不是喂字面量：`Config.enableRestart` 的类型是 `Volatile<boolean>`
+ * （宿主那侧的可变引用，正是「改开关不用重启」那条要求在 schema 上的落点），
+ * 喂 `true` 编译就红 —— 那份类型不该被夹具绕开。
+ *
+ * @param value 当前值。
+ */
+export function volatileOf<T>(value: T): { get(): T } {
+  return { get: () => value }
+}
+
+/**
  * 造配置。
  *
  * 两个预算的默认值**引用 `lib/timeouts.ts`**（一处一事实）：夹具不该把 15_000 / 60_000
@@ -113,6 +126,10 @@ export function configFor(
     port: 0,
     timeoutMs: WORKLOAD_DEFAULT_BUDGET_MS.timeoutMs,
     schemaDumpTimeoutMs: WORKLOAD_DEFAULT_BUDGET_MS.schemaDumpTimeoutMs,
+    // 总闸**默认关**（维护者 2026-10-15 拍板）：夹具照它写，于是「忘了覆盖」
+    // 的那些用例会静默走成被拒 —— 那正好与真实默认一致，是本仓最典型的假绿形状。
+    // 要测「开着的那条路」的用例必须**显式**覆盖它（形态是活引用，见 {@link volatileOf}）。
+    enableRestart: volatileOf(false),
     ...overrides,
   }
 }
@@ -226,6 +243,37 @@ export async function withPlatform<T>(
   } finally {
     Object.defineProperty(process, 'platform', original)
   }
+}
+
+/**
+ * 去掉块注释与行注释，**但保留换行**（扫源码类判据的共同前置）。
+ *
+ * 为什么必须有：本仓源码的注释里会**讨论**被扫的那件事（「不杀进程」「`timeoutMs` 必须为正有限值」
+ * 「`--dump-config` 退出码恒 0」这类字样），不剥就会把**解释规则的文字**当成真代码 ——
+ * 那是**假红**，而假红同样会让人把判据删掉。
+ *
+ * ## 三个必须做对的地方（每一处都实测过一次，两份判据各踩到其中一部分）
+ *
+ * 1. **块注释要换成等量空格，不能整段删掉**：本仓几乎每个文件开头都有一大段文档注释，
+ *    删掉整段会让后面所有行号**整体前移** ⇒ 报出的 `文件:行` 是个**错的位置**。
+ *    实测过两次：`src/tools/dsh_dump_config.ts` 真实 242 行被报成 155 行（偏移 87）；
+ *    红线侧一次注入在第 190 行、被报成 143 行。「一个精确到行的错位置，比一句模糊的描述更费人」，
+ *    而对这几条判据来说「指到哪一行」正是唯一的产品 ⇒ 行号必须与真实文件对齐。
+ * 2. **行注释要认「行尾」的，不只是整行的**：`const x = 1 // timeoutMs: 15_000` 不剥就是假红。
+ * 3. **`(^|[^:])` 那一段是防 URL 的 `//`**（`http://…`）：不防就会从 URL 那里开始吞，
+ *    把同一行**后面**的真违规一起吞掉 —— 那是**假绿**，比假红更坏。
+ *
+ * 正则标志取 `timeout-budgets.test.ts` 那份（`gu` / `gmu`）：`u` 让这两条正则的转义语义
+ * 与 ES 规范一致（将来往里加 `\p{…}` 之类的写法不会静默按 `u` 解释），`m` 对本组形态是
+ * **空转的**（`(^|[^:])` 的 `[^:]` 本来就吃掉换行符，所以行首注释两种写法都认得）——
+ * 留着它只是因为**逐字照抄**那份已实测过的形态最省事，不是它起了作用。
+ *
+ * @param text 源文件原文（全文，不是单行）。
+ */
+export function stripComments(text: string): string {
+  return text
+    .replace(/\/\*[\s\S]*?\*\//gu, (block) => block.replace(/[^\n]/gu, ' '))
+    .replace(/(^|[^:])\/\/[^\n]*/gmu, '$1')
 }
 
 /** 一次只会失败的 spawn：测试里没显式给 spawn 时用它，避免真起进程。 */

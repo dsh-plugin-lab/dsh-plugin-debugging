@@ -43,6 +43,7 @@ import {
   sharedSubstrings,
   splitRender,
   tempDshHome,
+  volatileOf,
   writeProfile,
 } from './helpers.ts'
 
@@ -897,6 +898,77 @@ describe('dsh_check_effect_mode', () => {
       expect(resolved['dshHomeSource']).toBe('config')
       expect(calls.length).toBeGreaterThan(0)
       for (const call of calls) expect(call.env?.['DSH_HOME']).toBe(configuredHome)
+    })
+  })
+
+  // ── 总闸档位（`enableRestart`，默认关） ────────────────────────────────────
+  //
+  // 报出它的理由是「一处一事实」：模型不必靠「调 `dsh_restart` 被拒」去反推
+  // 那个开关是关的 —— 而**靠拒绝去猜**不可行，因为拒绝本身是那个工具
+  // 「明说自己被挡住」的设计前提。
+  describe('总闸档位 enableRestart：报成一处独立事实，且不参与 change 分类', () => {
+    it('两档各印一行，两档渲染出**不同**结果（防空转：一句恒定文本也会全绿）', async () => {
+      const dshHome = await tempDshHome()
+      await writeProfile(dshHome, 'web', { bundles: [HMR_BUNDLE] })
+
+      const texts: string[] = []
+      for (const enableRestart of [false, true]) {
+        const tool = createEffectModeTool(
+          depsFor(configFor(dshHome, { enableRestart: volatileOf(enableRestart) })),
+        )
+        const args = { change: 'config' }
+        const result = await run(tool, args)
+        const data = expectOk(result)
+        // 模型真正读的那一层是 L2，而 `key` 是它的上游。
+        expect(data.key['restartEnabled']).toBe(enableRestart)
+        texts.push(renderText(tool, args, result))
+      }
+      expect(texts[0]).toContain('restart: disabled')
+      // ⚠️ **字段名刻意不出现在这里**：它在同一个环境下恒定，而 B16 判「恒定块」
+      // （模型每次白读一遍）。「怎么打开」由 `dsh_restart` 那句拒绝权威地说 ——
+      // 一处一事实。这一条钉住「别为了方便把它抄回这里」。
+      expect(texts[0], '把「怎么打开」抄了两处').not.toContain('enableRestart')
+      expect(texts[1]).toContain('restart: enabled')
+      expect(texts[1], '两档渲染出同一段文本 ⇒ 那行不是「现在是什么」而是装饰').not.toBe(texts[0])
+    })
+
+    it('**绝不**混进 `change` 的分类判定：四类改动在两档下 `mode` 完全一致', async () => {
+      const dshHome = await tempDshHome()
+      await writeProfile(dshHome, 'web', { bundles: [HMR_BUNDLE] })
+      const changes = ['config', 'bundle-added', 'host-code', 'client-code'] as const
+
+      for (const enableRestart of [false, true]) {
+        const tool = createEffectModeTool(
+          depsFor(configFor(dshHome, { enableRestart: volatileOf(enableRestart) })),
+        )
+        for (const change of changes) {
+          const data = expectOk(await run(tool, { change }))
+          // 「开没开重启工具」与「这个改动归哪一档」是两件事；混进去就是一个不存在的因果。
+          expect(
+            data.key['mode'],
+            `enableRestart=${String(enableRestart)} 把 ${change} 的分类改掉了`,
+          ).toBe(decideEffectMode({ change, hmrUsable: true }).mode)
+          expect(data.key['baseline']).toBe(decideEffectMode({ change, hmrUsable: true }).baseline)
+          expect(data.key['downgraded']).toBe(false)
+          // 仍然照实报出开关档位 —— 独立，不是「因为它被混进去才出现」。
+          expect(data.key['restartEnabled']).toBe(enableRestart)
+        }
+      }
+    })
+
+    it('失败分支也带这一格（成功与失败同形，不让失败顺带把它也失明）', async () => {
+      const dshHome = await tempDshHome()
+      await writeProfile(dshHome, 'web', { bundles: [] })
+      const { spawn } = recordingSpawn(() => cmdResult({ spawnError: 'ENOENT' }))
+      const tool = createEffectModeTool(
+        depsFor(configFor(dshHome, { enableRestart: volatileOf(true) }), { spawn }),
+      )
+      const result = await run(tool, { change: 'config' })
+      const failure = expectFail(result)
+      expect(failure.data.key['restartEnabled']).toBe(true)
+      // ⚠️ 渲染要走**工具返回值**那份，不是 `expectFail` 返回的视图对象 ——
+      // 喂视图对象会让渲染层判定形状非法、退化成整块 JSON，那条断言就量错了东西。
+      expect(renderText(tool, { change: 'config' }, result)).toContain('restart: enabled')
     })
   })
 })

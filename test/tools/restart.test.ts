@@ -215,6 +215,45 @@ describe('lib/restart · marker 编解码（往返无损 / 三值纪律）', () 
     )
   })
 
+  it('`initiator` 参与往返；**缺席往返后依然缺席**（缺席 ≠ 空串）', () => {
+    const withInitiator: RestartMarker = {
+      version: MARKER_VERSION,
+      reason: 'r',
+      at: '2026-10-14T06:00:00.000Z',
+      sessions: ['session-a', 'session-b'],
+      initiator: 'session-a',
+      trace: [],
+    }
+    const back = parseMarker(serializeMarker(withInitiator))
+    if (back.status !== 'ok') throw new Error('期望解析成功')
+    expect(isDeepStrictEqual(back.marker, withInitiator)).toBe(true)
+
+    // 本字段之前写的 marker 没有它 ⇒ 往返后**依然没有这个键**。
+    // 「缺席」承载着语义（不知道谁发起的 ⇒ `reason` 谁都不发），补成 `''` 就把它压成了第三种形态。
+    const legacy: RestartMarker = {
+      version: MARKER_VERSION,
+      reason: 'r',
+      at: '2026-10-14T06:00:00.000Z',
+      sessions: ['session-a'],
+      trace: [],
+    }
+    const legacyBack = parseMarker(serializeMarker(legacy))
+    if (legacyBack.status !== 'ok') throw new Error('期望解析成功')
+    expect('initiator' in legacyBack.marker).toBe(false)
+  })
+
+  it('`initiator` 是空串 / 非字符串 ⇒ malformed（空串不是「缺席」）', () => {
+    const base = { version: 1, reason: 'r', at: 't', sessions: ['session-a'], trace: [] }
+    for (const bad of ['', 7, null]) {
+      expect(
+        parseMarker(JSON.stringify({ ...base, initiator: bad })).status,
+        `initiator=${JSON.stringify(bad)} 被放过了`,
+      ).toBe('malformed')
+    }
+    // 自证不是恒真：合法值必须**过**（否则上面那条可以靠「一律 malformed」蒙对）。
+    expect(parseMarker(JSON.stringify({ ...base, initiator: 'session-a' })).status).toBe('ok')
+  })
+
   it('序列化的第一个键是 version（读的人第一眼就能判格式版本）', () => {
     const keys = Object.keys(JSON.parse(serializeMarker(parseOk())) as Record<string, unknown>)
     expect(keys[0]).toBe('version')
@@ -554,6 +593,9 @@ describe('lib/restart · 接线：走完整入口 planRestart', () => {
     expect(fs.writes[0]?.path).toBe(ready.markerPath)
     expect(ready.marker.sessions).toEqual(['session-aaaa-1111-bbbb'])
     expect(ready.marker.reason).toBe(REQUEST.reason)
+    // 发起者**单独记**（`sessions` 排过序，光看那个数组分不出谁发起的）——
+    // 它是「`reason` 只发给谁」的唯一依据，缺了这一步恢复半就只能谁都不发。
+    expect(ready.marker.initiator).toBe('session-aaaa-1111-bbbb')
 
     const written = parseMarker(fs.writes[0]?.text ?? '')
     expect(written.status).toBe('ok')

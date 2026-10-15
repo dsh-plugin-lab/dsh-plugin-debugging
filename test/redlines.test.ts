@@ -77,6 +77,7 @@ import {
 import type { LaunchCommand, RestartFsPort, RestartPorts } from '../src/lib/restart.ts'
 import { encodeBase64Url } from '../src/lib/cookie-sign.ts'
 import { createToolDeps, type ToolDeps } from '../src/tools/shared.ts'
+import { stripComments, withPlatform } from './tools/helpers.ts'
 
 /**
  * 本仓的**红线**：能落成断言的不变量。
@@ -159,22 +160,12 @@ function describeOffenders(what: string, offenders: readonly string[]): string {
 }
 
 /**
- * 去掉块注释与行注释，**但保留换行**。
+ * 剥注释走 `test/tools/helpers.ts` 的共享 `stripComments`（**唯一一份**）。
  *
- * 必须有：源码注释里会正常出现「不杀进程」「`--dump-config` 退出码恒 0」这类字样，
- * 不剥注释就会把**解释规则的文字**当成违规。`[^:]` 那一段是防 `https://` ——
- * 不防的话 URL 里那个 `//` 会被当成行注释起点，把整行后半截吃掉。
- *
- * **为什么把块注释的内容换成等量空格而不是整段删掉**：本仓几乎每个文件开头都有一大段
- * 文档注释，整段删掉会让后面所有行号**整体前移** —— 于是红线报出的 `文件:行`
- * 是个**错的位置**（实测：注入在第 190 行，报出来是 143 行）。
- * 「一个精确到行的错位置，比一句模糊的描述更费人」，所以行号必须与真实文件对齐。
+ * 本文件曾自己内联一份，而 `test/tools/timeout-budgets.test.ts` 还有第三份 ——
+ * 两份都源自同一个坑（块注释整段删掉会让后面行号整体前移）。三份实现收敛成一份，
+ * 坑的实测证据也一并收在那一处的注释里（两边的证据都留着，别压成一句空话）。
  */
-function stripComments(source: string): string {
-  return source
-    .replace(/\/\*[\s\S]*?\*\//g, (block) => block.replace(/[^\n]/g, ' '))
-    .replace(/(^|[^:])\/\/[^\n]*/g, '$1')
-}
 
 /** 遍历 `src/**` 下的 TS 源码（相对路径 + 内容）。 */
 function readSourcesUnder(dirRelPath: string): Array<{ path: string; text: string }> {
@@ -193,6 +184,7 @@ function readSourcesUnder(dirRelPath: string): Array<{ path: string; text: strin
 interface Manifest {
   name?: string
   version?: string
+  scripts?: Record<string, string>
   dependencies?: Record<string, string>
   devDependencies?: Record<string, string>
   peerDependencies?: Record<string, string>
@@ -203,6 +195,71 @@ interface Manifest {
 }
 
 const packageJson = JSON.parse(readRepo('package.json')) as Manifest
+
+// ── 文档里点名的包管理器命令，必须是本仓真有的脚本 ──────────────────────────
+
+/**
+ * 判据：文档里写的 `npm run X` / `pnpm run X` / `npm test` / `pnpm test`，那个 `X` 必须
+ * **真实存在于 `package.json` 的 `scripts` 里**。
+ *
+ * **为什么要有这条**（维护者 2026-10-15 的原话：「怕你们有时候读到旧文档会被带偏」）：
+ * 快速迭代里**过时文档比缺文档更危险** —— 缺的人会去查，过时的**会被当真**。而命令是
+ * 最容易被带偏的一类：读者照着文档敲，敲错的东西看起来仍然能跑（`npm run check` 在
+ * 没迁 pnpm 时也是能跑的，只是从此不走冻结安装）。
+ * ⇒ 与其每次靠人记得去扫文档（**扫一次的成本会随文档增长而上涨，而且必然漏**），
+ * 不如让这条**自己红**：改名/删脚本时同一次改动里文档跟着改，忘了就当场红。
+ *
+ * **判定面刻意只取「文档里点名本仓脚本」的场合**：
+ * - **历史陈述不在判定面** —— `docs/PUBLISHING.md` 里有讲 2026-10-13 那次事故的
+ *   `npm ci`（那次跑的确实是 `npm ci`），改它就是把历史快照改成假的；
+ * - **registry 操作不在判定面** —— `npm publish` / `view` / `deprecate` / `pack`
+ *   是 **npm 自己的**命令，迁 pnpm 不改这些（CI 的 publish 步骤走的也是 npm）。
+ * ⇒ 所以本判据查的是**脚本名**是否存在，不查**该用哪个包管理器**；
+ * 「文档里的包管理器前缀对不对」是**人工评审**那一半，本判据只钉住**不会敲错脚本名**那一半。
+ */
+
+/** 文档里出现的「包管理器 + run/test/ci」形态，只保留本仓脚本该有的那一段。 */
+const DOC_COMMAND_PATTERN =
+  /(?<![a-z])(?:npm|pnpm) (?:run |)test\b|(?<![a-z])(?:npm|pnpm) run ([a-z0-9:_-]+)/g
+
+/** 从文档里提出「它想跑的脚本名」，去掉明显不是本仓脚本的（registry 操作、历史快照）。 */
+function collectClaimedScriptNames(markdown: string): string[] {
+  const claims: string[] = []
+  for (const match of markdown.matchAll(DOC_COMMAND_PATTERN)) {
+    // `npm test` / `pnpm test` —— 无参形态指向 `test` 脚本。
+    if (match[0].endsWith('test')) {
+      claims.push('test')
+      continue
+    }
+    const named = match[1]
+    // registry 侧的 npm 子命令带别的形状（publish / view / deprecate / pack），
+    // 它们不是 package.json 的 scripts，不该进判定面。
+    if (named !== undefined) claims.push(named)
+  }
+  return claims
+}
+
+/** 会被这条判据读到的文档：门面、子树手册、docs 下那几份。 */
+const DOC_COMMAND_FILES = [
+  'README.md',
+  'README_zh.md',
+  'AGENTS.md',
+  'docs/SHAPE.md',
+  'docs/ARCHITECTURE.md',
+  'docs/PUBLISHING.md',
+  'docs/HOST-CONTRACTS.md',
+  'src/README.md',
+  'src/lib/README.md',
+  'src/skills/README.md',
+  'src/tools/README.md',
+  'test/README.md',
+  'test/tools/README.md',
+  'test/skills/README.md',
+  'test/integration/README.md',
+  'scripts/README.md',
+  'locale/README.md',
+  'skills/README.md',
+] as const
 
 // ── A. 组织 Must-agree 档 ──────────────────────────────────────────────────
 
@@ -1015,6 +1072,63 @@ describe('B9 工具名是闭集', () => {
         TOOL_NAME_SHAPES.map((shape) => `  - ${shape.label}`).join('\n') +
         '\n若实现换了写法，请把新形态加进 TOOL_NAME_SHAPES 并同步扩自检。',
     ).toEqual([...EXPECTED_TOOLS].sort())
+  })
+})
+
+/**
+ * 文档里点名的包管理器命令，其脚本名必须真在 `package.json` 里。
+ *
+ * 与 B9 那条「文档提到的工具名属于闭集」同族：B9 守的是**工具名**，这条守的是**脚本名** ——
+ * 两者都是「文档断言了一件事，而那件事最好有东西在守」。维护者 2026-10-15 点名的正是
+ * 这个形状：「怕你们有时候读到旧文档会被带偏」。命令是最容易带偏的一类，因为敲错的命令
+ * **看起来仍然能跑**。
+ */
+describe('B29 文档点名的脚本名必须真存在', () => {
+  it('提取器本身有效：`npm run X` / `pnpm run X` / `npm test` / `pnpm test` 四种形态都提得出脚本名', () => {
+    const sample = [
+      '必跑 `npm run check`。',
+      '必跑 `pnpm run check:release`。',
+      '要个数就去跑 `npm run test`。',
+      '本机侧跑 `pnpm test`。',
+    ].join('\n')
+    // ⚠️ **这四条各自都不可省**：`pnpm run X` 那两条是这条判据真正在守的东西 ——
+    // 若提取器只认 `npm`（哪怕带着词边界），`pnpm` 那两行就提不出脚本名，本条立刻红。
+    // （2026-10-15：曾额外写一条「pnpm 不被当成 npm」并声称它钉住词边界，变异后仍是绿的 ——
+    //  交替本身就能解析 `pnpm`，那条是装饰性假绿，已删。）
+    expect(collectClaimedScriptNames(sample).sort()).toEqual([
+      'check',
+      'check:release',
+      'test',
+      'test',
+    ])
+  })
+
+  it('`pnpm run X` 提出来的是 X，不是把 pnpm 当成 npm 再多提一次', () => {
+    // 防空转的一半：**同一个脚本名不该因为前缀不同被算成两条**。
+    expect(collectClaimedScriptNames('跑 `pnpm run check`')).toEqual(['check'])
+  })
+
+  it('文档里点名的每个脚本都在 package.json 里（漏改的当场红）', () => {
+    const scripts = packageJson.scripts ?? {}
+    const offenders: string[] = []
+    let claims = 0
+    for (const relPath of DOC_COMMAND_FILES) {
+      const markdown = readRepo(relPath)
+      // 自证读到的是真文件：读错路径会得到空串，而空串 = 0 命中 = 看起来像全绿（坑 18）。
+      expect(markdown.length, `${relPath} 短得不像真文件`).toBeGreaterThan(200)
+      for (const name of collectClaimedScriptNames(markdown)) {
+        claims += 1
+        if (!Object.prototype.hasOwnProperty.call(scripts, name)) {
+          offenders.push(`${relPath} 让读者跑 \`${name}\`，而 package.json 的 scripts 里没有它`)
+        }
+      }
+    }
+    // 防空转：扫不到东西时下面那条判红没有意义。
+    expect(
+      claims,
+      `${DOC_COMMAND_FILES.length} 份文档里一个脚本名都没扫到 —— 提取器坏了`,
+    ).toBeGreaterThan(0)
+    expect(offenders, describeOffenders('文档点名了不存在的脚本', offenders)).toEqual([])
   })
 })
 
@@ -1954,23 +2068,31 @@ describe('B12 技能文件本体', () => {
  * （删掉那一节 / 只留占位标题 / 只写一半），不必去动真文件。
  */
 
-/** 该节标题里必须出现的那个词。取前缀匹配，所以标题改措辞不必同批改判据。 */
-const INTERVENTION_HEADING_WORD = '干预'
+/**
+ * 该节标题里必须出现的那个词。取前缀匹配，所以标题改措辞不必同批改判据。
+ *
+ * ⚠️ **2026-10-15：`SKILL.md` 正文改成全英文**（模型可见文本按本仓规矩一律英文），
+ * 标题从「干预 —— 判断之后的动作」变成 `Acting on the verdict`，这个词随之改成 `Acting`。
+ * 它现在是一个**英文词**，所以下面的正则要带 `i` 之外的显式大小写。
+ */
+const INTERVENTION_HEADING_WORD = 'Acting'
 
 /** 该节正文的字符数下界（占位标题只有十来个字；真的一节是若干条结论）。 */
 const INTERVENTION_MIN_BODY_CHARS = 200
 
 /**
- * 该节**必须**提到的工具：写侧与派生各一个。
+ * 该节必须提到的工具：写侧 / 派生 / 行动各一个。
  *
  * 写成字面量而不是从 `EXPECTED_TOOLS` 里筛：筛出来的那份会随闭集变化而自动变短 ——
  * 工具被移除时判据跟着一起失效，于是「该节不再覆盖写侧」会静默通过。
  * 这里要的是「删掉工具就有人来看」的方向，所以它是一个**必须同批维护**的点。
  *
- * ⚠️ **只列已实现的那两个**：重启类工具**有意排在最后、现在不存在**，
- * 正文里写不写它由那时的形态决定，判据不该替它预设。
+ * ⚠️ **三处同批维护**：增删工具、改 `SKILL.md` 那一节的标题措辞、改这里的清单 ——
+ * 三者互不知道，漏改任何一个都会让本条变成空转或假红。
+ * —— 2026-10-15 补 `dsh_restart`：那节现在覆盖三个工具，清单当时只列了两个（重启类当时还不存在，
+ * 注释里写着「有意不预设」）；它落地之后，不列就是**漏**。
  */
-const INTERVENTION_REQUIRED_TOOLS = ['dsh_hot_reload', 'dsh_sign_cookie'] as const
+const INTERVENTION_REQUIRED_TOOLS = ['dsh_hot_reload', 'dsh_sign_cookie', 'dsh_restart'] as const
 
 /** 该节至少要有这么多条要点（拆成列表的那几条 `-`），否则「有内容」判据太松。 */
 const INTERVENTION_MIN_BULLETS = 4
@@ -2045,23 +2167,17 @@ describe('B12b 技能正文的「干预」一节存在且非空（否则「解�
   const SKILL_REL = 'skills/dsh-plugin-debugging/SKILL.md'
 
   it('提取器本身有效：找得到那一节、找不到也照实说', () => {
-    const withSection = [
-      '# T',
-      '',
-      '### 3.9 干预 —— 判断之后的动作',
-      '',
-      '- 一条',
-      '- 两条',
-      '',
-    ].join('\n')
-    expect(interventionSectionOf(withSection).heading).toBe('### 3.9 干预 —— 判断之后的动作')
-    // 正文里提到「干预」不算数 —— 指针会被误当成小节起点，切出来只剩一行（见函数注释）。
+    const withSection = ['# T', '', '## Acting on the verdict', '', '- 一条', '- 两条', ''].join(
+      '\n',
+    )
+    expect(interventionSectionOf(withSection).heading).toBe('## Acting on the verdict')
+    // 正文里提到那个词不算数 —— 指针会被误当成小节起点，切出来只剩一行（见函数注释）。
     const withPointerOnly = [
       '# T',
       '',
-      '先判断，再动手（见 §3.9 干预）。',
+      '先判断，再动手（见 Acting on the verdict）。',
       '',
-      '### 3.8 别的一节',
+      '## 别的一节',
     ].join('\n')
     expect(interventionSectionOf(withPointerOnly).heading).toBe('')
   })
@@ -2072,21 +2188,26 @@ describe('B12b 技能正文的「干预」一节存在且非空（否则「解�
       'name: x',
       '---',
       '',
-      '### 3.9 干预',
+      '## Acting on the verdict',
       '',
       '**写侧 `dsh_hot_reload`**：换代码，不重启宿主。',
       '',
       '- 什么时候用：刚改完插件宿主端代码，进程不动。',
       '- 给目标的方式：`entryId` / `module` / `serverName` 恰好给一个。',
       '- 第一次先带 `dryRun: true` 预览。',
-      '- 失败会放回旧版本，L2 里的 `rolledBack` 说明树被碰过没有。',
+      '- 失败会放回旧版本，运行树被碰过没有会报出来。',
       '',
       '**派生 `dsh_sign_cookie`**：让脚本带上凭证。',
       '',
       '- 401 之后用它，让脚本与命令行客户端带上凭证。',
       '- cookie 值刻意不进返回值，报的是签成了、绑在哪个 authority。',
       '',
-      '### 3.10 下一节',
+      '**行动 `dsh_restart`**：重启宿主并接回会话。',
+      '',
+      '- 判成 restart-required 时用它。',
+      '- 四道闸门先过，再走审批门；不可逆。',
+      '',
+      '## 下一节',
     ].join('\n')
 
     // ① 完整的一份要过 —— 否则下面三条「会红」就毫无意义。
@@ -2094,12 +2215,13 @@ describe('B12b 技能正文的「干预」一节存在且非空（否则「解�
 
     // ② 整节删掉（解冻了却没写的那一种）。
     expect(
-      judgeInterventionSection(full.replace(/### 3\.9 干预[\s\S]*?(?=### 3\.10)/, '')),
+      judgeInterventionSection(full.replace(/## Acting on the verdict[\s\S]*?(?=## 下一节)/, '')),
     ).not.toEqual([])
     // ③ 只留标题 —— 这正是本条要挡的「占位标题看起来像写了」。
-    const placeholder = '### 3.9 干预\n\n待补。\n\n### 3.10 下一节\n'
+    const placeholder = '## Acting on the verdict\n\n待补。\n\n## 下一节\n'
     expect(judgeInterventionSection(placeholder)).not.toEqual([])
-    // ④ 同一节的正文在，但只覆盖写侧、漏了派生。
+    // ④ 同一节的正文在，但只覆盖写侧与派生、漏了行动那个工具。
+    expect(judgeInterventionSection(full.replace(/`dsh_restart`/g, '（不写了）'))).not.toEqual([])
     expect(judgeInterventionSection(full.replace(/`dsh_sign_cookie`/g, '（不写了）'))).not.toEqual(
       [],
     )
@@ -2262,12 +2384,63 @@ function collectCjkInStringLiterals(source: string): Array<{ line: number; liter
 function judgeCjkInSourceStrings(sources: readonly { path: string; text: string }[]): string[] {
   const offenders: string[] = []
   for (const { path, text } of sources) {
+    // `src/client/` 是**给人看的界面文案**，到不了模型 —— B14 守的是「模型可见字符串」，
+    // 把 UI 文案也算进来就等于禁止界面本地化。维护者 2026-10-15 拍板：这张卡片跟随界面语言切换，
+    // 所以 `zh` 字典是**该有的**，不是违规。
+    // ⚠️ 别用「把中文藏进 .tsx 就绕过」那种写法 —— 那是钻判据的空子，不是解法。
+    if (path.replace(/\\/g, '/').includes('src/client/')) continue
     for (const hit of collectCjkInStringLiterals(text)) {
       offenders.push(`${path}:${hit.line} → ${JSON.stringify(hit.literal)}`)
     }
   }
   return offenders
 }
+
+/**
+ * B14b 判据：**技能正文**（`skills/<包名>/SKILL.md`）不含 CJK。
+ *
+ * 为什么不并进 B14：B14 的扫描面是 `src/**`，而技能正文住在 `skills/`。
+ * 本仓规则写「可能到达模型眼里的字符串用英文」，**而技能正文正是模型逐字读的那一份** ——
+ * 它却不在 B14 的面内。实测（2026-10-15）：正文全中文而全仓门禁全绿 ——
+ * 也就是说「有人把它改回中文」这件事**没有任何东西会红**。
+ *
+ * ⚠️ **扫描面是那份具体的 `SKILL.md`，不是递归扫 `skills/`**：
+ * - `skills/dsh-plugin-debugging/archive/` 下有一份**中文的历史存档** ——
+ *   它是「当时长什么样」的证据，**必须**保持中文；
+ * - `test/skills/fixtures/` 那几个夹具的正文也是中文，且它们故意是坏的。
+ * 递归会把这两类一起判红，而那正是本条**不该**管的东西。
+ */
+describe('B14b 技能正文（模型可见）不含 CJK', () => {
+  const SKILL_REL = 'skills/dsh-plugin-debugging/SKILL.md'
+  const ARCHIVE_REL = 'skills/dsh-plugin-debugging/archive/2026-10-12-pure-text.md'
+
+  it('随包分发的 SKILL.md 整份不含 CJK', () => {
+    const text = readRepo(SKILL_REL)
+    expect(text.length, 'SKILL.md 读空了 —— 判据没跑到').toBeGreaterThan(1000)
+
+    const hits: string[] = []
+    text.split('\n').forEach((line, index) => {
+      if (CJK.test(line)) hits.push(`第 ${String(index + 1)} 行 → ${line.trim().slice(0, 60)}`)
+    })
+    expect(
+      hits,
+      describeOffenders('SKILL.md 里出现 CJK', hits) +
+        '\n技能正文是模型逐字读的长文本，按本仓规矩一律英文。' +
+        '它不是源码，没有「注释写中文」那条例外。',
+    ).toEqual([])
+  })
+
+  it('扫描器非空转：中文一定报、纯英文一定不报；存档那份**必须仍是中文**', () => {
+    // 自证：正则不是恒假 —— 否则上面那条对任何内容都会绿。
+    expect(CJK.test('# 技能正文')).toBe(true)
+    expect(CJK.test('## Acting on the verdict')).toBe(false)
+    // 反向自证：存档是**历史证据**，它若被翻译成英文，「当时长什么样」就没了。
+    expect(
+      CJK.test(readRepo(ARCHIVE_REL)),
+      '历史存档被改成英文了 —— 它存在的意义就是原样保留当时的中文版',
+    ).toBe(true)
+  })
+})
 
 describe('B14 src/** 的模型可见字符串不含 CJK（注释除外）', () => {
   it('真实源码里没有含 CJK 的字符串字面量', () => {
@@ -3695,9 +3868,12 @@ describe('B23 观察层不许自己写文件', () => {
  *
  * ## 为什么夹具写在**本文件内部**而不 import `test/tools/helpers.ts`
  *
- * `test/tools/helpers.ts` 是 W1 冻结的、四个工具测试共享的形状，**不是这条红线的写域**。
- * 需要助手就写在文件内部 —— 这也是本文件一直以来的做法（它至今只 import `src/**`）。
- * **代价如实记下**：`withPlatform` 与那边的实现重复了一份（见文末「已知限度」的技术债条目）。
+ * 本文件造的是**红线自己的语料夹具**（十个工具结果条目、临时 `$DSH_HOME`），与工具测试要的东西
+ * 不同源，硬拉过去只会让两边的语料一起漂。所以留在文件内部 —— 这也是本文件一直以来的做法。
+ *
+ * ⚠️ **例外只有「通用助手」那几条**（剥注释、钉平台）：它们不是红线语料，各写一份就等于
+ * 让判据的取数口随文件分叉。2026-10-15 已收敛到 `test/tools/helpers.ts`（AGENTS「技术债：
+ * 收敛重复的测试助手」的收尾）—— 本文件从那里取，**不再自带副本**。
  */
 
 // ── 运行期夹具 ────────────────────────────────────────────────────────────
@@ -3713,6 +3889,10 @@ function redlineConfig(dshHome: string, overrides: Partial<ResolvedConfig> = {})
     // 否则默认值一改，这里就静默按旧值跑（判据滞后于实现）。
     timeoutMs: WORKLOAD_DEFAULT_BUDGET_MS.timeoutMs,
     schemaDumpTimeoutMs: WORKLOAD_DEFAULT_BUDGET_MS.schemaDumpTimeoutMs,
+    // 总闸默认关 ⇒ `restartWith` 的两条 fixture 里有**一条**（dry-run 那条走不了闸门）
+    // 必须显式打开；关着的话它会拿到「被配置禁用」的拒绝，而红线的下界要求
+    // 每个工具**至少各一条成功与一条失败**。形态是活引用（`Volatile<boolean>`）。
+    enableRestart: { get: () => true },
     ...overrides,
   }
 }
@@ -3789,36 +3969,6 @@ function redlineExec(): ToolRunContext {
     signal: new AbortController().signal,
     agent: { id: 'session-redline', session: { id: 'session-redline' } },
   } as unknown as ToolRunContext
-}
-
-/**
- * 临时把 `process.platform` 换成指定值，跑完**无条件还原**。
- *
- * 为什么必须有：`lib/ports.ts` 只在 Windows 上起子进程查监听端口，别的平台**早返回**。
- * 不钉平台的话，「`diagnose × spawn` 这条注入到底有没有被走到」会随机器变 ——
- * 本机 Windows 上绿、CI ubuntu 上 `spawn` 一次都没被调用 → **判据在 CI 上空转**。
- * 钉住平台让两条分支在任意机器上都被真跑到（与活跃坑 25 同一条纪律）。
- *
- * ⚠️ 与 `test/tools/helpers.ts` 的 `withPlatform` 重复 —— 那边不是本红线的写域，
- * 见文末「已知限度」的技术债条目。
- *
- * @param platform 要伪装的平台值。
- * @param fn 在该平台下跑的逻辑。
- */
-async function withPlatformRedline<T>(platform: NodeJS.Platform, fn: () => Promise<T>): Promise<T> {
-  const original = Object.getOwnPropertyDescriptor(process, 'platform')
-  if (original === undefined) throw new Error('process.platform has no property descriptor')
-  Object.defineProperty(process, 'platform', {
-    value: platform,
-    configurable: true,
-    enumerable: true,
-    writable: true,
-  })
-  try {
-    return await fn()
-  } finally {
-    Object.defineProperty(process, 'platform', original)
-  }
 }
 
 /**
@@ -4749,7 +4899,7 @@ interface InjectionGroup {
   build: () => { tool: ToolDefinition; calls: () => number }
   /** 调用参数。 */
   args: unknown
-  /** 需要显式钉住的平台（见 `withPlatformRedline`）。 */
+  /** 需要显式钉住的平台（见 `withPlatform`）。 */
   platform?: NodeJS.Platform
 }
 
@@ -4879,10 +5029,11 @@ describe('B24 execute 全路径不抛（契约的承载条件）', () => {
       let value: unknown
       let threw: string | undefined
       try {
+        // ⚠️ `diagnose × spawn` 这一组**必须**钉 `win32`：`lib/ports.ts` 只在 Windows 上起子进程
+        // 查监听端口，别的平台早返回 —— 不钉的话本机 Windows 绿、CI ubuntu 上 `spawn` 一次都没被调用，
+        // 判据就在 CI 上空转（坑 25）。
         value =
-          group.platform === undefined
-            ? await invoke()
-            : await withPlatformRedline(group.platform, invoke)
+          group.platform === undefined ? await invoke() : await withPlatform(group.platform, invoke)
       } catch (error) {
         threw = error instanceof Error ? error.message : String(error)
       }
@@ -5424,7 +5575,6 @@ function nullPrototypeToPlain(value: unknown): unknown {
  * | 26 | B20b 只抓**逐字**共享串（≥40 字符） | 同 B16：不做近似匹配 | 描述里**同义改写**输出结构 → **漏**（§10.1 / §10.2 第 2 条已明说）。这条只抓「逐字抄」 |
  * | 27 | B18a / B21 的覆盖面 = `redlineCorpus()` 那 10 条 fixture | 夹具是我造的：每个工具成功/失败各一条 | 工具新增**第三种**返回路径（如新的 `kind`）而语料没覆盖 → 那条路不被这两条红线看见。加分支时**同批加 fixture** |
  * | 28 | B24 的六个注入组 | 每组自带 `calls()` 计数；`diagnose × spawn` **显式钉 `win32`** | 替身调用 0 次 → **判红**（不是 skip）；`diagnose × spawn` 在别的平台本来就不起子进程，所以必须钉平台（否则 CI 上空转） |
- * | 29 | 本文件的 `withPlatformRedline` 与 `test/tools/helpers.ts` 的 `withPlatform` **重复** | 那是本仓已知的测试助手重复（见 AGENTS「技术债：收敛重复的测试助手」） | 收敛那笔债时**连它一起收**；两份实现的语义必须一致（`finally` 里按属性描述符还原） |
  * | 30 | B18a 的**可观测前提**：`toOutput()` 里的 `ensureToolResult` 守卫**在渲染之前**就把「没有动作的 nextStep」换掉了 | 这是 `src/tools/shared.ts` 的现行实现；判据能红，正是因为**红线读的是 `execute` 的返回值、不是渲染文本** | 守卫一旦被挪到渲染之后（或 `toOutput` 被绕过），**B18a 会假绿**：`ensureToolResult` 合成的兜底 `nextStep` 是 `undefined`（缺省 = 合法），坏形状在到达本红线前就消失了。**已用变异实测**：只改工具写法 → 85 全绿（假绿）；**同时旁路守卫 → B18a 红**（另一条 M4 证据） |
  * | 31 | B25 的「兜底可渲染」：`ensureToolResult` 合成的兜底 `key` 是 `{}`，而 `dsh_check_auth` / `dsh_diagnose_plugin_load` / `dsh_dump_config` 的 `keyText` 曾**会崩**在它上面（`resolvedLine(undefined)`） | 三条 `keyText` 现在都按 `typeof … === 'string' ? … : 'unknown'` 防御取值；`effect_mode` / `hot_reload` 的写法本来就是防御式的 | **这是已实测的工具侧缺陷**（2026-10-13 探针：`ensureToolResult({ok:true})` 的 `key={}` 喂五个 render 表 → 3 抛 / 2 过）。**已修，由 B25 守着**：变异（把三处防御改回直接取值）→ B25 **红**；还原 → 绿 |
  * | 32 | B25 只断言「**不抛** + 走正常渲染路径（有 `verdict: ` 行）+ 输出非空」，**不断言降级措辞** | 三个被修工具的降级句 `resolved: unknown (the guard synthesized this result)` 的逐字断言住在**它们各自的测试**里 | 有人把降级句改成别的诚实措辞（仍不抛）→ B25 **仍绿**（**有意**：那条措辞是各工具自己的契约，不是全局契约）；反之，谁把某个 `keyText` 改回直接取值 → **B25 红**（响亮，不是假绿） |

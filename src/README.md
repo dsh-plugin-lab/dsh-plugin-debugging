@@ -5,5 +5,5 @@
 - `config.ts` 是配置 schema，默认值即文档；改配置项要同步 [../docs/SHAPE.md](../docs/SHAPE.md)。
 - `contracts.ts` 只放类型、不放逻辑，是工具半边与技能半边并行开发的唯一共享面。
 - 子树：`lib/`（纯函数与 IO 层）· `tools/`（工具半边）· `skills/`（技能半边）。
-- 变更影响路由：改这里 → 同步根 [AGENTS.md](../AGENTS.md)；改配置项或输出契约 → 同步 [../docs/SHAPE.md](../docs/SHAPE.md) 与 [../docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md)；必跑 `npm run check`。
+- 变更影响路由：改这里 → 同步根 [AGENTS.md](../AGENTS.md)；改配置项或输出契约 → 同步 [../docs/SHAPE.md](../docs/SHAPE.md) 与 [../docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md)；必跑 `pnpm run check`。
 - 使用约束与工作偏好 → 见 [AGENTS.md](AGENTS.md)。

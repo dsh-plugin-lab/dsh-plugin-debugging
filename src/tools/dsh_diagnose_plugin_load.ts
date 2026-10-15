@@ -14,7 +14,8 @@
  *    - `verdict`：`buildVerdict` 的结果（L1）。成功、失败两条路都有。
  *    - `key`：要模型决策的原料 —— 观测模式与原因、树里 entry 总数与相位直方图、
  *      每个包的名字/相位/命中的 entryId/错误、入口的三值判定、在不在 bundles、
- *      产物是否比进程新、启动日志的**三值状态与路径**、以及实际用的目录/profile/端口。
+ *      产物相对进程的**三值**判定（`changed-after-process-start` 明说「推不出」）、
+ *      启动日志的**三值状态与路径**、以及实际用的目录/profile/端口。
  *    - `audit`：其余全部（bundles 全列表、安装形态与 patch 细节、`missingInject` /
  *      `fiberState` / `basis`、`port.lookup`、启动日志全字段）—— 给人复核，不进模型文本。
  *    - **三值不许压成两值**：入口是 `present|missing|unknown`、启动日志是
@@ -88,6 +89,45 @@ interface DiagnoseArgs {
   dshHome?: string
 }
 
+/**
+ * 产物（入口文件）相对监听进程的**三值**判定 —— **闭集，不许压成布尔**。
+ *
+ * 参照系只有一个：**监听进程的启动时间**。宿主 `alpha.3` 的
+ * `feat(hmr): replace plugins whose package files changed during profile recomposition`
+ * 之后，HMR 重组合会**就地驱逐模块缓存并替换插件**：进程 `startedAt` 不变，磁盘上却已是新代码。
+ * 于是「产物比进程新」**推不出**「宿主跑的是旧产物」—— 两个解释都成立：
+ * ① 没人换过它，进程仍跑改动前的那份；② 刚被热替换过，跑的正是改动后的那份。
+ *
+ * 所以中间那一档**不是结论，是「这个比较不足以判定」**：
+ * - `changed-after-process-start`：产物比进程启动时刻新。**推不出宿主跑的是旧产物**
+ *   （可能在跑新产物 —— 热替换过）。这是本条修复前的缺陷所在：那时的取值是 `stale=true`，
+ *   等于把「推不出来」印成「宿主跑的是历史遗留」。
+ * - `unchanged-since-process-start`：产物不比进程启动时刻新（相等按这一档算）——
+ *   也就是说启动那一刻盘上就是这份文件，没有「改完没重启」的信号。
+ * - `undated`：**没有可比的参照**（没给端口 / 端口查不了 / 读不到启动时间 /
+ *   读不到产物 mtime / 启动时间解析不出来）。它**既不是**「没这回事」，
+ *   **也不允许**被读成「产物是新的」。
+ *
+ * ⚠️ 三档互不重叠，塌成两档就是**反向结论**（活跃坑 18 那一族）：
+ * 把 `undated` 压成「没变」会漏掉真有一次热替换后的判断，
+ * 把 `changed-after-process-start` 压成「跑的是旧产物」就是本条修复前的假阳性。
+ */
+export type ArtifactFreshness =
+  'changed-after-process-start' | 'unchanged-since-process-start' | 'undated'
+
+/**
+ * 该三值的**闭集**（运行时形状，供调用方与判据枚举）。
+ *
+ * 为什么导出成值而不只是类型：类型在运行期**不存在**，而「三值不许塌成两值」
+ * 这条纪律需要一个能被枚举、被数出来的真源 —— 判据断言「取到的三个值互不相同
+ * 且都在闭集里」，少一档就红。
+ */
+export const ARTIFACT_FRESHNESS_VALUES: readonly ArtifactFreshness[] = [
+  'changed-after-process-start',
+  'unchanged-since-process-start',
+  'undated',
+]
+
 /** 一个包的诊断条目（内部记录；`key` / `audit` 是它的两种投影）。 */
 interface PackageDiagnosis {
   packageName: string
@@ -96,12 +136,12 @@ interface PackageDiagnosis {
   install: InstallShape
   entry: EntryCheck
   /**
-   * 产物是否比监听进程**新**。
+   * 产物相对监听进程的三值判定（见 {@link ArtifactFreshness}）。
    *
-   * `true` = 宿主端跑的是**旧产物**（改完代码没重启）—— SKILL §四 那条判据。
-   * 读不到进程启动时间时为 `null`（**不是** `false`：unknown ≠ 没这回事）。
+   * ⚠️ 它**不回答**「宿主跑的是不是旧产物」—— 那个问题在本参照系下**推不出来**
+   * （热替换会让「产物新」与「跑的就是新产物」同时成立）。
    */
-  artifactNewerThanProcess: boolean | null
+  artifactFreshness: ArtifactFreshness
   /**
    * **观测**到的相位（只有 `observation.mode === 'observed'` 时才有值）。
    *
@@ -167,7 +207,8 @@ interface PackageKey {
    */
   entryState: Presence
   inBundles: boolean
-  artifactNewerThanProcess: boolean | null
+  /** 产物相对进程的**三值**判定（见 {@link ArtifactFreshness}）。 */
+  artifactFreshness: ArtifactFreshness
   /** `dsh.bundle` 的声明检查（B）。它解释「装了却没生效」的第三类原因。 */
   bundle: BundleKey
   /** 观测到的相位；`inferred` 时不出现。 */
@@ -515,13 +556,14 @@ export function createDiagnosePluginLoadTool(deps: ToolDeps): ToolDefinition {
         for (const packageName of names) {
           const install = await readInstallShape(dir, packageName)
           const entry = await checkInstalledEntry(dir, packageName)
-          const startedAt = portLookup?.listeners[0]?.startedAt
           const diagnosed: PackageDiagnosis = {
             packageName,
             inBundles: manifest.bundles.includes(packageName),
             install,
             entry,
-            artifactNewerThanProcess: compareArtifactWithProcess(entry, startedAt),
+            // 参照物与启动日志那条**同一个**（上面那个 `processStartedAt`）——
+            // 「一处一事实」：这里不再第二次从 `portLookup` 取。
+            artifactFreshness: artifactFreshnessOf(entry, processStartedAt),
           }
           const matched = index?.get(packageName)
           // `worstOf` 返回 `undefined` 只对空数组 —— 上面的 `length > 0` 已经排除，
@@ -612,7 +654,12 @@ export function createDiagnosePluginLoadTool(deps: ToolDeps): ToolDefinition {
           )
         }
 
-        const stale = packages.filter((item) => item.artifactNewerThanProcess === true)
+        // 「产物在进程启动之后才变过」这一档：**不是**「宿主跑的是旧产物」的结论
+        // （热替换之后产物新与跑的是新产物同时成立，见 `ArtifactFreshness`）。
+        // 它只把「这一档需要有人去判一下」交给下一步。
+        const changed = packages.filter(
+          (item) => item.artifactFreshness === 'changed-after-process-start',
+        )
         const failed = observedWith(packages, 'failed').filter(
           (item) => item.observed?.matchedEntryIds.length !== 0,
         )
@@ -624,7 +671,7 @@ export function createDiagnosePluginLoadTool(deps: ToolDeps): ToolDefinition {
           failed,
           absent,
           pending,
-          stale,
+          changed,
           startup: startupEvidence,
           profile,
           ...(crossInstance ? { crossHome: dshHome } : {}),
@@ -639,7 +686,7 @@ export function createDiagnosePluginLoadTool(deps: ToolDeps): ToolDefinition {
               failed,
               absent,
               pending,
-              stale,
+              changed,
               startup: startupEvidence,
             }),
           ),
@@ -684,7 +731,8 @@ function nextStepFor(input: {
   failed: readonly PackageDiagnosis[]
   absent: readonly PackageDiagnosis[]
   pending: readonly PackageDiagnosis[]
-  stale: readonly PackageDiagnosis[]
+  /** 产物比进程启动时刻新的那些（**推不出**宿主跑的是旧产物，见 `ArtifactFreshness`）。 */
+  changed: readonly PackageDiagnosis[]
   /** 启动日志的解析结论：解析不了 / 读不到时，唯一能派的就是「自己去读那份文件」。 */
   startup: StartupEvidenceKey | undefined
 }): { tool: string; args?: JsonValue; why: string } | { manual: true; why: string } | undefined {
@@ -727,15 +775,17 @@ function nextStepFor(input: {
       }
     }
   }
-  if (input.stale.length > 0 && input.failed.length === 0 && input.absent.length === 0) {
-    const names = input.stale.map((item) => item.packageName).join(', ')
+  if (input.changed.length > 0 && input.failed.length === 0 && input.absent.length === 0) {
+    const names = input.changed.map((item) => item.packageName).join(', ')
     return {
       tool: 'dsh_check_effect_mode',
       // `host-code` 是**目标工具自己的封闭枚举**：模型在它的 `change` 参数描述里读得到，
       // 所以它不需要出现在本次输出里（B17 扩后的取值面）。**没有为了过检查改写它。**
       // 跨实例时 `dshHome` 一起带上（`dsh_check_effect_mode` 同样有跨实例接缝）。
       args: retryArgs(input.resolved, { change: 'host-code' }),
-      why: `the process is running artifacts older than the code on disk for ${names}; classify what it takes to make that change take effect before touching anything`,
+      // ⚠️ 措辞不许断言「宿主跑的是旧产物」：那正是本条修复去掉的那个推断 ——
+      // 派出去的动作是**分类**（重启 / 就地换入 / 无需动），不是「去重启」。
+      why: `the artifacts for ${names} changed after this process started, so whether the running build is the older one or the current one is undetermined from that; classify what host code needs before restarting anything`,
     }
   }
   // 「全都 active」= 没有动作可做 → 不出现（「没有动作就不出现」是 §3.1 的规则）。
@@ -791,7 +841,8 @@ function buildVerdict(input: {
   failed: readonly PackageDiagnosis[]
   absent: readonly PackageDiagnosis[]
   pending: readonly PackageDiagnosis[]
-  stale: readonly PackageDiagnosis[]
+  /** 产物比进程启动时刻新的那些（**推不出**宿主跑的是旧产物，见 `ArtifactFreshness`）。 */
+  changed: readonly PackageDiagnosis[]
   startup: StartupEvidenceKey | undefined
   profile: string
   /** 跨实例时才给：本次读的磁盘 home（见 `crossInstanceScope`）。 */
@@ -836,9 +887,9 @@ function buildVerdict(input: {
   if (parts.length === 0) {
     // 没有树上的发现时，才轮到这两句「弱结论」；它们必须**先于**日志证据出现，
     // 否则「全都 active」这句话会被日志证据挤掉（那是本次观测的结论，不能丢）。
-    if (input.stale.length > 0) {
+    if (input.changed.length > 0) {
       parts.push(
-        `artifacts are newer than the process: ${input.stale.map((item) => item.packageName).join(', ')} — the host is running stale artifacts, so code changed without a restart`,
+        `artifacts changed after this process started: ${input.changed.map((item) => item.packageName).join(', ')} — that alone does not say the host runs older artifacts, because an in-place reload can have replaced them after the process started; whether the running build is the older or the newer one cannot be decided from the process start time`,
       )
     } else {
       parts.push(
@@ -905,7 +956,7 @@ function toPackageKey(item: PackageDiagnosis): PackageKey {
     packageName: item.packageName,
     entryState: item.entry.entryState,
     inBundles: item.inBundles,
-    artifactNewerThanProcess: item.artifactNewerThanProcess,
+    artifactFreshness: item.artifactFreshness,
     bundle: toBundleKey(item.entry),
     ...(observed === undefined
       ? {}
@@ -941,7 +992,7 @@ function toAudit(input: {
       inBundles: item.inBundles,
       install: item.install,
       entry: item.entry,
-      artifactNewerThanProcess: item.artifactNewerThanProcess,
+      artifactFreshness: item.artifactFreshness,
       ...(item.observed === undefined ? {} : { observed: item.observed }),
     })),
     /** 端口查询的明细（端口值本身在 `resolved`，不在这里重复）。 */
@@ -1141,7 +1192,7 @@ function packageLine(item: PackageKey): string {
   parts.push(`entry=${entryText(item)}`)
   const bundle = bundleText(item.bundle)
   if (bundle !== undefined) parts.push(`bundle=${bundle}`)
-  parts.push(`stale=${staleText(item.artifactNewerThanProcess)}`)
+  parts.push(`artifact=${item.artifactFreshness}`)
   if (item.error !== undefined) parts.push(`error=${oneLine(item.error)}`)
   return parts.join(' ')
 }
@@ -1213,16 +1264,6 @@ function bundleText(bundle: BundleKey): string | undefined {
 }
 
 /**
- * 三值里的「未知」必须与「否」分开写（`null` = 判不了，不是「不新」）。
- *
- * @param value 比较结果。
- */
-function staleText(value: boolean | null): string {
-  if (value === null) return 'unknown'
-  return value ? 'yes' : 'no'
-}
-
-/**
  * 直方图文本。
  *
  * 键**排序**后输出：同一棵树两次读不许给出不同顺序的行（定序写死，避免看起来像随机故障）。
@@ -1265,31 +1306,42 @@ function histogram(entries: readonly LoaderEntrySnapshot[]): Record<string, numb
 }
 
 /**
- * 比「产物 mtime」与「进程启动时间」。
+ * 比「产物 mtime」与「进程启动时间」，给出**三值**判定（见 {@link ArtifactFreshness}）。
+ *
+ * ## 为什么中间那一档不是结论
+ *
+ * 这一族比较（与启动日志的 `logFreshness` 同参照、同 `Date.parse` 容错）能**观察**到
+ * 「产物在进程启动之后才变过」，但**推不出**「宿主跑的是旧产物」：
+ * HMR 就地替换插件时，进程 `startedAt` 不变而磁盘上已是新代码 —— 两个解释都成立。
+ * ⇒ 这一档的职责是**说出「这里推不出来」**，而不是换一个同样不可靠的参照系
+ * （本机拿不到任何「entry 何时被换入」的观测面：loader `Entry` 与 cordis `Fiber`
+ * 都没有时间字段，详见 `ArtifactFreshness` 的说明）。
  *
  * @param entry 入口检查结果。
- * @param startedAt 进程启动时间（ISO 8601）。
+ * @param startedAt 进程启动时间（ISO 8601）；拿不到时 `undefined`。
  */
-function compareArtifactWithProcess(
-  entry: EntryCheck,
-  startedAt: string | undefined,
-): boolean | null {
-  if (entry.entryMtimeMs === undefined || startedAt === undefined) return null
+function artifactFreshnessOf(entry: EntryCheck, startedAt: string | undefined): ArtifactFreshness {
+  if (entry.entryMtimeMs === undefined || startedAt === undefined) return 'undated'
   const startedMs = Date.parse(startedAt)
-  if (!Number.isFinite(startedMs)) return null
+  if (!Number.isFinite(startedMs)) return 'undated'
+  // 相等按「没变过」算：「晚于进程启动」才是那个需要有人说清推不出来的那一档，
+  // 边界不许把它误判成「变过了」（同 `logFreshness` 的边界取向）。
   return entry.entryMtimeMs > startedMs
+    ? 'changed-after-process-start'
+    : 'unchanged-since-process-start'
 }
 
 /**
  * 判一份启动日志相对当前进程的新鲜度（三值）。
  *
- * 与 {@link compareArtifactWithProcess} **同族**：同一个参照（监听进程的 `startedAt`）、
+ * 与 {@link artifactFreshnessOf} **同族**：同一个参照（监听进程的 `startedAt`）、
  * 同样的 `Date.parse` 容错、同样在**拿不到参照时返回「不知道」而不是猜**。
  * 差别在问法与结论的方向：
- * - 那边问「产物比进程新吗」（产物新 = 你在跑旧代码），答案只有两值 + `null`；
  * - 这边问「这份日志属于当前进程吗」，而「旧日志」的含义是**这份证据是历史遗留** ——
- *   两值会把「不知道」压成其中一边，两种压法都错：压成 `current` 就是本条修复前的缺陷
- *   （拿 09-29 的失败当今天的结论），压成 `stale` 则会丢掉**真实**的当前失败。
+ *   那个方向**单向**：早于进程就不可能属于这次进程，所以「不知道」压成任一边都不致命，
+ *   而压成 `current` 才是本条修复前的缺陷（拿 09-29 的失败当今天的结论）；
+ * - 那边问「产物比进程新吗」，而那个方向**推不出**结论（热替换会让产物新与跑的是新产物
+ *   同时成立）—— 所以它多留了一档「推不出来」，见 `ArtifactFreshness`。
  *
  * 用 mtime 而不是日志内部那个 `timestamp`：后者可能整段缺失（解析缺口 / 截断），
  * 而「有没有新日志」这件事本来就是按**文件**判的（文件名的 ISO 也是写入时刻）。
@@ -1390,7 +1442,7 @@ function toStartupEvidence(
   const newest = parsed[0]
   if (newest === undefined) return evidence
   evidence.from = newest.name
-  // 新鲜度：与产物那条（`compareArtifactWithProcess`）**同一个参照** ——
+  // 新鲜度：与产物那条（`artifactFreshnessOf`）**同一个参照** ——
   // 端口查询给出的监听进程 `startedAt`。拿不到参照时是 `undated`（不知道），**不猜**。
   evidence.freshness = logFreshness(newest.mtimeMs, processStartedAt)
   if (evidence.freshness !== 'undated' && processStartedAt !== undefined) {

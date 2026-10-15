@@ -16,6 +16,9 @@
  *
  * ⚠️ 第 3 条是**源码扫描**，不是「跑一遍看看」。理由：预算抄错的表现是**多等或少等**，
  * 在假 spawn 下完全看不出来（替身不耗时）；只有把「预算从哪来」当判据才拦得住。
+ *
+ * 扫描前的剥注释走 `helpers.ts` 的共享 `stripComments` —— 这条判据与 `test/redlines.test.ts`
+ * 是**同一件事**，所以必须**同一份实现**（曾各写一份，两边都因为「块注释整段删掉导致行号前移」踩过）。
  */
 import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -41,7 +44,7 @@ import { createSignCookieTool } from '../../src/tools/dsh_sign_cookie.ts'
 import { createListInstancesTool } from '../../src/tools/dsh_list_instances.ts'
 import { createRestartTool, type RestartHost } from '../../src/tools/dsh_restart.ts'
 import type { ReloadHost } from '../../src/lib/hot-reload.ts'
-import { configFor, depsFor } from './helpers.ts'
+import { configFor, depsFor, stripComments } from './helpers.ts'
 
 /** 仓根：本文件在 `test/tools/` 下。 */
 const REPO_ROOT = fileURLToPath(new URL('../../', import.meta.url))
@@ -316,30 +319,6 @@ describe('工具只声明工作量：预算一律经 toolBudgetMs 取', () => {
 interface ToolSource {
   path: string
   text: string
-}
-
-/**
- * 去掉注释后再判 —— **必须与 `test/redlines.test.ts` 的同一件事同源**。
- *
- * 为什么必须剥：本仓工具的注释里会**讨论**预算（「`timeoutMs` 必须为正有限值」那类），
- * 不剥就会把注释里的例子当成真代码 —— 那是**假红**，而假红同样会让人把判据删掉。
- *
- * ## 三个必须做对的地方（每一处都实测过一次）
- *
- * 1. **块注释要换成等量空格，不能整段删掉**：`src/tools/` 里每个文件开头都有一大段文档
- *    注释，删掉整段会让后面所有行号**整体前移** —— 实测 `dsh_dump_config.ts` 真实 242 行
- *    被报成 155 行（偏移 87），而「指到哪一行」正是这条判据唯一的产品。
- *    这条修法抄自 `test/redlines.test.ts` 的 `stripComments`（那边踩过同一个坑）。
- * 2. **行注释要认「行尾」的，不只是整行的**：`const x = 1 // timeoutMs: 15_000` 会假红。
- * 3. **`(^|[^:])` 那一段是防 URL 的 `//`**（`http://…`）—— 不防就会从 URL 那里开始吞，
- *    把同一行**后面**的真违规一起吞掉（那是假绿，比假红更坏）。
- *
- * @param text 源文件原文。
- */
-function stripComments(text: string): string {
-  return text
-    .replace(/\/\*[\s\S]*?\*\//gu, (block) => block.replace(/[^\n]/gu, ' '))
-    .replace(/(^|[^:])\/\/[^\n]*/gmu, '$1')
 }
 
 /** 预算位置上出现数字字面量 = 违规（不必去猜哪个数字是毫秒）。 */

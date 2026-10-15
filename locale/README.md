@@ -3,5 +3,5 @@
 - 职责：插件在宿主与市场界面上的标题与描述，一门语言一份，是这套文案的**唯一 home**。
 - 结构极简：一个 `meta` 对象，装标题与描述。**键集合以本目录文件为准**，本文不抄；键的合规性由红线断言，改键要同批改断言。
 - 被 [../package.json](../package.json) 的打包字段与子路径导出带到制品里，宿主按语言读取。
-- 变更影响路由：改这里 → 同步两份文件与门面两份的对应表述；同步 [../test/redlines.test.ts](../test/redlines.test.ts) 里钉住它的断言；必跑 `npm test`。
+- 变更影响路由：改这里 → 同步两份文件与门面两份的对应表述；同步 [../test/redlines.test.ts](../test/redlines.test.ts) 里钉住它的断言；必跑 `pnpm run test`。
 - 使用约束与工作偏好 → 见 [AGENTS.md](AGENTS.md)。

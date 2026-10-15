@@ -2,9 +2,12 @@
 # non-workspace directory and the dependency tree stops matching the one CI installs.
 packages:
   - '.'
+allowBuilds:
+  esbuild: true
 
-# No `allowBuilds` here on purpose: this repo has no build-script dependency (its only build step is
-# `tsc`, and the one package that ever needed a postinstall — esbuild — was removed earlier for that
-# very reason; see AGENTS.md 活跃坑 10). A fresh clone and CI therefore install without being
-# prompted. If a future dependency does need its install script, declare it *here* — pnpm 11 ignores
-# the `pnpm` field in package.json and only warns.
+# 字段是 `allowBuilds`（pnpm 11 的形状），**不是** package.json 里的 `pnpm.onlyBuiltDependencies`
+# —— 后者在本版被忽略、只打印一条警告，装了等于没装（实测：`ERR_PNPM_IGNORED_BUILDS` 直接让 install 失败）。
+#
+# esbuild 在 2026-10-15 **重新成为需要的**：客户端半边的 `scripts/build-client.mjs` 用它打浏览器包
+# （此前正是因为它带 postinstall 才被去掉，见根 AGENTS.md 活跃坑 10）。
+# 所以这一项显式设为 `true`，而不是让它变成一次「被忽略的构建脚本」。

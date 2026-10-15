@@ -21,4 +21,4 @@
 - 清单以本目录树为准，本文不复制。
 - 正文该写什么 → 子目录 [README.md](dsh-plugin-debugging/README.md)。
 - 在目录里工作要遵守什么 → [AGENTS.md](AGENTS.md)。
-- 变更影响路由：改正文 → 同步 [../src/skills/](../src/skills/README.md) 与 [../docs/SHAPE.md](../docs/SHAPE.md)；改技能名或目录结构 → 同步 [../scripts/check-release.mjs](../scripts/check-release.mjs) 与 [../test/redlines.test.ts](../test/redlines.test.ts)；必跑 `npm test` 与 `npm run check:release`。
+- 变更影响路由：改正文 → 同步 [../src/skills/](../src/skills/README.md) 与 [../docs/SHAPE.md](../docs/SHAPE.md)；改技能名或目录结构 → 同步 [../scripts/check-release.mjs](../scripts/check-release.mjs) 与 [../test/redlines.test.ts](../test/redlines.test.ts)；必跑 `pnpm run test` 与 `pnpm run check:release`。

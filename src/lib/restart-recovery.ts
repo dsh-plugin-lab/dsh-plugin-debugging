@@ -234,6 +234,32 @@ export function boundNoticeSummary(summary: string): string {
 }
 
 /**
+ * `reason` 那一格：**只有发起者拿到原文**，其余收件人拿到「为什么没有」。
+ *
+ * 单点判定 —— 全仓只有这一处决定 `reason` 给不给（`buildRecoveryNotice` 只负责把它拼进事实表）。
+ * 这样做是因为这条规则是**串话与否**的唯一开关：散成两处判定，迟早会有一处退化成「那就都发」。
+ *
+ * 三个分支的**文案必须彼此可分**（判据按这个钉）：发起者看到的是原文，
+ * 另外两种看到的是**不同**的说明（一个是「别人发起的」，一个是「这份 marker 没记」）——
+ * 把它们压成同一句就等于把三值压成两值，而压掉的那一格恰恰是「不知道」。
+ *
+ * @param marker 要恢复的那份 marker。
+ * @param recipient 收件会话。
+ * @returns 0 或 1 条事实（发起者 1 条、其余也 1 条，但内容不同）。
+ */
+function reasonFact(marker: RestartMarker, recipient: string): readonly string[] {
+  if (marker.initiator === undefined) {
+    return [
+      'the recorded reason is not repeated here: this marker does not record which session requested the restart',
+    ]
+  }
+  if (marker.initiator === recipient) {
+    return [`the recorded reason was: ${marker.reason}`]
+  }
+  return ['the recorded reason is not repeated here: another session requested this restart']
+}
+
+/**
  * 造这条 notice —— **只放事实 + 指针**（决策笔记 §决定那张表的第 2 行）。
  *
  * 四件事实：什么时候重启的、停机多久、为什么、marker 的下场；一个指针：要看现状调哪个工具。
@@ -243,6 +269,21 @@ export function boundNoticeSummary(summary: string): string {
  *
  * `at` 解析不出来时**不编**停机时长，而是把「推不出来」本身写成一句事实 ——
  * 三值纪律在渲染层同样成立。
+ *
+ * ## `reason` **只发给发起者**（维护者 2026-10-15 拍板）
+ *
+ * `reason` 是**用户给自己留的便条**，不是公告：广播给「被顺手打断」的其它会话就是**串话**。
+ * ⇒ 本函数**必须**知道收件人是谁，于是 `recipient` 是**必填**第三参 ——
+ * 类型上堵死「造一条 notice 群发」这种写法（原来正是那样：一条 notice 循环投给所有人）。
+ *
+ * 三分支（三值纪律，不许压成两值）：
+ * - `marker.initiator === recipient` ⇒ 逐字给出 `reason`；
+ * - `initiator` 有值但**不是**收件人 ⇒ **不给** `reason`，并说明「是别人发起的」；
+ * - `initiator` **缺席**（本字段之前写的 marker）⇒ **不给** `reason`，并说明「这份 marker
+ *   没记是谁发起的」 —— **不许**退化成「那就发给所有人」：那正是要消除的串话。
+ *
+ * ⚠️ **收件人不匹配时也要给出一句事实，不能留个静默的空洞**：notice 是给模型看的，
+ * 一个莫名其妙的中断如果不说「这不是你发起的」，模型会自己编一个理由。
  *
  * ## marker 的下场只能写成**条件句**（C31 实测钉住的）
  *
@@ -254,8 +295,13 @@ export function boundNoticeSummary(summary: string): string {
  *
  * @param marker 要恢复的那份 marker。
  * @param now 现在（毫秒纪元）。
+ * @param recipient 这条 notice 的收件会话（`session-<uuid>`）。决定 `reason` 给不给（见上）。
  */
-export function buildRecoveryNotice(marker: RestartMarker, now: number): RecoveryNotice {
+export function buildRecoveryNotice(
+  marker: RestartMarker,
+  now: number,
+  recipient: string,
+): RecoveryNotice {
   const at = Date.parse(marker.at)
   const downSeconds = Number.isFinite(at) ? Math.max(0, Math.round((now - at) / 1000)) : undefined
   const facts = [
@@ -267,7 +313,7 @@ export function buildRecoveryNotice(marker: RestartMarker, now: number): Recover
     downSeconds === undefined
       ? 'the time since that request could not be derived from that timestamp'
       : `this notice arrived about ${String(downSeconds)}s after that request`,
-    `the recorded reason was: ${marker.reason}`,
+    ...reasonFact(marker, recipient),
     // 覆盖过就说得出来（`decideRecovery` 的 `overridden` 正是为此保留的）。
     ...(marker.force === true
       ? ['the restart was forced: other active work was interrupted']
@@ -367,7 +413,14 @@ export type RecoveryOutcome =
       /** 盘上那份（已带 `state: 'consumed'`）。 */
       consumed: RestartMarker
       woken: readonly string[]
-      notice: RecoveryNotice
+      /**
+       * 实际投出去的 notice —— **每个会话一条**，不是一条群发。
+       *
+       * ⚠️ 这里原来是单数 `notice: RecoveryNotice`。`reason` 改成「只发给发起者」之后，
+       * 那个形状就**说谎了**：它只能描述其中一个收件人。留一个单数槽 = 让审计记录
+       * 看起来「只投了一条」，而实际每人的正文不同。
+       */
+      notices: readonly { readonly sessionId: string; readonly notice: RecoveryNotice }[]
       /** **根因事实**：marker 真的标成已消费了吗（判据断言这一格，不断言「没报错」）。 */
       markerConsumed: true
       verdict: string
@@ -565,15 +618,22 @@ export async function recoverRestart(
       }
       case 'recover': {
         const marker = decision.marker
-        const notice = buildRecoveryNotice(marker, ports.now())
         const targets = [...new Set(decision.sessions)]
         const woken: string[] = []
         const failures: WakeFailure[] = []
+        const delivered: { sessionId: string; notice: RecoveryNotice }[] = []
 
         for (const sessionId of targets) {
+          // ⚠️ **每个收件人各造一条**（不是造一条循环投）：`reason` 只发给发起者，
+          // 所以 notice 是 `(marker, now, recipient)` 的函数。见 `reasonFact`。
+          const notice = buildRecoveryNotice(marker, ports.now(), sessionId)
           const outcome = await wakeWithRetries(sessionId, notice, ports)
-          if (outcome.ok) woken.push(sessionId)
-          else failures.push({ sessionId, reason: outcome.reason, attempts: outcome.attempts })
+          if (outcome.ok) {
+            woken.push(sessionId)
+            delivered.push({ sessionId, notice })
+          } else {
+            failures.push({ sessionId, reason: outcome.reason, attempts: outcome.attempts })
+          }
         }
 
         if (failures.length > 0) {
@@ -606,7 +666,7 @@ export async function recoverRestart(
           marker,
           consumed,
           woken,
-          notice,
+          notices: delivered,
           markerConsumed: true,
           verdict: `the restart notice was delivered to ${String(woken.length)} session(s) and the marker was marked consumed`,
         }

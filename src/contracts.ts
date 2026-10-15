@@ -4,6 +4,8 @@
  * 存在的理由只有一个：让「技能半边」与「工具半边」能在不碰对方文件的前提下并行开发。
  * 两份实现只共享这里的形状，谁都不许往这里塞逻辑。
  */
+import type { Volatile } from '@deepseek-ai/cordis'
+
 import type { WorkloadBudgetConfig } from './lib/timeouts.js'
 
 /** 技能注册的结果。注册失败**不是**插件的失败 —— 工具半边照常工作。 */
@@ -76,4 +78,23 @@ export interface ResolvedConfig extends WorkloadBudgetConfig {
   profile: string
   /** 要探测的宿主端口；`0` = 自己按监听端口推断。 */
   port: number
+  /**
+   * `dsh_restart` 的总闸（**默认关**，`resolveConfig` 显式兜底成 `false`）。
+   *
+   * ## 为什么这里仍然是**活引用**而不是它的值
+   *
+   * `.volatile()` 是**宿主那一侧**的声明（`src/config.ts` 那个 `Config` 字段），
+   * 作用是「改这个字段**不该**被当成一次需要重启的变更」—— 维护者 2026-10-15
+   * 追加的「丝滑关开、不用重启」。
+   *
+   * ⚠️ **所以这里不能是它的值**：`resolveConfig` 只在 `apply()` 里跑**一次**，
+   * 若在这里把它读成布尔，那个值就永远冻结了 —— 而宿主那一侧仍然「no restart」，
+   * 用户改了开关却要重启才生效，界面上那句话就成了骗人的。⇒ 传引用本身，
+   * 由工具**每次调用现读** `.get()`（`Volatile<T>` 就是 `{ get(): T }`，
+   * cosmokit 的原话：「keep the reference, or capture its value for one operation only」）。
+   *
+   * 必填而不是可选：可选会让这个**已解析**的形状出现第二种（有 / 没有），
+   * 每个读者都得处理 `undefined` —— 那正是「形状骗人」那一族。
+   */
+  enableRestart: Volatile<boolean>
 }
