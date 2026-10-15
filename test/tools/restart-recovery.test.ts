@@ -344,11 +344,24 @@ describe('lib/restart-recovery · notice 只放事实 + 指针', () => {
   it('含四件事实与一个指针；**不含**任何「请继续」话术', () => {
     const notice = buildRecoveryNotice(markerFixture(), NOW)
 
-    expect(notice.text).toContain(AT) // 什么时候重启的
-    expect(notice.text).toContain('down for about 12s') // 停机多久
+    expect(notice.text).toContain(AT) // 什么时候**请求**的重启
+    expect(notice.text).toContain('about 12s after that request') // 距那次请求多久
     expect(notice.text).toContain('the plugin code changed') // 为什么
     expect(notice.text).toContain('consumed') // marker 的下场
     expect(notice.text).toContain(STATE_TOOL) // 指针：要看现状调哪个工具
+    // ⚠️ S5：**不许把「请求重启的时刻」印成「已重启」**。写 marker 在拉起之前，
+    // 新进程还要等 delayMs（默认 10s）⇒ 旧话术的「down for about Xs」系统性高估停机。
+    // 把文案改回旧的那两句，下面两条各自判红。
+    expect(notice.text, 'notice 把「请求重启」印成了「已重启」').not.toContain('was restarted at')
+    expect(notice.text, 'notice 把延迟窗口算进了停机时长').not.toContain('down for about')
+    // ⚠️ O4：指针必须点明那个工具的**必填参数**（`change` 是 required，四选一）。
+    expect(notice.text, '指针没给必填参数 —— 模型会带空参数去调').toContain(
+      `${STATE_TOOL} with the kind of change`,
+    )
+    // ⚠️ O5：重复投递要如实说出来（部分唤醒失败 ⇒ 整份 marker 保留 ⇒ 下次再投一次）。
+    expect(notice.text, '重复投递没说 —— 模型会以为重启了两次').toContain(
+      'delivered more than once',
+    )
 
     // 决策笔记明确否决「请继续」：命令式续跑话术一个都不许有。
     const imperative = /\b(continue|resume|carry on|proceed|keep going)\b/iu
@@ -378,7 +391,7 @@ describe('lib/restart-recovery · notice 只放事实 + 指针', () => {
   it('`at` 解析不出来 ⇒ **不编**停机时长，而是把「推不出来」写成事实并原样带出时间戳', () => {
     const notice = buildRecoveryNotice(markerFixture({ at: 'not-a-timestamp' }), NOW)
     expect(notice.text).toContain('could not be derived')
-    expect(notice.text).not.toContain('down for about')
+    expect(notice.text).not.toContain('after that request')
     // 原样带出去，人才查得到（不许吞掉那个看不懂的值）。
     expect(notice.text).toContain('not-a-timestamp')
   })
@@ -390,11 +403,13 @@ describe('lib/restart-recovery · notice 只放事实 + 指针', () => {
     const notice = buildRecoveryNotice(markerFixture(), NOW)
     expect(notice.summary, 'summary 断言了「已消费」').not.toMatch(/\bconsumed\b/iu)
     expect(notice.summary).toContain('restart recovery')
+    // S5：`summary` 里也不许写「已重启」（它只是「请求重启的时刻」）。
+    expect(notice.summary, 'summary 把「请求重启」印成了「已重启」').toContain('requested at')
     // 正文里那句「下场」必须是**条件句**：消费以「全部唤醒成功」为前提。
     expect(notice.text).toMatch(/\bonly if\b/iu)
     expect(notice.text).toContain('stays armed')
     // 自证这条判据不是恒真：旧的逐字文案必须被认出来。
-    expect(`host restarted at ${AT} - marker consumed`).toMatch(/\bconsumed\b/iu)
+    expect(`restart requested at ${AT} - marker consumed`).toMatch(/\bconsumed\b/iu)
   })
 
   it('C31 端到端：唤醒失败（marker 留盘）时投出去的那条 notice 同样不含「已消费」', async () => {
@@ -516,6 +531,29 @@ describe('lib/restart-recovery · 顺序与消费', () => {
     expect(outcome.verdict).toContain('not touched')
     expect(host.fs.writes).toEqual([])
     expect(host.logs.length).toBeGreaterThan(0)
+  })
+
+  it('**写回**失败 ⇒ 兜底不许说「marker 没被动过」（写已经发出去了，部分落盘是可能的）', async () => {
+    // 同族第三处：兜底那句 `the marker was not touched` 原先**恒定地**盖住了这一格 ——
+    // 而 `consumeRestartMarker` 的写已经发出去了，端口契约只承诺「失败要抛」、
+    // 没有原子性承诺。把三态判据改回一句恒定的「没动过」，这条判红。
+    const host = harness({ marker: { text: serializeMarker(markerFixture()) } })
+    const failing: RecoveryPorts = {
+      ...host.ports,
+      fs: {
+        read: host.fs.port.read,
+        write: async () => {
+          throw Object.assign(new Error('the marker write exploded'), { code: 'FS_IO_ERROR' })
+        },
+      },
+    }
+    const outcome = await recoverRestart({ dshHome: HOME }, failing)
+    expect(outcome.kind).toBe('failed')
+    if (outcome.kind !== 'failed') throw new Error('期望 failed')
+    // 根因事实：真的走到了写那一步（否则下面那条「没说没动过」可能只是因为没轮到写）。
+    expect(host.wakeCalls).toEqual(['session-a'])
+    expect(outcome.verdict).toContain('writing the marker back')
+    expect(outcome.verdict, '写失败被说成了「marker 没被动过」').not.toContain('not touched')
   })
 })
 

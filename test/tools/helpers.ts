@@ -319,6 +319,10 @@ export function renderText(tool: ToolDefinition, args: unknown, value: unknown):
 /**
  * 按 SHAPE §3.1 的冻结逐行格式切分渲染文本（与红线实现同源的取数口）。
  *
+ * 截断行按**前缀**认（与 `test/redlines.test.ts` 的 `RENDER_TRUNCATED_RE` 同一形状）：
+ * 它要认的是「这一行是截断声明、不是 L2」，不是「截断行必须逐字长这样」——
+ * 后者在两处一起改时照样绿。截断行**内容**的约束由红线 B27 语义判据守。
+ *
  * @param text 渲染文本。
  */
 export function splitRender(text: string): {
@@ -328,7 +332,7 @@ export function splitRender(text: string): {
   l3?: string
 } {
   const headPattern = /^\[[\w_]+\] (ok|failed \([\w-]+\))$/
-  const truncPattern = /^\d+ more line\(s\) not shown — the full record is in the session log$/
+  const truncPattern = /^\d+ more line\(s\) not shown/
   const lines = text.split('\n')
   const verdictIndex = lines.findIndex((line) => line.startsWith('verdict: '))
   const nextStepIndex = lines.findIndex((line) => line.startsWith('nextStep:'))

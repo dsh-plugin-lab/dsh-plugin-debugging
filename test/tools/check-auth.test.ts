@@ -174,7 +174,9 @@ describe('dsh_check_auth', () => {
 
     it('搬走的恒定知识**只能**在描述层出现一次（旧的凭证 note 不再进输出）', () => {
       const text = composeDescription(CHECK_AUTH_DESCRIPTION)
-      expect(text).toContain('no secrets read')
+      // 「不读秘密」是**说过头**：401 那条路确实会读 `.credentials.yaml` 判条目在不在
+      // （只取布尔与行号），所以措辞必须是「不读秘密的**值**」。把 `values` 去掉 → 判红。
+      expect(text).toContain('no secret values read')
       expect(text).toContain('cookies are bound to host:port')
       // 旧 `credentials.note` 那句逐字不许再出现在任何一段描述里（它已不存在于输出层）。
       expect(text).not.toContain('does not read values or sign cookies')
@@ -256,8 +258,13 @@ describe('dsh_check_auth', () => {
       const data = expectOk(result)
       expect((data.key['probe'] as Record<string, unknown>)['kind']).toBe('http-error')
       expect(data.verdict).toContain('"not running" is ruled out')
-      const step = result.nextStep as { tool?: string } | undefined
+      const step = result.nextStep as { tool?: string; why?: string } | undefined
       expect(step?.tool).toBe('dsh_diagnose_plugin_load')
+      // 目标工具报的是**加载 / 监听 / 启动日志**，它不回答「这个服务在服务什么」——
+      // 承诺「find out what it is actually serving」是**说了但兑现不了**。
+      // 它能兑现的是「那个端口上是哪个进程」。
+      expect(step?.why).toContain('what process is on that port')
+      expect(step?.why).not.toContain('actually serving')
     })
 
     it('端口能从 DSH_WEB_URL 里定出来（config.port 为 0 时不猜端口）', async () => {
@@ -373,6 +380,17 @@ describe('dsh_check_auth', () => {
       const step = result.nextStep as { tool?: string; args?: Record<string, unknown> } | undefined
       expect(step?.tool).toBe(CHECK_AUTH_TOOL)
       expect(step?.args).toEqual({ port: 3080, host: '127.0.0.1' })
+
+      // ⚠️ `timeoutMs` 是**插件配置字段**，不是本工具的参数（`defineTool` 的 `timeoutMs`
+      // 注册期就定死，工具 schema 送到模型前只保留 name/description/parameters）⇒
+      // 「让模型去调大 timeoutMs」是**它永远做不到**的指引。这条判据断的是根因：
+      // 这句话必须把动作指给**人**，而不是指给模型。
+      const why = (result.nextStep as { why?: string } | undefined)?.why ?? ''
+      expect(why, 'why 为空 —— 判据在空转').not.toBe('')
+      expect(why).toContain('human')
+      expect(why, '超时分支又让模型去调大预算了（模型做不到这件事）').not.toMatch(
+        /raise timeoutMs/u,
+      )
     })
 
     /**

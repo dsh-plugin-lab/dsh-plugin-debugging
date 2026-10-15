@@ -150,6 +150,35 @@ describe(`${LIST_INSTANCES_TOOL} · 专有签名：三值互不重叠`, () => {
     expect(data.verdict).not.toContain('no DSH host was found')
   })
 
+  it('给了 port 但探不到 ⇒ **不许**说「N listening port(s) were found」（那条路根本没扫）', async () => {
+    // ⚠️ 给了 `port` 时 `scan.status='skipped'`、socket 表命令一次都不跑 ⇒ 那个端口上有没有
+    // 人在听**根本没读**，旧文案却断言「1 listening port(s) were found」——那是编的。
+    const stub = probeStub(() => ({ status: 0, body: '' }), new Error('connect ECONNREFUSED'))
+    const tool = toolWith({ probe: stub.fetch })
+    const data = expectOk(await run(tool, { port: 9999 }))
+    expect((data.key['scan'] as Record<string, unknown>)['status']).toBe('skipped')
+    // 下界：真的探了那一个端口（否则「探不到」也是空转）。
+    expect(stub.urls).toEqual(['http://127.0.0.1:9999/'])
+    expect(data.verdict).toContain('the port you passed could not be probed')
+    expect(data.verdict).not.toContain('were found')
+    expect(data.verdict).toContain('unknown rather than absent')
+  })
+
+  it('扫到了、但零监听 ⇒ 说「没找到」，不说「每个探测都失败了」（0 次探测）', async () => {
+    // 空 stdout + 退出码 0 = 可信的「一个监听都没有」⇒ `scanned` + 零候选。
+    // 旧文案这时印的是「0 listening port(s) were found but every probe failed」——
+    // 一次探测都没发生，「every probe failed」是空话。
+    const stub = probeStub(() => ({ status: 200, body: 'hi' }))
+    const tool = toolWith({ table: '', probe: stub.fetch })
+    const data = expectOk(await run(tool, {}))
+    expect((data.key['scan'] as Record<string, unknown>)['status']).toBe('scanned')
+    expect((data.key['instances'] as unknown[]).length).toBe(0)
+    // 下界：零候选 ⇒ 一个请求都不该发（「0 次探测」是这条判据的事实基础）。
+    expect(stub.urls).toEqual([])
+    expect(data.verdict).toContain('no listening port was found')
+    expect(data.verdict).not.toContain('every probe failed')
+  })
+
   it('认领成功时 L1 给出 authority，并说清**只给 authority、不给 home**', async () => {
     const tool = toolWith({
       table: '3080|111|node|',
@@ -195,6 +224,32 @@ describe(`${LIST_INSTANCES_TOOL} · 专有签名：三值互不重叠`, () => {
     const data = expectOk(await run(tool, {}))
     const instances = data.key['instances'] as Record<string, unknown>[]
     expect(instances[0]?.['verdict']).toBe('unknown')
+  })
+
+  it('`unknown` 的**原因**必须印在 L2：分得出「没人听」与「服务在、body 读不出来」', async () => {
+    // ⚠️ 这两个都是 `unknown`，但对下一步完全不同：前者去查那个端口上的进程，
+    // 后者说明**有服务在答**、只是不像 DSH。只印 `instance: … unknown` 时模型分不出。
+    const refused = toolWith({
+      table: '3080|111|node|',
+      probe: probeStub(() => ({ status: 0, body: '' }), new Error('connect ECONNREFUSED')).fetch,
+    })
+    const refusedText = renderText(refused, {}, await run(refused, {}))
+    expect(refusedText).toContain('detail=')
+    expect(refusedText).toContain('ECONNREFUSED')
+
+    const bodyBroken = toolWith({
+      table: '3080|111|node|',
+      probe: (async () => ({
+        status: 401,
+        text: async () => {
+          throw new Error('body stream broke')
+        },
+      })) as SignatureFetch,
+    })
+    const bodyBrokenText = renderText(bodyBroken, {}, await run(bodyBroken, {}))
+    expect(bodyBrokenText).toContain('the response body could not be read')
+    // 防空转：两者的 L2 必须真的不同（否则「一律印同一句」也会全绿）。
+    expect(bodyBrokenText).not.toBe(refusedText)
   })
 })
 

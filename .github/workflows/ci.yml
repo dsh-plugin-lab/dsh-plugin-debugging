@@ -1,8 +1,9 @@
 # 日常 CI：每次推 main 与每个 PR 都跑类型检查、构建与全量测试。
 #
-# 用冻结安装（npm ci）而不是普通安装：它严格按 lockfile 装，lockfile 与
-# package.json 不同步时**直接失败** —— 这正是要在 CI 里拦下的情况。
+# 用冻结安装（pnpm install --frozen-lockfile）而不是普通安装：它严格按 lockfile 装，
+# lockfile 与 package.json 不同步时**直接失败** —— 这正是要在 CI 里拦下的情况。
 # 判据：CI 的安装永远是冻结模式，绝不联网解析新版本。
+# 唯一锁文件是 pnpm-lock.yaml（本仓已无 package-lock.json）。
 name: CI
 
 on:
@@ -20,31 +21,36 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # pnpm 必须排在 setup-node **之前**装好，否则 `cache: pnpm` 找不到 store。
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
       - uses: actions/setup-node@v7
         with:
           # 版本基线以 .node-version 为唯一来源，避免 CI 与本机漂移。
           node-version-file: .node-version
-          cache: npm
+          cache: pnpm
 
-      - run: npm ci
+      - run: pnpm install --frozen-lockfile --config.node-linker=hoisted
 
-      - run: npm run typecheck
+      - run: pnpm run typecheck
 
-      - run: npm run build
+      - run: pnpm run build
 
-      - run: npm run test
+      - run: pnpm test
 
-      - run: npm run lint
+      - run: pnpm run lint
 
       - name: Format check
-        run: npm run format:check
+        run: pnpm run format:check
 
       # 发布态不变量：bundle 声明在不在、private 去掉没有、SKILL.md 随不随包、
       # 发布流程有没有偷偷改写版本号。
       # 组织判据把这条定为 Must agree、由各仓 check:release 承担；放进 CI 是为了把
       # 「发布前才发现」提前成「每次推送就发现」。判据本体在 scripts/check-release.mjs。
       - name: Release invariants
-        run: npm run check:release
+        run: pnpm run check:release
 
   # 收口 job —— ruleset 的 required_status_checks 只配这一个名字（CI Success），
   # 本仓内部 job 增删时规则集无需改动。改本 job 前必读三条：

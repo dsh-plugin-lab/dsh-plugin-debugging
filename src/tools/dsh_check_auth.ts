@@ -117,7 +117,9 @@ interface CheckAuthKey {
  * - `useWhen`：模型的路由信号（页面 401；或根本不知道宿主起没起）。这两句是旧的
  *   description 里唯一承重的部分，其余（输出结构复述）删掉。
  * - `boundary`：**两行**，承载从输出里搬出来的恒定知识：① v1 只判存在性、不读值、
- *   不自签 cookie，**也不发送任何凭据**；② cookie 绑定 `host:port` 这个机制 —— 但**只对
+ *   不自签 cookie，**也不发送任何凭据** —— 措辞是「不读秘密的**值**」而不是「不读秘密」：
+ *   401 那条路上本工具**确实会读** `.credentials.yaml` 判条目在不在（只取布尔与行号），
+ *   说「no secrets read」是**说过头**；② cookie 绑定 `host:port` 这个机制 —— 但**只对
  *   「带着 cookie 的浏览器页面」成立**：本工具的探测是匿名的，它那条 401 推不出
  *   「authority 变了」。旧文案写的是「A 401 usually means the authority changed」，
  *   那正是把不知道说成结论（与 L1 同批改掉）。
@@ -125,9 +127,9 @@ interface CheckAuthKey {
  */
 export const CHECK_AUTH_DESCRIPTION: ToolDescription = {
   what: 'Separates "not running" from "not authenticated".',
-  useWhen: 'Use when the page returns 401, or the host may not be up.',
+  useWhen: 'Use when a page returns 401, or the host may be down.',
   boundary:
-    'Read-only: no secrets read, no cookies signed or sent.\nA page 401 can mean a changed authority: cookies are bound to host:port.',
+    'Read-only: no secret values read, no cookies signed or sent.\nA page 401 can mean a changed authority: cookies are bound to host:port.',
 }
 
 /** 输出表：L1 就是 `data.verdict` 逐字，L2 由 `key` 投影成行。 */
@@ -277,7 +279,7 @@ async function probeAuthentication(
           tool: CHECK_AUTH_TOOL,
           // `authority` 出现在 L2，所以 B17 认得出这两个值。
           args: { port: resolvedPort.port, host },
-          why: 'retry once as-is; raise timeoutMs if it keeps timing out',
+          why: 'retry once as-is; if it keeps timing out, a human must raise the plugin config timeoutMs — a call cannot raise it',
         },
       ),
     )
@@ -337,7 +339,7 @@ async function probeAuthentication(
         ? {
             tool: DIAGNOSE_TOOL,
             args: { port: resolvedPort.port },
-            why: 'the host answered, so find out what it is actually serving before concluding anything about authentication',
+            why: 'the host answered, so find out what process is on that port before concluding anything about authentication',
           }
         : undefined,
     ),

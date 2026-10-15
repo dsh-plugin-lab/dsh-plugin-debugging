@@ -23,8 +23,10 @@
  *      `hmr`、生效配置块、失败时的 profile 目录）；
  *    - `audit`：给人复核的 —— hmr 探测的原文证据、`effect.ts` 那句机制解释、全字段配置块。
  * 3. **`nextStep` 必须带动作**：`{ tool, args?, why }` 或 `{ manual: true, why }`。
- *    ⚠️ `mode=restart-required` 走 **`manual`**，不是「调重启工具」：重启工具
- *    **尚未实现**（SHAPE §6.1 排最后），建议模型去调一个不存在的工具比不报更坏。
+ *    ⚠️ `mode=restart-required` 走 **`manual`**，但 why 里**必须点出 `dsh_restart`**：
+ *    那个工具**已实现并注册**（SHAPE §6.1 的协作纪律正是「走 `dsh_restart`」），
+ *    只是它**不可逆** ⇒ 这一步留给用户拍板，所以不写成工具支；而写「本侧没有工具能重启」
+ *    是假话 —— 模型读到它就不会去调那个真实存在的工具。
  * 4. `execute` **绝不 throw**：意外异常在顶层收敛成 `internal` 失败（B24 的承载条件）。
  */
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools'
@@ -87,8 +89,17 @@ interface EffectModeArgs {
   dshHome?: string
 }
 
-/** 这个 profile 有没有**可用的** hmr（也就是有没有人在 watch patch 文件）。 */
-export type HmrAvailability = 'present' | 'absent'
+/**
+ * 这个 profile 有没有**可用的** hmr（也就是有没有人在 watch patch 文件）。
+ *
+ * ⚠️ **三值，不是两值**。`disabled:` 是一个 `!!js` 表达式时（本机 web profile 实测正是
+ * `!!js '!ctx.get(''profileContext'')'`），静态看既不能判确定可用、也不能判确定不可用 ——
+ * `src/lib/effect.ts` 的 `HmrProbe.disabled` 第三值就是它，那句 note 的原文承诺是
+ * 「treated as usable, but the verdict carries that condition」。
+ * 压成 `present` 就等于把「按上下文决定」印成「确定可用」，而条件只留在 `audit` 里
+ * （`audit` 模型看不到）⇒ 承诺落空。所以第三值必须原样进 `key`（L2 由它投影）。
+ */
+export type HmrAvailability = 'present' | 'present-conditional' | 'absent'
 
 /**
  * 这次调用走到了哪一步。
@@ -226,13 +237,15 @@ async function classify(
   const probe = await probeHmrFor(call, dir, deadline, signal, args.change)
   if (probe.kind === 'fail') return toOutput(probe.failure)
 
-  const usable = probe.hmrProbe.present && probe.hmrProbe.disabled !== 'yes'
+  // 三值判定：`conditional` 既不是确定可用、也不是确定不可用 —— 它必须**原样**进 `key`
+  // （L2 从 `key` 投影），否则「按上下文决定」会被印成「确定可用」（见 `HmrAvailability`）。
+  const hmr = hmrAvailabilityOf(probe.hmrProbe)
   const decision = decideEffectMode({
     change: args.change,
     ...(args.alreadyInDependencies === undefined
       ? {}
       : { alreadyInDependencies: args.alreadyInDependencies }),
-    hmrUsable: usable,
+    hmrUsable: hmr !== 'absent',
   })
 
   const resolved = effectiveConfig(call.config)
@@ -242,7 +255,7 @@ async function classify(
     baseline: decision.baseline,
     downgraded: decision.downgraded,
     // 探测本来就在做（否则做不了降级判定）—— 这里只是把它从内部状态提升成契约字段。
-    hmr: usable ? 'present' : 'absent',
+    hmr,
     resolved,
   }
   const audit = asAudit({
@@ -271,7 +284,7 @@ async function classify(
 
   return toOutput(
     ok(
-      { verdict: verdictFor(args.change, decision), key, audit },
+      { verdict: verdictFor(args.change, decision, hmr), key, audit },
       nextStepFor(decision.mode, call.config.profile),
     ),
   )
@@ -280,6 +293,22 @@ async function classify(
 /** hmr 探测的合一结果：要么有结论，要么带一个可直接返回的失败。 */
 type HmrProbeOutcome =
   { kind: 'probe'; hmrProbe: HmrProbe; sources: string[] } | { kind: 'fail'; failure: ToolFail }
+
+/**
+ * 把探测结果压成契约里的 hmr 可用性（**三值**）。
+ *
+ * 与 `src/lib/effect.ts` 的 `HmrProbe.disabled` 一一对应，**不许合并**：
+ * - 没有那一行、或它被静态禁用 → `absent`（没人 watch patch 文件，必须降级）；
+ * - `disabled:` 是运行时表达式 → `present-conditional`（**不能**当成确定可用）；
+ * - 其余 → `present`。
+ *
+ * @param probe 组合树 / profile 文件的探测结果。
+ */
+function hmrAvailabilityOf(probe: HmrProbe): HmrAvailability {
+  if (!probe.present) return 'absent'
+  if (probe.disabled === 'yes') return 'absent'
+  return probe.disabled === 'conditional' ? 'present-conditional' : 'present'
+}
 
 /**
  * 探 hmr：先文件、后组合层复核。
@@ -325,7 +354,11 @@ async function probeHmrFor(
         nextStep: {
           tool: 'dsh_dump_config',
           args: { profile: deps.config.profile },
-          why: 'read the composed tree to check for the hmr row directly, then re-run this tool with a larger timeoutMs',
+          // ⚠️ 原话是「再跑一次这个工具、把 timeoutMs 调大」—— 两处都不成立：① `timeoutMs`
+          // 是**插件配置**（`src/config.ts`），不是工具参数，`defineTool` 的预算在注册期
+          // 就定死了，模型改不动；② 「this tool」指代不明（这一支刚建议调 `dsh_dump_config`，
+          // 模型会读成它）。所以点名工具，并把「调预算」明确归给用户。
+          why: 'read the composed tree to check for the hmr row directly; a larger timeoutMs for dsh_check_effect_mode is a plugin config change only the user can make',
         },
       }),
     }
@@ -368,7 +401,9 @@ async function probeHmrFor(
         nextStep: {
           tool: 'dsh_dump_config',
           args: { profile: deps.config.profile },
-          why: 'read the composed tree to confirm whether an hmr row exists; it may time out too, in which case raise timeoutMs',
+          // 同上：`schemaDumpTimeoutMs`（`dsh_dump_config` 走**慢档**，不是 `timeoutMs`）
+          // 也是插件配置，模型改不动 ⇒ 只说明「那件事归用户做」，不写成模型的动作。
+          why: 'read the composed tree to confirm whether an hmr row exists; if that dump times out too, raising its budget is a plugin config change (schemaDumpTimeoutMs) only the user can make',
         },
       }),
     }
@@ -475,12 +510,22 @@ function unexpectedFailure(error: unknown, config: ResolvedConfig): ToolFail {
  *
  * @param change 改动种类。
  * @param decision 纯函数判定结果。
+ * @param hmr hmr 可用性的**三值**结论 —— `hot` 那一支要靠它把「条件可用」与「确定可用」
+ *   分开说；两值化会让这句变成「按上下文决定也算确定可用」。
  */
-function verdictFor(change: EffectChangeKind, decision: EffectDecision): string {
+function verdictFor(
+  change: EffectChangeKind,
+  decision: EffectDecision,
+  hmr: HmrAvailability,
+): string {
   const label = CHANGE_LABEL[change]
   switch (decision.mode) {
     case 'hot':
-      return `${label} takes effect live here: hmr is mounted in this profile and it is what watches the patch files, so the loader re-reads the changed rows — if it still had no effect, the config is wrong or a later layer replaced the whole row`
+      // `present-conditional` 必须**在 L1 里带条件**：这一支的结论建立在「hmr 可用」之上，
+      // 而那个可用性本身是按运行时表达式决定的 ⇒ 只印「takes effect live here」是把条件丢掉。
+      return hmr === 'present-conditional'
+        ? `${label} takes effect live here only if hmr's disabled expression evaluates to enabled: hmr is mounted in this profile and it is what watches the patch files, so the loader re-reads the changed rows — but that row's disabled flag is a runtime expression, so this is not certain; if it still had no effect, check that expression before blaming the config`
+        : `${label} takes effect live here: hmr is mounted in this profile and it is what watches the patch files, so the loader re-reads the changed rows — if it still had no effect, the config is wrong or a later layer replaced the whole row`
     case 'hmr':
       return `${label} is swapped in by hmr: refresh the page to pick it up`
     case 'client-rebuild':
@@ -503,9 +548,11 @@ const CHANGE_LABEL: Record<EffectChangeKind, string> = {
 /**
  * 挑下一步 —— **必须带动作**，没有动作就返回 `undefined`（不出现）。
  *
- * ⚠️ `restart-required` 走 `manual`：SHAPE §6.1 那条协作纪律写的是「走重启工具」，
- * 但那个工具**尚未实现**。让模型去调一个不存在的工具，比不给动作更坏 ——
- * 所以这里只说明「要重启」以及「为什么工具这边做不到」。
+ * ⚠️ `restart-required` 走 `manual`，**但 why 里必须点出 `dsh_restart`**：SHAPE §6.1 的
+ * 协作纪律就是「走重启工具」，而它**已实现并注册**。原先那句「no tool on this side can
+ * restart it yet」是假话 —— 模型读到它就不会去调那个真实存在的工具。
+ * 仍用 `manual` 的理由只有一条：重启**不可逆**，这一步该由用户拍板；而工具支要带
+ * `reason`（必填），那个值又必须出现在 L1/L2 里（B17）—— 这里给不出。
  *
  * @param mode 生效方式。
  * @param profile 本次的 profile 名（它会出现在 L2 的 `resolved:` 行里，B17 因此成立）。
@@ -531,7 +578,7 @@ function nextStepFor(mode: EffectMode, profile: string): NextStep {
     case 'restart-required':
       return {
         manual: true,
-        why: 'restart the host process: this change is only picked up at startup, and no tool on this side can restart it yet',
+        why: 'restart the host process: this change is only picked up at startup; dsh_restart does that, and it is irreversible — use its dryRun first',
       }
   }
 }
@@ -554,7 +601,15 @@ function keyText(key: EffectModeKey): string[] {
   if (key.downgraded === true && key.baseline !== undefined && key.mode !== undefined) {
     lines.push(`downgraded: ${key.baseline} -> ${key.mode} (no usable hmr)`)
   }
-  if (key.hmr !== undefined) lines.push(`hmr: ${key.hmr}`)
+  if (key.hmr !== undefined) {
+    // 第三值**必须把条件本身印出来**：只印 `present-conditional` 这个记号，模型读不出
+    // 「它按上下文决定、可能在这里是禁用的」。确定可用的那一支照旧只印 `present`。
+    lines.push(
+      key.hmr === 'present-conditional'
+        ? 'hmr: present (conditionally disabled: its disabled flag is a runtime expression)'
+        : `hmr: ${key.hmr}`,
+    )
+  }
   lines.push(resolvedLine(key.resolved, key.profileDir))
   return lines
 }

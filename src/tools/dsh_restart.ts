@@ -97,9 +97,6 @@ export const RESTART_TOOL = 'dsh_restart'
  */
 const WORKLOAD: Workload = 'quick'
 
-/** 闸门拒绝之后模型能去调的那个工具（「现在是什么模式」决定要不要重启）。 */
-const EFFECT_MODE_TOOL = 'dsh_check_effect_mode'
-
 /** 组合解析不了时指路的那个工具（与闸③的 `suggestedTool` 同源）。 */
 const DUMP_CONFIG_TOOL = 'dsh_dump_config'
 
@@ -235,14 +232,17 @@ export interface RestartToolDeps extends ToolDeps {
  *   也是唯一会让人事后吃亏的地方：重启只作用于本进程所在的宿主）。
  * - `useWhen`：路由信号 —— 「某个改动需要重启」。协作纪律（先问 `dsh_check_effect_mode`）
  *   写在 SKILL 正文里，描述层不复述。
- * - `boundary`：**两件执行前必须知道、且调用结果里学不到的事**：① `ask` 档会弹窗、
- *   `never` 档不问（读档位再决定问不问）；② 写状态还要过**文件沙箱档**（与审批档互相独立）。
+ * - `boundary`：**三件执行前必须知道、且调用结果里学不到的事**：① `ask` 档会弹窗、
+ *   `never` 档不问（读档位再决定问不问）；② **只有 Windows 上有已实测的拉起路线** ——
+ *   非 win32 上 `launchCommandFrom` 与 `relaunchViaTaskScheduler` 两处都会拒绝，所以这是
+ *   一条真的**路由信号**（模型该在调用之前就知道，而不是撞一次拒绝再回头）；③ 写状态还要过
+ *   **文件沙箱档**（与审批档互相独立）。三条都是事实，不是承诺。
  * - `cost`：行动类的三件事 —— **不可逆**、有 `dryRun` 可预览、`force` 只覆盖闸②。
  */
 export const RESTART_DESCRIPTION: ToolDescription = {
   what: 'Restarts this host; it cannot reach another instance.',
   useWhen: 'Use when a change needs a restart.',
-  boundary: 'ask prompts, never does not; the marker write also passes the file sandbox.',
+  boundary: 'ask prompts, never auto-runs; Windows only; the write also passes the file sandbox.',
   cost: 'Irreversible; dryRun previews; force overrides only the busy gate.',
 }
 
@@ -260,7 +260,7 @@ const PARAMETERS = {
   },
   delayMs: {
     type: 'number',
-    description: 'Grace before the relaunch starts, in ms (default 10000)',
+    description: 'Grace before the new process starts, in ms (default 10000)',
   },
   dryRun: {
     type: 'boolean',
@@ -351,8 +351,10 @@ export function createRestartTool(deps: RestartToolDeps): ToolDefinition {
                 audit: {},
               },
               {
+                // ⚠️ 原话是「换一个带 session id 的会话再调」—— **模型无法选择自己在哪个会话**
+                // ⇒ 重试必然同样失败。改成**人**的动作（O3）。
                 manual: true,
-                why: 'call again from a session that has a session id, so the busy gate can exempt that session',
+                why: 'ask the user to retry from a session that has a session id, so the busy gate can exempt that session; this tool cannot choose the session it runs in',
               },
             ),
           )
@@ -449,9 +451,14 @@ export function createRestartTool(deps: RestartToolDeps): ToolDefinition {
                 audit: { reason: parsed.reason, delayMs: parsed.delayMs },
               },
               {
-                tool: EFFECT_MODE_TOOL,
-                args: { change: 'config' },
-                why: 'call it without dryRun once you accept the restart; it will stop this host',
+                // ⚠️ 这一支**不指向工具**（B1）：原话给的是 `dsh_check_effect_mode({change:'config'})`，
+                // 而那个工具 (a) 参数里**没有** `dryRun`、(b) 是只读分类工具、**不会停任何宿主**；
+                // 而且 `change: 'config'` 是**硬编码**的 —— 本工具根本没有 `change` 参数，
+                // 演练时它**不知道**这次改动是哪一类，那是「把不知道印成结论」。
+                // 正确的下一步是**再调一次本工具**（去掉 dryRun），而那要带 `reason`，
+                // 它此刻只在 `audit` 里 ⇒ 指工具支会被 B17 判红 ⇒ 用 `manual` 支。
+                manual: true,
+                why: 'call dsh_restart again without dryRun once you accept the restart; it will stop this host',
               },
             ),
           )
@@ -522,8 +529,10 @@ export function createRestartTool(deps: RestartToolDeps): ToolDefinition {
                 },
               },
               {
+                // ⚠️ 原话是「start the host again yourself」—— 与上面那句 verdict 的
+                // 「this host keeps running」**打架**，模型很可能转述成「宿主已经没在跑了」（S3）。
                 manual: true,
-                why: 'start the host again yourself; the marker is left armed so the next startup can report that this restart never completed',
+                why: 'restart the host yourself when convenient (it is still running); the marker is left armed so the next startup can report that this restart never completed',
               },
             ),
           )
@@ -531,8 +540,23 @@ export function createRestartTool(deps: RestartToolDeps): ToolDefinition {
 
         // ── ⑦ 本进程退出（**在 marker 写完之后**，且不经过 `process.exit`）──────
         // 通道在 ② 就取好了（取不到时什么都没发生）—— 这里只负责调它。
+        //
+        // ⚠️ **退出必须排在本工具的结论之后**（2026-10-14 真机闭环实测的真缺陷）：
+        // 原先这里直接 `exit(0)`、下面才 `return` 结果 —— 于是那句 verdict **永远落不了盘**，
+        // 会话日志里只剩一条「结果未持久化」的合成行（`interrupted-tool-result-…`），
+        // 模型对一次**不可逆**动作拿到的是 `outcome unknown`：既不知道四道闸过没过、
+        // 也不知道 marker 在不在、更不知道新宿主会不会起来。而它正是本工具 dry-run 的
+        // `nextStep` 明确指引模型来做的那一步。
+        //
+        // 改成排到**下一个宏任务**：交付结果走的是 Promise 链（微任务），微任务先于宏任务
+        // 排空 ⇒ 结论先到、退出后到。这不削弱台账 §2.6 的顺序保证：marker 早已 `await`
+        // 写完（上一步），而 `appExit` 的语义是「等树 dispose 完再退」，`beforeExit` 还要等
+        // 事件循环排空（E11 实测：调用 → disposer +102/112/114 ms → beforeExit +19/21/25 ms；
+        // E12 的 5 s 是硬上限，足够一次日志写入落地）。
         stage = 'exit'
-        exit(0)
+        setImmediate(() => {
+          exit(0)
+        })
 
         return toOutput(
           ok({
@@ -688,28 +712,53 @@ async function resolveApproval(
   if (outcome === 'allowed-once') {
     return { granted: true, label: 'allowed-once' }
   }
+  // ⚠️ `unavailable` 有**四种**来源：服务缺席 / `request` 抛异常 / 返回非闭集值 /
+  // 宿主真的答了 `unavailable`。前三种**没有 resolve 出任何值** ⇒ 说「the approval request
+  // resolved "unavailable"」比事实肯定（S4 的附带项）。改成一个把两种都盖住的措辞。
+  const answered =
+    outcome === 'unavailable'
+      ? 'the approval gate answered "unavailable" (or could not be reached)'
+      : `the approval request resolved "${outcome}"`
   return {
     granted: false,
     failure: fail(
       {
         kind: outcome === 'unavailable' ? 'not-configured' : 'cancelled',
-        message: `the approval request resolved "${outcome}"`,
+        message: answered,
       },
       {
-        verdict: `nothing was restarted: the approval request resolved "${outcome}", and only "allowed-once" counts as permission`,
+        verdict: `nothing was restarted: ${answered}, and only "allowed-once" counts as permission`,
         key: { stage: 'approval', approval: outcome },
         audit: {},
       },
-      outcome === 'unavailable'
-        ? {
-            manual: true,
-            why: 'no approval answerer is reachable in this profile; the restart needs a policy that can actually grant it',
-          }
-        : {
-            manual: true,
-            why: 'ask the user to approve the restart, then call again',
-          },
+      approvalRemedy(outcome),
     ),
+  }
+}
+
+/**
+ * 审批没通过时给模型的下一步 —— **按 `outcome` 分岔**（S4）。
+ *
+ * ⚠️ `cancelled` 与 `rejected` 原先是**同一句**「ask the user to approve the restart, then
+ * call again」—— 而 `cancelled` 是用户在弹窗上**取消**了（没有说「不」）⇒ 同一句会让模型
+ * 立刻再弹一次。`rejected` 是明确的拒绝，`cancelled` 是没回答，两者必须分开。
+ *
+ * @param outcome 审批门的结论（`allowed-once` 不走这里：调用方在那之前就返回了）。
+ */
+function approvalRemedy(outcome: Exclude<RestartApprovalOutcome, 'allowed-once'>): NextStep {
+  switch (outcome) {
+    case 'unavailable':
+      return {
+        manual: true,
+        why: 'no approval answerer is reachable in this profile; the restart needs a policy that can actually grant it',
+      }
+    case 'cancelled':
+      return {
+        manual: true,
+        why: 'the user dismissed the approval prompt without answering; ask again only if the restart is still wanted, then call again',
+      }
+    case 'rejected':
+      return { manual: true, why: 'ask the user to approve the restart, then call again' }
   }
 }
 
@@ -807,8 +856,15 @@ function planFailureResult(
  * 「还没动手就炸」在 `key` 里长得一模一样 —— 而这两件事的下一步完全不同
  * （前者盘上留着 armed marker，后者什么都没发生）。
  *
+ * ## ⚠️ 结论也**必须**跟着 `stage` 分岔（B2：这里曾是 stage-blind 的假话）
+ *
+ * 光让 `key.stage` 报准是不够的：`stage === 'relaunch'` 时**marker 已在盘上、拉起请求已发出**，
+ * `stage === 'exit'` 时连 `exit(0)` 都调过了 —— 这时再印一句「the restart was not started」
+ * 就是与盘上事实**相反**的假话（L1 说没开始、L2 连 `markerWritten` 都不给 ⇒ 两层一起失明）。
+ * 这一族与文件头第 0 条那个「报没开始、其实已拉起」的缺陷同源，是它在兜底分支的漏改落点。
+ *
  * @param error 捕获到的异常。
- * @param verdict 给模型看的那句结论。
+ * @param verdict 给模型看的那句结论（**动手之前**那几格用它）。
  * @param config 生效配置。
  * @param stage 出错时已经走到哪一步。
  */
@@ -818,14 +874,43 @@ function internalFailure(
   config: ResolvedConfig,
   stage: RestartStage,
 ): ToolFail {
+  const message = messageOf(error)
+  const startedVerdict = startedButUnreportedVerdict(stage)
   return fail(
-    { kind: 'internal', message: messageOf(error) },
+    { kind: 'internal', message },
     {
-      verdict: `${verdict} (${messageOf(error)})`,
-      key: { stage, resolved: effectiveConfig(config) },
-      audit: { error: messageOf(error) },
+      verdict: `${startedVerdict ?? verdict} (${message})`,
+      key: {
+        stage,
+        resolved: effectiveConfig(config),
+        // marker 已经落盘这一格必须进 L2：否则「L1 说没开始」与「盘上有 marker」
+        // 这对矛盾从 `key` 里也看不出来。
+        ...(startedVerdict === undefined ? {} : { markerWritten: true as const }),
+      },
+      audit: { error: message },
     },
   )
+}
+
+/**
+ * 「已经动手之后才炸」那一格的事实句；**动手之前**那几格返回 `undefined`（由调用方用原话）。
+ *
+ * - `relaunch`：marker 已写完、拉起请求已发出（计划任务可能已经排上）；
+ * - `exit`：在那之上，`exit(0)` 也已经调过。
+ *
+ * ⚠️ 两句都**只陈述已发生的事**，不预测新宿主会不会起来 —— 那是这一层看不到的。
+ *
+ * @param stage 出错时已经走到哪一步。
+ */
+function startedButUnreportedVerdict(stage: RestartStage): string | undefined {
+  switch (stage) {
+    case 'relaunch':
+      return 'the restart was started but this call could not report it: the marker is on disk and the relaunch may already be scheduled, so a new host may come up while this one keeps running'
+    case 'exit':
+      return 'the restart was started but this call could not report it: the marker is on disk, the relaunch was scheduled, and this process has already been asked to exit'
+    default:
+      return undefined
+  }
 }
 
 /**

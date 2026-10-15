@@ -335,15 +335,17 @@ const MAX_STARTUP_LOG_BYTES = 262_144
  * - `boundary`：**两行**，承载从输出里搬出来的恒定知识。它是本工具唯一的反直觉点所在：
  *   ① 「三处前置条件都在」**不等于**「加载成功」（旧 `observation.note` / `loadProofCaveat`
  *   的 inferred 分支）；② Loader 树的相位**不是公开 API**，而且没稳定时「还在挂载」的行
- *   会被读成 import 失败（同一个 caveat 的 observed 分支）。观察类工具没有「代价段」，
- *   所以两行边界 + 两行前置 = 合成后仍是四行。
+ *   会被读成 import 失败（同一个 caveat 的 observed 分支）—— 后半句是**必须写进模型文本**的
+ *   那一条（`lib/fiber.ts` 文件头的边界段原文：调用方必须把这一条写进输出，别让「刚插进来」
+ *   被读成「崩了」）；它原先只进了 `audit.basis`，而 `audit` 模型看不到，模型在 L2 只看到
+ *   `error=failed to import`。观察类工具没有「代价段」，所以两行边界 + 两行前置 = 合成后仍是四行。
  */
 export const DIAGNOSE_PLUGIN_LOAD_DESCRIPTION: ToolDescription = {
   what: 'Checks whether a plugin loaded.',
   useWhen: 'Use when an installed plugin never shows up.',
   boundary:
-    'Preconditions only prove loading was possible; startup-*.log exists only on failure, and may be old.\n' +
-    'A Loader-tree phase is host-internal, not a public API.',
+    'Preconditions only prove it could load; startup-*.log is failure-only and may be old.\n' +
+    'Loader-tree phase is host-internal; mounting rows read like import failures.',
 }
 
 /** 本工具的输出表：L1 就是 `data.verdict` 逐字，L2 由 `key` 投影成行。 */
@@ -420,10 +422,19 @@ export function createDiagnosePluginLoadTool(deps: ToolDeps): ToolDefinition {
               },
               {
                 tool: DIAGNOSE_PLUGIN_LOAD_TOOL,
-                // 参数原样带回去。空对象是**有意**的（B17 的例外：没有标识符可指），
+                // 参数原样带回去（跨实例时把 `dshHome` 一起带上，见 `retryArgs`）。
+                // 空对象是**有意**的（B17 的例外：没有标识符可指），
                 // 但不能传 `{ package: undefined }` —— 那不是 JSON。
-                args: args.package === undefined ? {} : { package: args.package },
-                why: 'retry once; raise timeoutMs if it keeps timing out, since the port lookup is the slowest step here',
+                args: retryArgs(
+                  keyResolved,
+                  args.package === undefined ? {} : { package: args.package },
+                ),
+                // ⚠️ `timeoutMs` 是**插件配置字段**，不是本工具的参数（`defineTool` 的
+                // `timeoutMs` 注册期定死，工具 schema 送到模型前只保留 name/description/
+                // parameters）⇒ 能做这件事的只有**改配置的人**，所以动作必须指给人。
+                why:
+                  'retry once; the port lookup is the slowest step here, so if it keeps timing out ' +
+                  'a human must raise the plugin config timeoutMs — a call cannot raise it',
               },
             ),
           )
@@ -449,7 +460,7 @@ export function createDiagnosePluginLoadTool(deps: ToolDeps): ToolDefinition {
               },
               {
                 tool: 'dsh_dump_config',
-                args: { profile },
+                args: retryArgs(keyResolved, { profile }),
                 why: 'use it to check whether this profile composes at all; if it does, the directory above is the wrong one',
               },
             ),
@@ -622,7 +633,15 @@ export function createDiagnosePluginLoadTool(deps: ToolDeps): ToolDefinition {
         return toOutput(
           ok(
             { verdict, key, audit },
-            nextStepFor({ profile, failed, absent, pending, stale, startup: startupEvidence }),
+            nextStepFor({
+              profile,
+              resolved: keyResolved,
+              failed,
+              absent,
+              pending,
+              stale,
+              startup: startupEvidence,
+            }),
           ),
         )
       } catch (error) {
@@ -660,6 +679,8 @@ export function createDiagnosePluginLoadTool(deps: ToolDeps): ToolDefinition {
  */
 function nextStepFor(input: {
   profile: string
+  /** 本次生效配置的 `key` 投影：`retryArgs` 靠它判「这次有没有用参数覆盖 home」。 */
+  resolved: ResolvedKey
   failed: readonly PackageDiagnosis[]
   absent: readonly PackageDiagnosis[]
   pending: readonly PackageDiagnosis[]
@@ -690,7 +711,8 @@ function nextStepFor(input: {
     return {
       tool: 'dsh_dump_config',
       // `profile` 出现在 L2 的 `resolved:` 行里 —— B17 因此成立。
-      args: { profile: input.profile },
+      // 跨实例时 `dshHome` 必须一起带上，否则这一步会去问**另一个实例**（见 `retryArgs`）。
+      args: retryArgs(input.resolved, { profile: input.profile }),
       why: `check whether the composition layer really carries the row for ${absentName}, and whether a later layer replaced the whole patch`,
     }
   }
@@ -699,7 +721,8 @@ function nextStepFor(input: {
     if (pendingName !== undefined) {
       return {
         tool: DIAGNOSE_PLUGIN_LOAD_TOOL,
-        args: { package: pendingName },
+        // 同上：重跑本工具若丢掉 `dshHome`，会拿到另一个实例的答案 —— 而两次输出长得一模一样。
+        args: retryArgs(input.resolved, { package: pendingName }),
         why: `re-run once the injected services have mounted, to see whether ${pendingName} moves from pending to active`,
       }
     }
@@ -710,12 +733,35 @@ function nextStepFor(input: {
       tool: 'dsh_check_effect_mode',
       // `host-code` 是**目标工具自己的封闭枚举**：模型在它的 `change` 参数描述里读得到，
       // 所以它不需要出现在本次输出里（B17 扩后的取值面）。**没有为了过检查改写它。**
-      args: { change: 'host-code' },
+      // 跨实例时 `dshHome` 一起带上（`dsh_check_effect_mode` 同样有跨实例接缝）。
+      args: retryArgs(input.resolved, { change: 'host-code' }),
       why: `the process is running artifacts older than the code on disk for ${names}; classify what it takes to make that change take effect before touching anything`,
     }
   }
   // 「全都 active」= 没有动作可做 → 不出现（「没有动作就不出现」是 §3.1 的规则）。
   return undefined
+}
+
+/**
+ * 「再跑一次本工具 / 派给下一个工具」用的参数：**跨实例时把 `dshHome` 一起带上**。
+ *
+ * 为什么必须带（同 `dsh_dump_config.retryArgs` 的理由）：这次的结论是关于**那个实例**的，
+ * 下一步若丢掉 home，模型会拿到另一个实例的答案 —— 而两次调用的输出长得一模一样
+ * （同一张输出表），这种错**看起来像成功**。只在**参数覆盖过**时才带：没覆盖时再调一次
+ * 本来就是对的，多印一个配置里的值只会变成噪声（L2 规则：只放本次非默认的）。
+ *
+ * 值必须在模型看得见的地方（B17）：`key.resolved` 会渲染成 L2 的 `resolved: … dshHome=…` 行。
+ *
+ * @param resolved `key` 里的配置投影。
+ * @param extra 目标工具自己的参数。
+ */
+function retryArgs(
+  resolved: ResolvedKey,
+  extra: Record<string, JsonValue> = {},
+): Record<string, JsonValue> {
+  return resolved.dshHomeSource === 'tool-argument'
+    ? { ...extra, dshHome: resolved.dshHome }
+    : extra
 }
 
 /**
@@ -771,7 +817,10 @@ function buildVerdict(input: {
   }
   if (input.absent.length > 0) {
     parts.push(
-      `Installed but absent from the Loader tree: ${input.absent.map((item) => item.packageName).join(', ')}` +
+      // ⚠️ **不许说「Installed」**：这一档的判据只是「树读到了、这个包一行都没匹配上」
+      // （见 `absent` 的取法），**不含**任何「它装了」的观测 —— 模型显式传一个没装的包名时
+      // 同一段代码照样走到这里，说「Installed」就是把没查到写成查到了。
+      `Named but absent from the Loader tree: ${input.absent.map((item) => item.packageName).join(', ')}` +
         ' (the composition layer does not include it — check whether it made it into bundles, and whether a later layer replaced the whole patch row)',
     )
   }

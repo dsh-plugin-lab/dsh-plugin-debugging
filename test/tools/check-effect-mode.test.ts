@@ -203,11 +203,15 @@ describe('dsh_check_effect_mode', () => {
       // hmr 可用且原表本来就要求重启 ⇒ **不是**降级（降级只有一个原因：没有 hmr）。
       expect(already.key['downgraded']).toBe(false)
       expect(already.key['hmr']).toBe('present')
-      // 重启工具**尚未实现** ⇒ 只能给 manual，且不许建议调一个不存在的工具。
+      // 重启工具**已实现并注册**（`dsh_restart`）⇒ 这句话必须点出它，并说清它不可逆。
+      // 原先那句「no tool on this side can restart it yet」是假话（A3）：模型读到它就不会去调。
       expect(alreadyResult.nextStep).toEqual({
         manual: true,
         why: expect.stringContaining('restart the host process'),
       })
+      expect(alreadyResult.nextStep?.why).toContain('dsh_restart')
+      expect(alreadyResult.nextStep?.why).toContain('irreversible')
+      expect(alreadyResult.nextStep?.why).not.toContain('no tool on this side can restart')
     })
 
     it('宿主端代码改动即使有 hmr 也必须重启（restart-required 不依赖降级）', async () => {
@@ -273,9 +277,46 @@ describe('dsh_check_effect_mode', () => {
         depsFor(configFor(conditionalHome), { spawn: conditionalSpawn }),
       )
       const conditionalData = expectOk(await run(conditionalTool, { change: 'config' }))
-      expect(conditionalData.key['hmr']).toBe('present')
+      // 第三值：条件禁用**按可用处理**（不能当成确定不可用），但结论里必须带着那个条件。
+      expect(conditionalData.key['hmr']).toBe('present-conditional')
       expect(conditionalData.key['downgraded']).toBe(false)
       expect(conditionalData.key['mode']).toBe('hot')
+    })
+
+    it('`disabled: !!js` 是**第三值**：条件必须进 L1 与 L2，不许压成「确定可用」（A2）', async () => {
+      // 本机 web profile 的真实形状：`disabled` 是运行时表达式（由 profileContext 决定）。
+      // `src/lib/effect.ts` 的 note 承诺的是「treated as usable, but the verdict carries that
+      // condition」—— 而 `audit` 模型看不到，所以条件只能落在 L1 / L2 上。
+      const conditionalTree = [
+        '- id: hmr',
+        "  name: '@deepseek-ai/dsh-hmr'",
+        "  disabled: !!js '!ctx.get(''profileContext'')'",
+      ].join('\n')
+      const conditionalHome = await tempDshHome()
+      await writeProfile(conditionalHome, 'web', { bundles: [] })
+      const { spawn } = recordingSpawn(() => cmdResult({ stdout: conditionalTree }))
+      const tool = createEffectModeTool(depsFor(configFor(conditionalHome), { spawn }))
+
+      const result = await run(tool, { change: 'config' })
+      const data = expectOk(result)
+      expect(data.key['hmr']).toBe('present-conditional')
+
+      const parts = splitRender(renderText(tool, { change: 'config' }, result))
+      // L1 带条件：只说「takes effect live here」而不说条件是**把条件丢掉**。
+      expect(parts.verdict).toContain('runtime expression')
+      expect(parts.verdict).toContain('evaluates to enabled')
+      // L2 也带：这一行才是模型逐字读到的 hmr 结论。
+      expect(
+        parts.l2.some((line) => line.startsWith('hmr: present (conditionally disabled')),
+        `L2 没有把条件印出来：${parts.l2.join(' | ')}`,
+      ).toBe(true)
+
+      // 反证：确定可用的那一份**不许**出现条件措辞 —— 否则这两句就是到处都印的恒定块。
+      const plain = await hmrProfileFixture()
+      const plainResult = await run(plain.tool, { change: 'config' })
+      const plainParts = splitRender(renderText(plain.tool, { change: 'config' }, plainResult))
+      expect(plainParts.verdict).not.toContain('runtime expression')
+      expect(plainParts.l2).toContain('hmr: present')
     })
 
     it('无 hmr 时「热生效」降级成 restart-required（核心断言）', async () => {
@@ -296,6 +337,9 @@ describe('dsh_check_effect_mode', () => {
         manual: true,
         why: expect.stringContaining('restart the host process'),
       })
+      // 降级那一支与「原表本来就要重启」那一支**共用同一个 why**，所以这条覆盖两支（A3）。
+      expect(result.nextStep?.why).toContain('dsh_restart')
+      expect(result.nextStep?.why).not.toContain('no tool on this side can restart')
     })
 
     it('无 hmr 时客户端改动降级成「构建 + 刷新」，不是重启', async () => {
@@ -385,6 +429,12 @@ describe('dsh_check_effect_mode', () => {
         args: { profile: 'web' },
         why: expect.stringContaining('composed tree'),
       })
+      // `timeoutMs` 是**插件配置**，不是工具参数（`defineTool` 的预算注册期定死）⇒
+      // 让模型「调大它」是给一个做不到的动作；而「this tool」在刚建议 `dsh_dump_config`
+      // 之后指代不明 —— 必须点名（S6）。
+      expect(failure.nextStep?.why).not.toContain('re-run this tool')
+      expect(failure.nextStep?.why).toContain('dsh_check_effect_mode')
+      expect(failure.nextStep?.why).toContain('user')
     })
 
     it('timeout：dump-config 传输层超时（stage=dump-timeout）', async () => {
@@ -402,6 +452,11 @@ describe('dsh_check_effect_mode', () => {
         args: { profile: 'web' },
         why: expect.any(String),
       })
+      // 同上（S6）：`dsh_dump_config` 走**慢档** ⇒ 那个预算字段是 `schemaDumpTimeoutMs`，
+      // 而且它同样是插件配置、模型改不动。原话「raise timeoutMs」两头都错。
+      expect(failure.nextStep?.why).not.toContain('raise timeoutMs')
+      expect(failure.nextStep?.why).toContain('schemaDumpTimeoutMs')
+      expect(failure.nextStep?.why).toContain('user')
     })
 
     it('cancelled：调用方在复核期间取消（stage=dump-cancelled）', async () => {

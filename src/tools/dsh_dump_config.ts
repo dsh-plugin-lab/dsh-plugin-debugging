@@ -439,9 +439,13 @@ function failureOf(invocation: DumpInvocation, resolved: ResolvedKey): FailureHe
         // 而超时的原因常常已经写在上面了（输出太大、宿主要现装依赖 …）。
         // 点名 `schemaDumpTimeoutMs`（不是 `timeoutMs`）：本工具走的是**慢档**，
         // 让模型去调另一个字段只会让人白改一次配置。
+        // ⚠️ 但**不能让模型去调它**：`schemaDumpTimeoutMs` 是**插件配置字段**，不是本工具的
+        // 参数（`defineTool` 的 `timeoutMs` 注册期定死，工具 schema 送到模型前只保留
+        // name/description/parameters）⇒ 能做这件事的只有**改配置的人**，动作必须指给人。
         why:
           'read the stderr captured in invocations first, then retry once as-is; ' +
-          'raise schemaDumpTimeoutMs if it keeps timing out, since dump-config-schema is slow by nature',
+          'if it keeps timing out, a human must raise the plugin config schemaDumpTimeoutMs — ' +
+          'a call cannot raise it, since dump-config-schema is slow by nature',
       },
     }
   }

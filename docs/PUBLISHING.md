@@ -11,18 +11,24 @@
 
 逐条跑，全绿才继续。任何一条红了就停下，不要绕过。
 
-- `npm run check:release` —— 发布态不变量：bundle 声明在不在、`private` 去掉没有、
+- `pnpm run check:release` —— 发布态不变量：bundle 声明在不在、`private` 去掉没有、
   `engines.dsh` 声明了没有、`files` 覆盖 `cordis.patch.yml` 与
   `skills/dsh-plugin-debugging/SKILL.md`、`exports` 暴露 `./skills/*`、
-  以及**发布流程没有偷偷改写版本号**（最后一条读的是 `release.yml` 的文本）。
-- `npm run check`（= typecheck + build + test）与 `npm run lint`、`npm run format:check`。
+  以及**发布流程没有偷偷改写版本号**（这一条读的是 `release.yml` 的文本）等；
+  判据清单以脚本的断言集合为准，这里不抄。
+- `pnpm run check`（= typecheck + build + test）与 `pnpm run lint`、`pnpm run format:check`。
 - 身份件比对：在工作区根跑 `node <脚手架检出>/scripts/scaffold.mjs check dsh-plugin-debugging`（比对脚本不在本仓）
   —— 只比 5 个「逐字相同」件，离线只读。
 - **`git rev-parse origin/main` 必须等于 `git rev-parse HEAD`。**
   **没 push 就没有可发的东西**：发布守卫判的是「上个 tag 到 **HEAD** 之间有没有改动」，
-  而 workflow 跑的是**远端**那份代码 —— 本地领先而没推时，远端那个区间是**空的**，
-  守卫会以「没有可发的」红掉（同工作区的另一个仓 2026-09-22 就是这么撞的：本地领先 11 个提交、
-  远端还停在上一个 tag）。**先 push，再 dispatch。**
+  而 workflow 跑的是**远端**那份代码 —— 本地领先而没推时，checkout 里的 `package.json` 仍是
+  **远端那个已发布的版本**，探针查到它已经在 npm 上，发布步骤全部跳过：那是一条**绿的 no-op**，
+  **不再以红的形式报出来**。
+  ⚠️ **以前会红、现在不会，是同一处改动的两面**：旧形态下 dispatch 不排「当前版本自己的」tag，
+  `previous` 因此落在**远端 HEAD 自己**那个 tag 上 ⇒ 区间空 ⇒ 守卫 exit 1（同工作区的另一个仓
+  2026-09-22 就是这么撞的：本地领先 11 个提交、远端还停在上一个 tag）；现在两个入口都排掉
+  当前版本自己的 tag，基线落在**上一个发布**上 ⇒ 区间非空。**但它只是从「会喊的失败」变成
+  「不会喊的失败」** —— **先 push，再 dispatch。**
   这是组织判据里 Must agree 的一条（「发布前确认要发的提交已在远端」）。
 - 按下面的判定链定档，然后本地 bump：
 
@@ -30,16 +36,28 @@
   npm version <patch|minor|major|prerelease|premajor> --preid=alpha --no-git-tag-version
   ```
 
-  这一步会**同时**改 `package.json` 与 `package-lock.json`；只手工改前者会被 CI 与
-  `release.yml` 两处守卫拦下。
+  版本号只写在 `package.json` 一处：pnpm 的锁文件不记录根包自身的版本，所以 npm 仓那种
+  「锁文件版本 == 清单版本」的交叉核对在本仓没有对应物。`pnpm install --frozen-lockfile`
+  承担的是「锁文件与清单必须同步」那一半（对不上直接失败）；**漏 bump** 由发布链上那道
+  「该版本已在 npm 上」的幂等判据兜住 —— 报的是「已存在」，而不是发一个内容相同的新版本出去。
   **`prerelease` 与 `premajor` 不是同义词**：前者在同一条 `X.Y.Z` 线上把预发布计数 +1，
   后者**开新线**（从 `0.2.0-alpha.0` 跑 `premajor` 得到的是 `0.3.0-alpha.0`），
   而 npm 上的版本号**不可覆盖**。拿不准就在临时目录里先量一次。
 
 ## 发布入口
 
-唯一入口是 [release.yml](../.github/workflows/release.yml)，**手动触发**
-（Actions → release → Run workflow，或 `gh workflow run release.yml`）。
+发布入口是 [release.yml](../.github/workflows/release.yml)，它有两个等价入口，进的是同一个 job、
+同一条全有或全无的顺序：
+
+- **手动触发**：Actions → release → Run workflow，或 `gh workflow run release.yml`。
+  只接受 `main`；那道守卫带着 `github.event_name == 'workflow_dispatch'` 前提 —— 不带这个前提的话，
+  tag 触发时 `github.ref` 是 `refs/tags/...`，每一次 tag 发布都会红，而且红的原因离真正的原因很远。
+- **推 tag**：`git push origin v<版本>`。tag 触发天然指向某个提交，「只接受 main」不适用，
+  改由 **tag / 清单一致性闸**管：tag 名必须逐字等于 `v` + `package.json` 里的版本号，
+  对不上就报「推的是 X，而 package.json 是 Y」并中止。没有这道闸就会出现
+  「tag 是 `v0.3.0`、实际发的是 `0.2.0`」，而 npm 的版本号**不可覆盖**。
+
+`dry-run` 是手动触发独有的输入，只做检查与打包，不发布、不打 tag、不建 Release（也因此不会删草稿）。
 
 它**不需要任何仓库 secret**：认证走 npm Trusted Publishing（OIDC），
 向 npm 换短期凭据；git 侧只用内置 `GITHUB_TOKEN` 建 tag 与 Release。
@@ -61,36 +79,85 @@
 
 `0.1.0` 由维护者在本机手动 `npm publish`（维护者 2026-10-13 指定；之后的版本一律走 workflow）。
 
-⚠️ **手动发过之后，tag 与 Release 不会被流程补出来**：`release.yml` 的 Tag 步骤带
-`if: steps.probe.outputs.exists == 'false'`，版本一旦已经在 npm 上，**publish 与 tag 两步都会跳过**。
-所以首次发布只有两条路，二选一：
+**手动发过的那一版，tag 与 Release 可以由流程补出来。** `exists` 只喂 `Publish` 一步：版本一旦
+已经在 npm 上，只有 `Publish` 跳过，`Tag the release` 与 `Create the GitHub Release` 照跑 ——
+它们各自内部幂等（tag 已存在则由 `git rev-parse` 命中后跳过，Release 已存在则由 `gh release view`
+命中后跳过），这两步重跑不会撞已存在的 tag / Release。因此**只要 `package.json` 还停在那个号**，
+手动触发一次 `release.yml` 就能补出那个版本的 tag 与 Release，不必在本机手工打 tag；正文照常走
+「Drafter 草稿 → `--generate-notes` 回落」。补**还没打 tag** 的版本时，这是首选做法：它与其余版本
+走同一条路（tag 形状与正文来源都一致），也不经过 tag 入口那道一致性闸。
+（`dry-run` 那次补不出来：它不建任何正式版。）
+
+⚠️ 它前面的 release-guard 不挡回填：两个入口都会**排掉当前版本自己的 tag**（tag 入口排
+`github.ref_name`，手动入口排 `v` + 清单里的版本号），基线因此落在**上一个发布**上 —— 不排的话
+HEAD 就是当前那个 tag 指向的提交、`上个 tag..HEAD` 恒空，一次「只差 Release」的回填会被判成
+「没有可发布的内容」。**唯一例外是没有更早的基线**：仓里还没有任何 tag，或排掉当前版本自己的 tag
+之后再没有更早的 tag ⇒ 守卫跳过（那两种情况都等于「没有可比基线」，守卫不适用）。所以回填不必
+手动建 Release。
+
+另外两条可选做法，视情况用：
 
 - **手动补 `v<version>` tag 与 Release**（形状必须是 `v` + `package.json` 的版本号 —— 守卫与巡检靠
-  `git describe --match 'v[0-9]*'` 看它，漏了 `v` 前缀那个 `--match` 就看不见）；
-- 或者**直接 bump 到下一个号**（如 `0.1.1`）再走 workflow，让流程从那个号开始产出 tag 与 Release
-  （`0.1.0` 就永远没有 tag）。
+  `git describe --match 'v[0-9]*'` 看它，漏了 `v` 前缀那个 `--match` 就看不见）。
+  这条路不要求 `package.json` 停在旧号。代价：手动推 tag 会**触发 tag 入口那次运行**，
+  而它先过一致性闸 —— `package.json` 已经在新号上时那次运行会红（Release 这时也要手动建）。
+- **直接 bump 到下一个号**（如 `0.1.1`）再走 workflow，让流程从那个号开始产出 tag 与 Release ——
+  旧号就永远没有 tag / Release。
 
 ## workflow 逐步做什么
 
 按固定顺序，前面任何一步红了都走不到发布：
 
-1. `npm ci`（冻结安装）。
-2. 校验 `package.json` 与 `package-lock.json` 的版本号一致。
-3. `npm run typecheck`。
-4. **`npm run build`** —— ⚠️ **这一步不能少**，理由见下面「产物是构建出来的」。
-5. `npm test`（**它自己不构建**：本仓的 `test` = `vitest run`）。
-6. `npm run check:release`（发布态不变量）。
-7. release-guard：`git describe --tags --abbrev=0 --match 'v[0-9]*'` 取上个 tag，
+1. `pnpm install --frozen-lockfile --config.node-linker=hoisted`（冻结安装）。
+2. `pnpm run typecheck`。
+3. **`pnpm run build`** —— ⚠️ **这一步不能少**，理由见下面「产物是构建出来的」。
+4. `pnpm test`（**它自己不构建**：本仓的 `test` = `vitest run`）。
+5. `pnpm run check:release`（发布态不变量）。
+6. tag 触发时：tag 名必须逐字等于 `v` + `package.json` 版本（tag / 清单一致性闸）。
+7. release-guard：`git describe --tags --abbrev=0 --match 'v[0-9]*'` 取上个 tag
+   （**两个入口都会 `--exclude` 掉「当前版本自己的」那个 tag**，见下），
    比 `上个 tag..HEAD` 的改动；**只剩非产物改动就中止**（发了等于制造一个内容相同的新版本号）。
    首次发版没有任何 tag，这一步自动跳过。
-8. 探该版本在不在 npm 上。在就跳过 publish，只补 git 侧 —— 重跑一条流水线不会撞 403。
+   ⚠️ **基线要排掉当前版本自己的 tag**：不排的话 HEAD 就是那个 tag 指向的提交，`describe` 解析出
+   它自己、`<tag>..HEAD` 恒空 —— 一次完全正常的发布（或一次「只差 Release」的回填）会被判成
+   「没有可发布的内容」。两条规则各自成立：**tag 入口**排 `github.ref_name`；
+   **手动入口**在「`v` + 清单版本」这个 tag **已经存在**时排它 —— tag 还没建时这一步是空操作，
+   全新发布的路径逐字不变。
+8. 探该版本在不在 npm 上（`npm view`）。在就跳过 `Publish` —— 重跑一条流水线不会在 npm 那里撞 403。
+   ⚠️ 这个 `exists` **只喂 `Publish` 一步**：git 侧两步（tag 与 Release）不吃它 ——
+   「registry 上有没有这个版本」与「git 侧有没有 tag / Release」是两件独立的事实。拿它当那两步的
+   前提，「publish 成功、后面某步失败」就永远补不回来（重跑时 `exists` 已是 `true`，两步被跳过）；
+   那两步各自内部幂等，「已存在」由它们自己处理。
 9. `npm publish --provenance --tag <dist-tag>`。
 10. 打 `v<version>` tag 并**只推这个 tag**；tag 已存在则跳过。
 11. 建 GitHub Release：**正文两级 —— 先读 Release Drafter 的 `next` 草稿，草稿空则回落
-   `--generate-notes`**；并显式区分「草稿读不到」（配置坏了，发 `::warning::`）与
-   「草稿读到了但没有条目」（正常）。
+    `--generate-notes`**；并显式区分「草稿读不到」（配置坏了，发 `::warning::`）与
+    「草稿读到了但没有条目」（正常）。**建之前先 `gh release view` 判存在**：已存在就跳过，
+    并置 `created=false`（下面删草稿那步靠它区分「这次真的建了」与「已存在、正文没被取走」）。
+12. 让位草稿：删掉 Drafter 的 `next` 草稿（下一批合并后它会重建）。
 
 `dry-run` 输入只做检查与打包，不发布也不打 tag。
+
+### 草稿的读 / 写 / 删
+
+正文由 Release Drafter 维护，滚动 tag 名 `next`（永不与 `v<版本>` 相撞，所以上面那道存在性判断
+不会命中草稿）。三步：
+
+- **读**：`gh release view next --json body --jq '.body'`。读到就用它建 Release；读不到、或读到了但
+  没有条目，回落 `--generate-notes`。**两种情况要分开报**：读不到是**配置坏了**（tag 改名、action
+  没跑、权限不足，发 `::warning::`），读到了但为空是**正常**（本版没有带标签的 PR）—— 不区分的话，
+  「发版成功但正文其实走了回落」是静默失败。
+- **写**：只按 action 名清洗草稿行（`sed '/Release Drafter/d'`），**不照抄那句提示语的全文**。
+  那句话归组织仓的模板所有、随时会被改写；照抄一句就会在模板改词之后**匹配不到**，而 `sed`
+  匹配不到不会报错 —— 提示语会静默留在正文里。
+- **删**：正文取走之后必须把草稿让位，否则下一次发版读到的是**上一批**的正文（草稿停在旧分界，
+  表面上还「有内容」，属静默错）。删的条件三条，缺一不可：`!inputs.dry-run`（dry-run 不建任何
+  正式版，此时删掉草稿那批正文就**永久丢了**）、正文来源是草稿（回落 `--generate-notes` 时草稿
+  没被消费）、`created == 'true'`（Release 已存在而跳过时正文并没被取走，删草稿同样是**永久丢正文**
+  —— 这正是 tag 触发后重跑会走到的分支）。
+
+只删 tag 不以 `v` 开头的那一个草稿：不按标题匹配，也不碰任何 `v<版本>` 的正式版
+（`gh release delete <tag>` 默认连带删 tag，这里显式关掉）。
 
 ## 产物是构建出来的：**发布链路必须自己构建**
 
@@ -110,17 +177,17 @@
 
 | 机制 | 形态 |
 |---|---|
-| release.yml 里显式一步 | `- run: npm run build`（放在 publish 之前） |
-| `test` 脚本先构建 | `test = npm run build && vitest run`，而发布流程会跑 `test` |
-| `prepare` / `prepack` 先构建 | npm 在打包前自动跑它 |
+| release.yml 里显式一步 | `- run: pnpm run build`（放在 publish 之前） |
+| `test` 脚本先构建 | `test = pnpm run build && vitest run`，而发布流程会跑 `test` |
+| `prepare` / `prepack` 先构建 | 包管理器在打包前自动跑它 |
 
 **前两种对「跑测试的那条链」有好处**：CI 与发布都经过它，`lib/` 必然存在。
 第三种只在打包那一刻生效 —— **测试仍在无产物的树上跑**，本仓特意选了显式一步（测试与发布看到的是同一棵树）。
 
-**两条守卫**（`scripts/check-release.mjs`，14 条里第 11、12 条）：
+**两条守卫**（`scripts/check-release.mjs` 里标号为 11 / 12 的那两条）：
 
 - **第 11 条（机制）**：publish 之前**一定会构建** —— 三种机制认其一，不锁定写法，改机制不该把它判红。
-  这条能被 `npm test` 直接跑到，**不必等一次真发布**（真发布只能在 main 上 dispatch，代价太大）。
+  这条能被 `pnpm test` 直接跑到，**不必等一次真发布**（真发布只能在 main 上 dispatch，代价太大）。
 - **第 12 条（事实）**：`main` 指向的入口文件在磁盘上。**条件式**，分三种情形：
   入口在 → ok；**产物目录在而入口不在 → 判红**（构建跑过却没产出入口，那是故障）；
   **两者都不在 → 只记 note**（还没构建的检出，例如 `git archive` 出来的副本、红线 A5 用的干净副本）。
@@ -144,7 +211,8 @@ npm pack --dry-run          # 看清单里有没有 lib/ 与 skills/
   这是**形状判据，不是审美**：release-guard 与兼容巡检用
   `git describe --match 'v[0-9]*'` 看 tag，**不带 `v` 的 tag 那个 `--match` 看不见**。
   换版本号的来源时（`npm version` 的输出自带 `v`，读 `package.json` 则没有）形状会跟着变，
-  必须同批把前缀补上。
+  必须同批把前缀补上。推 tag 那条入口还会**先核对这一点**（tag / 清单一致性闸）：对不上就中止，
+  不会发出一个 tag 名与内容不符的版本。
 - 版本号带**预发布段**（如 `0.2.0-alpha.1`）→ dist-tag 由版本自己那段推导（`alpha`），
   `latest` 保持不动；Release 加 `--prerelease`。
 - **git 侧两样产物（tag 与 Release）都由流程产出**，不靠人记得去补。
@@ -197,7 +265,7 @@ npm pack --dry-run          # 看清单里有没有 lib/ 与 skills/
 ## 发布后缺陷处理
 
 **不发 unpublish。** 已经有人装过的版本一旦撤下，他们的 lockfile 就指向一个不存在的版本，
-下一次 `npm ci` 直接失败。正确动作四步：`npm deprecate <name>@<version> "原因与替代版本"`
+下一次按锁文件装（`npm ci` / `pnpm install --frozen-lockfile`）直接失败。正确动作四步：`npm deprecate <name>@<version> "原因与替代版本"`
 → 修 → 定档发新版本 → 在 tag 说明里写清影响范围与升级动作。
 
 只有「发布后 72 小时内、且确认无人依赖」才考虑 unpublish；走这条例外要在提交信息里写明依据。

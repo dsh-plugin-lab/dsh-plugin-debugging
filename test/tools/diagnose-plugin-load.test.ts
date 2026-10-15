@@ -110,8 +110,15 @@ describe('dsh_diagnose_plugin_load', () => {
 
     it('搬走的恒定知识**只能**在描述层出现一次（旧的两种 caveat 逐字不在输出里）', () => {
       const boundary = DIAGNOSE_PLUGIN_LOAD_DESCRIPTION.boundary ?? ''
-      expect(boundary).toContain('startup-*.log exists only on failure, and may be old')
+      expect(boundary).toContain('startup-*.log is failure-only and may be old')
       expect(boundary).toContain('host-internal')
+      // ⚠️ 边界段必须承载**唯一的反直觉点**：`lib/fiber.ts` 文件头明说「调用方**必须**把这一条
+      // 写进输出，别让『刚插进来』被读成『崩了』」—— 而它原先只进了 `audit.basis`（模型看不到），
+      // 模型在 L2 只看到 `error=failed to import`。把后半句从描述里摘掉 → 判红（变异实测）。
+      expect(boundary, '描述漏了「还在挂载的行会被读成 import 失败」这个反直觉点').toMatch(
+        /mounting/u,
+      )
+      expect(boundary).toContain('import failure')
       // 旧字段名与旧句子都不许再出现在任何一段描述里（它们已不存在于输出层）。
       expect(composeDescription(DIAGNOSE_PLUGIN_LOAD_DESCRIPTION)).not.toContain('loadProofCaveat')
       expect(composeDescription(DIAGNOSE_PLUGIN_LOAD_DESCRIPTION)).not.toContain(
@@ -521,6 +528,29 @@ describe('dsh_diagnose_plugin_load', () => {
       })
     })
 
+    it('**没装**的包名落进同一档 ⇒ L1 不许断言「Installed」（把没查到写成查到了）', async () => {
+      // 判据（`absent`）只是「树读到了、这个包一行都没匹配上」，**不含**任何「它装了」的观测。
+      // 模型显式传一个没装的包名时，同一段代码照样走到这一档 —— 旧文案说「Installed but absent」，
+      // 那是**把没查到写成查到了**。变异：把 `Named` 改回 `Installed` → 这条判红。
+      const dshHome = await tempDshHome()
+      const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
+      await writeInstalledPackage(profileDir, 'pkg-a')
+      const { spawn } = recordingSpawn(() => cmdResult({ stdout: '' }))
+      const tool = createDiagnosePluginLoadTool(
+        depsFor(configFor(dshHome), {
+          spawn,
+          loader: loaderWith([entrySnapshot({ moduleName: 'other-pkg', fiberState: 2 })]),
+        }),
+      )
+
+      const data = expectOk(await run(tool, { package: 'never-installed-pkg' }))
+      const pkg = (data.key['packages'] as Record<string, unknown>[])[0]
+      // 下界：这一档**确实**被走到了（否则「不含 Installed」可能只是走了别的分支）。
+      expect(pkg?.['matchedEntryIds']).toEqual([])
+      expect(String(data.verdict)).toContain('absent from the Loader tree')
+      expect(String(data.verdict), '把「没查到」写成了「装了」').not.toContain('Installed')
+    })
+
     it('一个包有多行时取最坏的一档（报 active 而另一行崩了最误导）', async () => {
       const dshHome = await tempDshHome()
       const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
@@ -593,6 +623,14 @@ describe('dsh_diagnose_plugin_load', () => {
         args: { package: 'pkg-a' },
         why: expect.stringContaining('retry'),
       })
+      // ⚠️ `timeoutMs` 是**插件配置字段**，不是本工具的参数（`defineTool` 的 `timeoutMs`
+      // 注册期定死，工具 schema 送到模型前只保留 name/description/parameters）⇒
+      // 「让模型去调大它」是它永远做不到的指引。判据断的是根因：动作必须指给**人**。
+      const why = (failure.nextStep as { why?: string } | undefined)?.why ?? ''
+      expect(why).toContain('human')
+      expect(why, '超时分支又让模型去调大预算了（模型做不到这件事）').not.toMatch(
+        /raise timeoutMs/u,
+      )
       // 失败分支的 key 仍然存在（形状同成功分支），只是这次什么都没看到。
       expect(failure.data.key['packages']).toEqual([])
     })
@@ -1878,6 +1916,97 @@ describe('dsh_diagnose_plugin_load', () => {
       expect((sameData.key['resolved'] as Record<string, unknown>)['dshHomeSource']).toBe('config')
       const samePackages = sameData.key['packages'] as Record<string, unknown>[]
       expect(samePackages.map((item) => item['packageName'])).toEqual(['pkg-config'])
+    })
+
+    /**
+     * S1：跨实例调用后 `nextStep.args` **丢掉 `dshHome`** ⇒ 把模型引到**另一个实例**，
+     * 而「两次调用输出长得一模一样」⇒ **看起来像成功**。
+     *
+     * 三个 tool 支（absent / pending / stale）都要带 —— 三处各有一条用例，
+     * 这样「只改了一处」的变异也会被抓到。判据同时带下界（坑 18）：值必须真的印在
+     * 模型看得见的地方（`resolved:` 行），否则 B17 也不成立。
+     */
+    it('S1 · absent 支：跨实例时 nextStep.args 必须带上 dshHome', async () => {
+      const configured = await tempDshHome()
+      const other = await tempDshHome()
+      const configuredProfile = await writeProfile(configured, 'web', { bundles: ['pkg-config'] })
+      await writeInstalledPackage(configuredProfile, 'pkg-config')
+      const otherProfile = await writeProfile(other, 'web', { bundles: ['pkg-other'] })
+      await writeInstalledPackage(otherProfile, 'pkg-other')
+      const { spawn } = recordingSpawn(() => cmdResult({ stdout: '' }))
+      const tool = createDiagnosePluginLoadTool(
+        depsFor(configFor(configured), {
+          spawn,
+          // 树里没有任何一行匹配 pkg-other ⇒ 走 absent 支。
+          loader: loaderWith([entrySnapshot({ moduleName: 'unrelated-pkg', fiberState: 2 })]),
+        }),
+      )
+
+      const result = await run(tool, { dshHome: other })
+      const step = result.nextStep as { tool?: string; args?: Record<string, unknown> } | undefined
+      expect(step?.tool).toBe('dsh_dump_config')
+      expect(step?.args?.['dshHome'], '重试参数丢掉了 dshHome ⇒ 会去问另一个实例').toBe(other)
+      // 下界：这个值真的印在模型看得见的地方（B17 的取值面）。
+      expect(renderText(tool, { dshHome: other }, result)).toContain(other)
+      // 同实例时**不许**多印一个配置里的值（L2 规则：只放本次非默认的）。
+      const same = await run(tool, {})
+      const sameStep = same.nextStep as { args?: Record<string, unknown> } | undefined
+      expect(sameStep?.args?.['dshHome']).toBeUndefined()
+    })
+
+    it('S1 · pending 支：跨实例时 nextStep.args 必须带上 dshHome', async () => {
+      const configured = await tempDshHome()
+      const other = await tempDshHome()
+      const configuredProfile = await writeProfile(configured, 'web', { bundles: ['pkg-config'] })
+      await writeInstalledPackage(configuredProfile, 'pkg-config')
+      const otherProfile = await writeProfile(other, 'web', { bundles: ['pkg-other'] })
+      await writeInstalledPackage(otherProfile, 'pkg-other')
+      const { spawn } = recordingSpawn(() => cmdResult({ stdout: '' }))
+      const tool = createDiagnosePluginLoadTool(
+        depsFor(configFor(configured), {
+          spawn,
+          // fiber.state = 0（PENDING）⇒ 走 pending 支。
+          loader: loaderWith([entrySnapshot({ moduleName: 'pkg-other', fiberState: 0 })]),
+        }),
+      )
+
+      const result = await run(tool, { dshHome: other })
+      const step = result.nextStep as { tool?: string; args?: Record<string, unknown> } | undefined
+      expect(step?.tool).toBe(DIAGNOSE_PLUGIN_LOAD_TOOL)
+      expect(step?.args?.['package']).toBe('pkg-other')
+      expect(step?.args?.['dshHome'], '重跑本工具丢掉了 dshHome ⇒ 会去问另一个实例').toBe(other)
+      expect(renderText(tool, { dshHome: other }, result)).toContain(other)
+    })
+
+    it('S1 · stale 支：跨实例时 nextStep.args 必须带上 dshHome', async () => {
+      await withPlatform('win32', async () => {
+        const configured = await tempDshHome()
+        const other = await tempDshHome()
+        const configuredProfile = await writeProfile(configured, 'web', { bundles: ['pkg-config'] })
+        await writeInstalledPackage(configuredProfile, 'pkg-config')
+        const otherProfile = await writeProfile(other, 'web', { bundles: ['pkg-other'] })
+        await writeInstalledPackage(otherProfile, 'pkg-other')
+        // 进程启动时间设成 2020 年、产物是「现在」写的 ⇒ artifactNewerThanProcess=true（stale 支）。
+        const { spawn } = recordingSpawn(() =>
+          cmdResult({ stdout: '4242|node|2020-01-01T00:00:00.0000000+08:00\n' }),
+        )
+        const tool = createDiagnosePluginLoadTool(
+          depsFor(configFor(configured, { port: 3080 }), {
+            spawn,
+            loader: loaderWith([entrySnapshot({ moduleName: 'pkg-other', fiberState: 2 })]),
+          }),
+        )
+
+        const result = await run(tool, { dshHome: other })
+        const step = result.nextStep as
+          { tool?: string; args?: Record<string, unknown> } | undefined
+        expect(step?.tool).toBe('dsh_check_effect_mode')
+        expect(step?.args?.['change']).toBe('host-code')
+        expect(step?.args?.['dshHome'], '派给下一个工具时丢掉了 dshHome ⇒ 会去问另一个实例').toBe(
+          other,
+        )
+        expect(renderText(tool, { dshHome: other }, result)).toContain(other)
+      })
     })
   })
 })

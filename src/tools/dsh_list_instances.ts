@@ -554,6 +554,11 @@ function toKey(
  * 「no DSH host was found」，而**那台宿主此刻就在服务**。把「没查完」印成「没有」
  * 正是本工具文件头警告的那条三值违规。
  *
+ * ⚠️ 第 0 档（`probed === 0`）**必须按 `scan.status` 分叉**：候选从哪来决定了
+ * 「能不能说探测失败」。给了 `port` 时压根没扫 socket 表（`skipped`），那个端口上有没有人听
+ * 都没读过；扫了但零监听时一次探测都没发生 —— 两者都不能套「N listening port(s) were found
+ * but every probe failed」这句旧文案（它在两条路上都是编的）。
+ *
  * @param key 本次的 `key`。
  * @param dsh 认领成功的那些。
  */
@@ -570,6 +575,20 @@ function verdictFor(key: ListInstancesKey, dsh: readonly InstanceKey[]): string 
   }
   const probed = key.instances.filter((item) => item.verdict !== 'unknown').length
   if (probed === 0) {
+    // ⚠️ 这一档**不许**用一句固定文案盖住三种候选来源 —— 旧文案（「N listening port(s) were
+    // found but every probe failed」）在两条可达路径上都是**编的**：
+    // ① 给了 `port` ⇒ `scan.status='skipped'`、**压根没读 socket 表**，那个端口上有没有人在听
+    //    都不知道，却断言「were found」；② 扫了但零监听 ⇒ 一次探测都没发生，
+    //    「every probe failed」是空话（0 次探测）。
+    if (key.scan.status === 'skipped') {
+      return (
+        'nothing could be probed: the port you passed could not be probed, ' +
+        'so whether it is a DSH host is unknown rather than absent'
+      )
+    }
+    if (key.instances.length === 0) {
+      return 'no listening port was found, so no DSH host is reachable on loopback'
+    }
     const truncated = key.scan.truncated ? ' (the candidate list was truncated)' : ''
     return (
       `nothing could be probed: ${String(key.instances.length)} listening port(s) were found but every probe failed, ` +
@@ -656,12 +675,26 @@ function scanLine(scan: ListInstancesKey['scan'] | undefined): string {
   return `scan: ${scan.status} unidentified=${String(scan.unidentified)}${extra}`
 }
 
-/** 一个候选一行：authority + 三值结论 + 能读到的进程信息。 */
+/**
+ * 一个候选一行：authority + 三值结论 + 能读到的进程信息 + **一句原因**。
+ *
+ * ⚠️ `detail` **必须印出来**：`unknown` 这一个 verdict 底下压着两件对下一步不同的事 ——
+ * `ECONNREFUSED`（没人听）与「body 读不出来」（服务在、只是不像 DSH）。只印
+ * `instance: 127.0.0.1:x unknown` 时模型分不出这两者，而它们导向的动作完全不同
+ * （前者去查进程，后者去查那个服务是什么）。
+ */
 function instanceLine(item: InstanceKey): string {
   const pid = item.pid === undefined ? '' : ` pid=${String(item.pid)}`
   const name = item.processName === undefined ? '' : ` name=${item.processName}`
   const status = item.status === undefined ? '' : ` status=${String(item.status)}`
-  return `instance: ${item.authority} ${item.verdict}${pid}${name}${status}`
+  const detail =
+    typeof item.detail === 'string' && item.detail !== '' ? ` detail=${oneLine(item.detail)}` : ''
+  return `instance: ${item.authority} ${item.verdict}${pid}${name}${status}${detail}`
+}
+
+/** 把可能含换行的 `detail` 压成一行（L2 是一行一条，换行会把一条拆成两条）。 */
+function oneLine(text: string): string {
+  return text.replace(/\s+/gu, ' ').trim()
 }
 
 /** 兜底行：`ensureToolResult` 合成的结果里 `key` 是 `{}`。 */

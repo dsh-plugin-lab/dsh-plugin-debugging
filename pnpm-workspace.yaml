@@ -1,0 +1,10 @@
+# pnpm workspace root. Declared even with a single package — otherwise pnpm treats this as a
+# non-workspace directory and the dependency tree stops matching the one CI installs.
+packages:
+  - '.'
+
+# No `allowBuilds` here on purpose: this repo has no build-script dependency (its only build step is
+# `tsc`, and the one package that ever needed a postinstall — esbuild — was removed earlier for that
+# very reason; see AGENTS.md 活跃坑 10). A fresh clone and CI therefore install without being
+# prompted. If a future dependency does need its install script, declare it *here* — pnpm 11 ignores
+# the `pnpm` field in package.json and only warns.

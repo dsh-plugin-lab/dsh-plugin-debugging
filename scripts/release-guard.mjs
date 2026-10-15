@@ -46,7 +46,9 @@ const NON_ARTIFACT_FILES = new Set([
   '.node-version',
   'AGENTS.md',
   'eslint.config.mjs',
-  'package-lock.json',
+  // 包管理器面：锁文件与 workspace 声明都不进包（本仓已迁 pnpm，唯一锁文件是 pnpm-lock.yaml）。
+  'pnpm-lock.yaml',
+  'pnpm-workspace.yaml',
   'vitest.config.ts',
 ])
 

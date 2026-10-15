@@ -225,16 +225,26 @@ if (!existsSync(releaseWorkflowPath)) {
   //     `prepare` 先 build）—— 本仓当时**一种都没有**。所以这条判据要认的是
   //     「publish 之前有构建」，而不是某一种写法；改机制不该把它判红。
   const scripts = typeof pkg.scripts === 'object' && pkg.scripts !== null ? pkg.scripts : {}
-  /** 这个 npm script 会不会产生 `lib/`。 */
+  /**
+   * 这个 script 会不会产生 `lib/`。
+   *
+   * ⚠️ **两种包管理器的拼法都要认**（本仓已迁 pnpm，`npm run` 仍等价可用）：
+   * `\bnpm` 匹配不到 `pnpm`（词边界落在 `p`/`n` 之间），只认一种会让这条判据**假红**。
+   */
   const scriptBuilds = (scriptName) => {
     const body = scripts[scriptName]
     if (typeof body !== 'string') return false
-    return /npm run build\b/.test(body) || /(^|\s)(tsc|tsdown)\b/.test(body)
+    return /(npm|pnpm) run build\b/.test(body) || /(^|\s)(tsc|tsdown)\b/.test(body)
   }
   const releaseLines = source.split('\n')
-  const buildAt = releaseLines.findIndex((line) => /^\s*(-\s*)?run:\s*npm run build\b/.test(line))
-  const testAt = releaseLines.findIndex((line) => /^\s*(-\s*)?run:\s*npm (run )?test\b/.test(line))
-  const publishAt = releaseLines.findIndex((line) => /\bnpm publish\b/.test(line))
+  // 同上：`run: pnpm run build` 与 `run: npm run build` 都要认。
+  const buildAt = releaseLines.findIndex((line) =>
+    /^\s*(-\s*)?run:\s*(npm|pnpm) run build\b/.test(line),
+  )
+  const testAt = releaseLines.findIndex((line) =>
+    /^\s*(-\s*)?run:\s*(npm|pnpm) (run )?test\b/.test(line),
+  )
+  const publishAt = releaseLines.findIndex((line) => /\b(npm|pnpm) publish\b/.test(line))
   const before = (a, b) => a !== -1 && b !== -1 && a < b
   const mechanisms = [
     before(buildAt, publishAt) && 'release.yml 在 publish 之前跑了 build',
@@ -247,8 +257,8 @@ if (!existsSync(releaseWorkflowPath)) {
     '发布前一定会构建（lib/ 是构建产物）',
     mechanisms.length > 0,
     '`main` / `exports` 指向 `lib/`，而它是构建产物（被 gitignore）—— publish 之前必须真的构建，' +
-      '否则发出去的 tarball 里没有代码。三选一：release.yml 里 publish 之前跑 `npm run build`；' +
-      '或在 package.json 里加 `prepack: npm run build`；或让 `test` 脚本先构建（而 release.yml 会跑 test）。',
+      '否则发出去的 tarball 里没有代码。三选一：release.yml 里 publish 之前跑 `pnpm run build`；' +
+      '或在 package.json 里加 `prepack: pnpm run build`；或让 `test` 脚本先构建（而 release.yml 会跑 test）。',
   )
 
   // 12. 入口文件真的在（**条件式** —— 与上面 SKILL.md 那条同一套理由：判据要写清它在哪个上下文里成立）。
@@ -283,7 +293,7 @@ if (!existsSync(releaseWorkflowPath)) {
  * 在一份 workflow 文本里找**命令位置**上会改写版本号的调用。
  *
  * 导出是为了能被测试直接喂字符串（正反例各一条），而不是只能靠跑真 workflow —— 后者
- * 只能在 main 上 dispatch，而这条不变量要在每次 `npm test` 里就能判。
+ * 只能在 main 上 dispatch，而这条不变量要在每次 `pnpm test` 里就能判。
  *
  * @param source 一份 `release.yml` 的文本。
  * @returns 命中的命令行；没命中就是空数组。
@@ -293,7 +303,7 @@ export function findVersionWrites(source) {
     .split('\n')
     .filter((line) => !/^\s*#/.test(line))
     .filter((line) => !/^\s*echo\b/.test(line))
-    .filter((line) => /(npm|pnpm)\s+version\b|npm\s+pkg\s+set\b/.test(line))
+    .filter((line) => /(npm|pnpm)\s+version\b|(npm|pnpm)\s+pkg\s+set\b/.test(line))
     .map((line) => line.trim())
 }
 

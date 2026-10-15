@@ -320,58 +320,157 @@ describe('A3 @deepseek-ai/* 绝不进 dependencies', () => {
 })
 
 /**
- * A4 判据：锁文件里每个 http(s) 来源的 `resolved` 必须指向官方 registry。
+ * A4 判据：锁文件里**出现的每一个 http(s) 地址**都必须指向官方 registry。
+ *
+ * 迁到 pnpm 之后**形状变了、口径没变**：pnpm-lock 不再有 `resolved: <url>` 那一层
+ * （完整性摘要在 `resolution: {integrity: …}`），所以判据从「解析 JSON 的 resolved 字段」
+ * 换成「扫原文里出现的每一个 http(s) 地址」。
+ *
+ * ⚠️ **反空转换了挂点**（这是本条最容易做错的地方）：npm 的锁文件里每个包都有一条
+ * `resolved`，所以「扫到 0 条」必然意味着读错了文件；而 pnpm 只在来源**不是**默认 registry
+ * 时才写 `tarball: <url>`，于是「零个地址」是**正常状态**
+ * （本仓实测：0 个地址 / 188 条 `resolution`；三个姊妹仓的 pnpm 锁文件同样是 0）。
+ * 把反空转继续挂在地址数上，就成了**永远红**的自否定守卫 —— 所以它改挂在
+ * 「锁文件本身到底被读进来了没有」上，见 `lockfileVacuityProblems`。
  *
  * 只看 http(s)：`file:` / `link:` / `git` 本就不是包的公开源。
  */
-function judgeLockfileRegistry(lock: {
-  packages?: Record<string, { resolved?: string }>
-}): string[] {
+const LOCKFILE_NAME = 'pnpm-lock.yaml'
+
+/** 官方 registry 主机名。按**逐字相等**判（`startsWith` 会放过 `registry.npmjs.org.evil.com`）。 */
+const OFFICIAL_REGISTRY_HOST = 'registry.npmjs.org'
+
+/** 扫出文本里出现的所有 http(s) 地址（顺手去掉紧跟其后的 YAML 标点）。 */
+function httpUrlsIn(text: string): string[] {
+  return [...text.matchAll(/https?:\/\/[^\s'"<>\\]+/g)].map((match) =>
+    match[0].replace(/[,)\]}]+$/, ''),
+  )
+}
+
+/** A4 判据体：返回扫到的地址数与违规清单。只吃文本，所以反例可以在内存里构造。 */
+function judgeLockfileRegistry(lockText: string): { scanned: number; offenders: string[] } {
+  const urls = httpUrlsIn(lockText)
   const offenders: string[] = []
-  for (const [name, meta] of Object.entries(lock.packages ?? {})) {
-    const resolved = meta.resolved
-    if (resolved === undefined || !resolved.startsWith('http')) continue
-    if (!resolved.startsWith('https://registry.npmjs.org/')) {
-      let host = resolved
-      try {
-        host = new URL(resolved).host
-      } catch {
-        // 解析不了就原样报出来 —— 比吞掉更像一条线索。
-      }
-      offenders.push(`${name === '' ? '(root)' : name} → ${host}`)
+  for (const url of urls) {
+    let host = url
+    try {
+      host = new URL(url).hostname
+    } catch {
+      // 解析不了就原样报出来 —— 比吞掉更像一条线索。
     }
+    if (host !== OFFICIAL_REGISTRY_HOST) offenders.push(`${url} → ${host}`)
   }
+  return { scanned: urls.length, offenders }
+}
+
+/**
+ * A4 的反空转：判据必须自证**真的读到了一份有内容的 pnpm 锁文件**。
+ *
+ * 为什么不是「地址数为 0 就红」：pnpm 对默认 registry 的包不写 `tarball`，所以零地址
+ * 正是**干净锁文件**的样子（见上面那段）。真正的空转是「读错文件 / 读成空 / 被截断」——
+ * 那两种都表现为**没有 `lockfileVersion`、没有 `resolution` 条目**，在这里判红。
+ */
+function lockfileVacuityProblems(lockText: string): string[] {
+  const problems: string[] = []
+  if (!/^lockfileVersion:/m.test(lockText)) {
+    problems.push('锁文件里没有 lockfileVersion —— 读到的不是 pnpm 锁文件，判据没跑到')
+  }
+  if (!/^\s+resolution:/m.test(lockText)) {
+    problems.push('锁文件里没有 resolution 条目 —— 判据没跑到，不是判据通过')
+  }
+  return problems
+}
+
+/**
+ * A4b 判据：`pnpm-lock.yaml` 是**唯一**的锁文件。
+ *
+ * 跨仓判据：全族只有 pnpm 一条路。两份锁文件同时存在时，CI 装的那棵与本机装的那棵
+ * 可以不是同一棵，而「装出来能跑」不会报错 —— 那正是要在这里拦的情况。
+ *
+ * ⚠️ 那个名字刻意**拼出来**、不写字面量：本文件正被一次批量改名扫过，写字面量的话
+ * 这条断言会被改成「pnpm-lock.yaml 不该存在」而**永远红** —— 一个自我否定的守卫
+ * 比没有守卫更坏。
+ */
+const COMPETING_LOCKFILE_NAMES = [['package', 'lock.json'].join('-')]
+
+/** A4b 判据体：目录里除 `pnpm-lock.yaml` 外还有别的锁文件、或它自己缺席，都算违规。 */
+function judgeSingleLockfile(names: readonly string[]): string[] {
+  const offenders = COMPETING_LOCKFILE_NAMES.filter((name) => names.includes(name)).map(
+    (name) => `${name} 与 ${LOCKFILE_NAME} 不能共存`,
+  )
+  if (!names.includes(LOCKFILE_NAME)) offenders.push(`${LOCKFILE_NAME} 必须入库`)
   return offenders
 }
 
-describe('A4 锁文件的 resolved 指向官方 registry', () => {
-  it('真实 package-lock.json 里没有镜像源，且扫描量非零', () => {
-    const lock = JSON.parse(readRepo('package-lock.json')) as {
-      packages?: Record<string, { resolved?: string }>
-    }
-    const scanned = Object.values(lock.packages ?? {}).filter((meta) =>
-      meta.resolved?.startsWith('http'),
-    ).length
-    // 非空自证：扫到 0 条时这条断言会假绿（锁文件读错了也会 0 条）。
-    // 「拿不到输出」与「通过」长得一样，所以把规模一并钉住。
-    expect(
-      scanned,
-      '锁文件里没扫到任何 http(s) resolved —— 判据没跑到，不是判据通过',
-    ).toBeGreaterThan(50)
+describe('A4 锁文件：地址只许指向官方 registry，且只有它一个', () => {
+  it('真实 pnpm-lock.yaml 里没有镜像源，且判据真的读到了锁文件', () => {
+    const lockText = readRepo(LOCKFILE_NAME)
 
-    const offenders = judgeLockfileRegistry(lock)
-    expect(offenders, describeOffenders('锁文件里有非官方源', offenders)).toEqual([])
+    // 反空转先跑：先证明这次扫描的输入是一份真的、有内容的 pnpm 锁文件。
+    const vacuity = lockfileVacuityProblems(lockText)
+    expect(vacuity, describeOffenders('A4 判据没跑到', vacuity)).toEqual([])
+
+    const { scanned, offenders } = judgeLockfileRegistry(lockText)
+    expect(
+      offenders,
+      describeOffenders(`锁文件里有非官方源（本次扫到 ${scanned} 个地址）`, offenders),
+    ).toEqual([])
   })
 
-  it('判据可被否证：注入一条镜像源就会红，且报出主机名', () => {
-    const offenders = judgeLockfileRegistry({
-      packages: {
-        '': { resolved: 'https://registry.npmjs.org/' },
-        'node_modules/foo': { resolved: 'https://registry.npmmirror.com/foo/-/foo-1.0.0.tgz' },
-      },
-    })
+  it('判据可被否证：往真实锁文件里注入一条镜像地址就会红，且报出主机名', () => {
+    // 夹具是**文本级**的：判据只扫原文，不解析 YAML，所以这段不必是合法锁文件。
+    const injected = `${readRepo(LOCKFILE_NAME)}
+  'evil@1.0.0':
+    resolution:
+      {tarball: https://registry.npmmirror.com/evil/-/evil-1.0.0.tgz, integrity: sha512-x}
+`
+    const { scanned, offenders } = judgeLockfileRegistry(injected)
+    expect(scanned).toBeGreaterThan(0)
     expect(offenders).toHaveLength(1)
     expect(offenders[0]).toContain('registry.npmmirror.com')
+  })
+
+  it('判据可被否证：官方 registry 的地址不算违规（扫描器真的会认出地址）', () => {
+    // 上一条只证明「扫到违规会红」；一个恒返回违规的扫描器也能让它绿。
+    // 这条补「扫到合法地址**不**红」，两条合起来才钉死扫描器本身有效。
+    const baseline = judgeLockfileRegistry(readRepo(LOCKFILE_NAME)).scanned
+    const injected = `${readRepo(LOCKFILE_NAME)}
+# https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz
+`
+    const { scanned, offenders } = judgeLockfileRegistry(injected)
+    expect(scanned).toBe(baseline + 1)
+    expect(offenders).toEqual([])
+  })
+
+  it('判据可被否证：锁文件被扫空（读错 / 截断）时反空转先红', () => {
+    expect(lockfileVacuityProblems(''), '空文本必须判红，不许静默判过').not.toEqual([])
+    expect(
+      lockfileVacuityProblems("lockfileVersion: '9.0'\n"),
+      '只有版本号、没有包段也必须判红',
+    ).not.toEqual([])
+  })
+
+  it('真实仓库根目录里只有 pnpm-lock.yaml 一个锁文件', () => {
+    const offenders = judgeSingleLockfile(readdirSync(REPO_ROOT))
+    expect(offenders, describeOffenders('锁文件不唯一', offenders)).toEqual([])
+  })
+
+  it('判据可被否证：把那个 npm 锁文件放回去就红', () => {
+    // 用**同一个判据函数 + 同一个目录列举机制**跑一个临时目录：这条证明判据体有效，
+    // 上面那条证明它接在真实仓根上（`REPO_ROOT` 传错会报「必须入库」而红）。
+    const root = makeTempRoot('dsh-redline-locks-')
+    try {
+      writeFileSync(join(root, LOCKFILE_NAME), '')
+      writeFileSync(join(root, COMPETING_LOCKFILE_NAMES[0]), '')
+      const names = readdirSync(root)
+      // 夹具真的落地了才算数：写失败时这条会红，而不是静默空转。
+      expect(names).toContain(COMPETING_LOCKFILE_NAMES[0])
+      const offenders = judgeSingleLockfile(names)
+      expect(offenders).toHaveLength(1)
+      expect(offenders[0]).toContain(COMPETING_LOCKFILE_NAMES[0])
+    } finally {
+      cleanupTempRoot(root)
+    }
   })
 })
 
@@ -494,6 +593,136 @@ describe('A6 tag 形状是 v<semver>，且前缀显式', () => {
 })
 
 // ── B. 本仓自己的形状 ──────────────────────────────────────────────────────
+
+/**
+ * 取出源码里所有 **import/export 说明符**。
+ *
+ * 为什么只认语句形态、不认「任何含 `@deepseek-ai/` 的字符串字面量」：本仓的**代码**里
+ * 本来就有这类字面量，而且它们**不该**被当成依赖 —— `src/lib/profile.ts` 有
+ * `const HMR_PACKAGE = '@deepseek-ai/dsh-hmr'` 与 `resolve('@deepseek-ai/dsh/package.json')`，
+ * 两者都是「按名字去查宿主安装树」，不是本仓 import 的包。宽扫会当场假红。
+ *
+ * 所以先剥注释（`stripComments`），再只认四种写法：`import x from 's'`、
+ * `import type { T } from 's'`（含跨行的花括号子句）、副作用 `import 's'`、`export … from 's'`。
+ */
+function importSpecifiers(source: string): string[] {
+  const text = stripComments(source)
+  const out: string[] = []
+  // `import` / `export` … `from 's'`：`[^'"]` 允许换行，于是跨行的 import 子句也认。
+  const fromClause = /\b(?:import|export)\b[^'"]*?\bfrom\s*['"]([^'"]+)['"]/g
+  // 副作用 import：`import 's'`（它没有 `from`，上面那条抓不到）。
+  const sideEffect = /\bimport\s*['"]([^'"]+)['"]/g
+  for (const re of [fromClause, sideEffect]) {
+    let match: RegExpExecArray | null
+    while ((match = re.exec(text)) !== null) out.push(match[1])
+  }
+  return out
+}
+
+/** 说明符 → 包名（`@scope/name/sub` → `@scope/name`）。 */
+function packageNameOf(specifier: string): string {
+  const parts = specifier.split('/')
+  return specifier.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0]
+}
+
+/**
+ * B28 判据：`src/` 里 import 的每个 `@deepseek-ai/*` 都必须在清单里声明。
+ *
+ * 为什么这条必须存在（它是**实测踩出来的**，不是洁癖）：`src/config.ts` 一直
+ * `import z from '@deepseek-ai/schemastery'`，而 `package.json` 里**三处都没有它** ——
+ * 它只是经 `@deepseek-ai/dsh-llm` 传递进来的。npm 与 hoisted linker 都会把它抬到顶层，
+ * 于是**靠包管理器的 hoist 行为**才解析得到。迁 pnpm 后在默认（isolated）linker 下当场现形：
+ * `tsc` 报 `TS2307: Cannot find module '@deepseek-ai/schemastery'`，4 个测试文件起不来。
+ *
+ * 为什么 A1 抓不住它：A1 管的是「**已经声明**的官方包在 peer 与 dev 里要同值」——
+ * **整个声明缺失**从它旁边直接走过去。这条补的正是那个缺口。
+ */
+function judgeOfficialImportsDeclared(
+  sources: ReadonlyArray<{ path: string; text: string }>,
+  pkg: Manifest,
+): string[] {
+  const declared = new Set([
+    ...Object.keys(pkg.dependencies ?? {}),
+    ...Object.keys(pkg.devDependencies ?? {}),
+    ...Object.keys(pkg.peerDependencies ?? {}),
+  ])
+  const offenders: string[] = []
+  for (const { path, text } of sources) {
+    for (const specifier of importSpecifiers(text)) {
+      if (!specifier.startsWith('@deepseek-ai/')) continue
+      const name = packageNameOf(specifier)
+      if (!declared.has(name)) offenders.push(`${path}: import 了 ${name}，但清单里没声明`)
+    }
+  }
+  return offenders
+}
+
+/** 去掉一个键（用于「摘掉声明」的否证用例）。 */
+function withoutKey(
+  record: Record<string, string> | undefined,
+  key: string,
+): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const [name, range] of Object.entries(record ?? {})) if (name !== key) out[name] = range
+  return out
+}
+
+describe('B28 src 里 import 的官方包都必须在清单里声明（不许靠 hoist 掩着）', () => {
+  it('真实源码与清单一致，且扫描量非零', () => {
+    const sources = readSourcesUnder('src')
+    const scanned = new Set(
+      sources
+        .flatMap(({ text }) => importSpecifiers(text))
+        .filter((specifier) => specifier.startsWith('@deepseek-ai/'))
+        .map(packageNameOf),
+    )
+    // 反空转：一个都没扫到 = 判据没跑到，不是判据通过（本仓 A4 的老教训）。
+    expect(
+      scanned.size,
+      '一个 @deepseek-ai/* import 都没扫到 —— 判据没跑到，不是判据通过',
+    ).toBeGreaterThan(0)
+    const offenders = judgeOfficialImportsDeclared(sources, packageJson)
+    expect(offenders, describeOffenders('import 了未声明的官方包', offenders)).toEqual([])
+  })
+
+  it('判据可被否证：摘掉 @deepseek-ai/schemastery 的声明就会红', () => {
+    const mutated: Manifest = {
+      ...packageJson,
+      peerDependencies: withoutKey(packageJson.peerDependencies, '@deepseek-ai/schemastery'),
+      devDependencies: withoutKey(packageJson.devDependencies, '@deepseek-ai/schemastery'),
+    }
+    const offenders = judgeOfficialImportsDeclared(readSourcesUnder('src'), mutated)
+    expect(offenders.length).toBeGreaterThan(0)
+    expect(offenders.join('\n')).toContain('@deepseek-ai/schemastery')
+  })
+
+  it('提取器本身有效：四种 import 形态都认得', () => {
+    const sample = [
+      "import z from '@deepseek-ai/alpha'",
+      "import type { C } from '@deepseek-ai/beta'",
+      "import '@deepseek-ai/gamma'",
+      "export { d } from '@deepseek-ai/delta'",
+      "import {\n  e,\n  f,\n} from '@deepseek-ai/epsilon'",
+    ].join('\n')
+    expect([...new Set(importSpecifiers(sample))].sort()).toEqual([
+      '@deepseek-ai/alpha',
+      '@deepseek-ai/beta',
+      '@deepseek-ai/delta',
+      '@deepseek-ai/epsilon',
+      '@deepseek-ai/gamma',
+    ])
+  })
+
+  it('别误伤：注释与普通字符串字面量里的包名不算 import', () => {
+    const sample = [
+      "// import x from '@deepseek-ai/never-declared'",
+      "/* import y from '@deepseek-ai/also-never-declared' */",
+      "const HMR_PACKAGE = '@deepseek-ai/dsh-hmr'",
+      "createRequire(entry).resolve('@deepseek-ai/dsh/package.json')",
+    ].join('\n')
+    expect(importSpecifiers(sample)).toEqual([])
+  })
+})
 
 /** B7 判据：`files` 必须覆盖这些路径（含技能随包分发的 D12）。 */
 const REQUIRED_FILES_COVERAGE = [
@@ -2294,12 +2523,18 @@ describe('B15 写侧工具只许碰进程内树', () => {
 const RENDER_HEAD_RE = /^\[[\w_]+\] (?:ok|failed \([\w-]+\))$/
 
 /**
- * 截断模板行（§3.1 规则 3）。
+ * 认出截断行的**前缀**（§3.1 规则 3）。
  *
- * **恒定模板** ⇒ B16 必须排除它：两份 fixture 若都被截断、且还剩同样的条数，
- * 这一行就逐字相同 → **假红**（§10 B16 明写）。
+ * 两处用途，共用这一处定义：
+ * - B16 必须排除它 —— **恒定模板**，两份 fixture 若都被截断、且还剩同样的条数，
+ *   这一行就逐字相同 → **假红**（§10 B16 明写）；
+ * - B27 用它取出截断行，再查**内容**（不许指向模型够不到的位置）。
+ *
+ * 用**前缀**而不是整行逐字：整行逐字在「截断行后面又被加了半句」时匹配不到，
+ * 于是 B16 会把它当普通 L2 行（可能假红）、B27 会以为「没有截断行」—— 两种都走偏。
+ * 逐字约束不该住在这里，见 B27。
  */
-const RENDER_TRUNCATED_RE = /^\d+ more line\(s\) not shown — the full record is in the session log$/
+const RENDER_TRUNCATED_RE = /^\d+ more line\(s\) not shown/
 
 /** L1 前缀。 */
 const RENDER_VERDICT_PREFIX = 'verdict: '
@@ -2655,6 +2890,94 @@ describe('B16 输出里不许有恒定块', () => {
     expect(judgeConstantBlocks(textA, textB)).toEqual([])
     // 而候选行确实非空（判据没在空转）。
     expect(judgeConstantBlockCandidates([textA, textB])).toEqual([])
+  })
+})
+
+// ── B27 截断行不许指向模型够不到的位置 ────────────────────────────────────
+
+/**
+ * B27 的禁词表：**这些位置模型读不到**，写进截断行就是「说了但兑现不了」。
+ *
+ * 为什么是「session log」这一族（而不是随便一条路径）：宿主 `appendToolResult` 只写
+ * `{turn, step, message, error?, meta?}` —— **没有 `value`**（SHAPE §8.1 的 `[已核]`），
+ * 而本仓八个工具里**没有任何一个**能读会话日志。⇒ 被截掉的行在会话日志里**根本不存在**，
+ * 模型也没有途径去读。这句指引 2026-10-14 之前一直印着（两名互不知情的审查员独立指到同一处）。
+ *
+ * 表是**闭集**：将来若某条真有了可达的读入口，加进来之前先核「谁读得到、用什么工具读」；
+ * 反之若要加新的不可达位置（例如把 `data` 说成「在进程内」），照这里加一条并写理由。
+ */
+const UNREACHABLE_POINTERS: readonly string[] = ['session log', 'session-log', 'sessionlog']
+
+/**
+ * B27 判据：截断行必须**明说并给总数**，且**不许**指向模型够不到的位置。
+ *
+ * 为什么必须是**语义**判据（而不是「截断行逐字相等」）：本仓各处的逐字断言
+ * （`RENDER_TRUNCATED_RE`、各工具测试里的 `toContain(...)`）在**两处一起改**时照样绿 ——
+ * 把假话换个说法加回来，一个都不会红。这正是本仓坑 37 的形状（**推断不算钉死，变异才算**）。
+ * 这里钉的是**规则**：这一行里出现的「去哪找」必须真的可兑现。
+ *
+ * 下界（§10.0）：取不到截断行 ⇒ 判红，不许静默放行 —— 夹具没触发截断时，
+ * 「不含禁词」是恒真的空转（本仓坑 18）。
+ *
+ * @param text 渲染文本（`renderToolResultText` 的输出）。
+ */
+function judgeTruncationPointers(text: string): string[] {
+  const line = text.split('\n').find((item) => RENDER_TRUNCATED_RE.test(item))
+  if (line === undefined) {
+    return ['渲染文本里没有截断行 —— 判据在空转（夹具必须真的触发截断）']
+  }
+  const lower = line.toLowerCase()
+  return UNREACHABLE_POINTERS.filter((pointer) => lower.includes(pointer)).map(
+    (pointer) => `截断行指向模型够不到的位置「${pointer}」：${line}`,
+  )
+}
+
+describe('B27 截断行不许指向模型够不到的位置', () => {
+  /** 造一份**真的**会被截断的渲染文本（3 行 L2、上限 1）。 */
+  function truncatedText(): string {
+    const table: RenderTable<SyntheticKey> = {
+      maxKeyLines: 1,
+      key: () => ['first line', 'second line', 'third line'],
+    }
+    return renderToolResultText(
+      'dsh_synth',
+      okFixture('the change applies live', { home: 'h', mode: 'config', port: 3080 }),
+      table,
+    )
+  }
+
+  it('截断行明说并给总数，且不指向模型够不到的位置', () => {
+    const text = truncatedText()
+    // 下界自证：这一行**真的**存在、**真的**给了总数 —— 否则下面的「不含禁词」是空转。
+    expect(text).toContain('2 more line(s) not shown')
+    expect(judgeTruncationPointers(text)).toEqual([])
+  })
+
+  it('判据可被否证：旧的那半句逐字加回来 → 红；换个说法的同义句 → 也红', () => {
+    const text = truncatedText()
+    const withOldWording = text.replace(
+      '2 more line(s) not shown',
+      '2 more line(s) not shown — the full record is in the session log',
+    )
+    expect(withOldWording).not.toBe(text)
+    expect(judgeTruncationPointers(withOldWording)).not.toEqual([])
+
+    // 换说法：逐字断言放它过去，语义判据必须抓住 —— 这就是本条存在的理由。
+    const reworded = text.replace(
+      '2 more line(s) not shown',
+      '2 more line(s) not shown; the rest is in the session-log',
+    )
+    expect(judgeTruncationPointers(reworded)).not.toEqual([])
+  })
+
+  it('下界本身可被否证：没有截断行 → 判红，不许当成「通过」', () => {
+    const table: RenderTable<SyntheticKey> = { key: () => ['only one line'] }
+    const text = renderToolResultText(
+      'dsh_synth',
+      okFixture('nothing was truncated here', { home: 'h', mode: 'config', port: 3080 }),
+      table,
+    )
+    expect(judgeTruncationPointers(text)).not.toEqual([])
   })
 })
 
@@ -5082,7 +5405,7 @@ function nullPrototypeToPlain(value: unknown): unknown {
  * | 7 | A2 的「族不只一族」（`split('||').length > 1`） | 借姊妹仓注释里的 npm 预发布匹配推理，**未在本机核** | 合理地收窄到单族会**红**（响亮误报）。【推断】 |
  * | 8 | B9 的 `EXPECTED_TOOLS` | 我手抄的**第 4 个副本**（另三份：`docs/ARCHITECTURE.md` 表、README×2、`src/tools` 常量） | **没有单一真源**。加第五个工具漏改这里会红（响亮）。【推断】 |
  * | 9 | B11 的 `en.title !== zh.title` | 我假设「中英各表其名」 | 产品名中英同形会**红**（误报）。【推断】 |
- * | 10 | A4 的 `scanned > 50`、B12 的 `body > 500` 阈值 | 我按当前规模猜的数（现状 188 / 约 1.1 万字节） | 仓合理地变小会**红**（响亮）。【推断】 |
+ * | 10 | A4 的反空转下界（锁文件里 ≥1 条 `resolution`）、B12 的 `body > 500` 阈值 | A4 那条**不再数地址**（pnpm 下零地址是正常状态，见 #44），改判「锁文件本身读进来了没有」；B12 的 500 是我按当前规模猜的数（约 1.1 万字节） | 锁文件被读空 / 被截断 → **红**（响亮）；阈值调小只是少抓，不会误红。【已探明】 |
  * | 11 | B12 的正文切片 `raw.indexOf('\n---', 4)` | 假定 frontmatter 之后没有更早的 `\n---` | 切错区域仍可能 > 500 → **假绿**（潜在）。【推断】 |
  * | 12 | A6 的 tag 形状 | 对 `release.yml` 做正则形状匹配 | 换一种同样正确的拼法（先赋 `V="v"`）会**红**（误报）；tag 改到别处生成则**看不见**（假绿）。【推断】 |
  * | 13 | A5 的反例控制 | 守卫的报错文案、以及注入锚点 `'          npm publish'` 的确切缩进 | 两者都已在文件里做成**响亮失败**（含「变异真的落地」自检），但都与实现细节耦合。【已探明】 |
@@ -5116,6 +5439,8 @@ function nullPrototypeToPlain(value: unknown): unknown {
  * | 41 | **B15 的写侧文件清单** `WRITE_SIDE_FILES` | 不再只靠手抄：判据从**机制入口**反推（`WRITE_SIDE_MECHANISM_IMPORT` 认 `from '…hot-reload.js'` + `WRITE_SIDE_NON_IMPLEMENTATIONS` 注册点白名单），并自证白名单文件存在 | 换一种拿机制的方式（`await import()` 动态导入 / 间接 re-export）→ **漏**（假绿）；把新写侧实现塞进白名单文件里 → 也漏。清单里的文件被删/改名 → 判红（响亮）【已探明】 |
  * | 42 | **B10 的「写宿主数据」判据是接进 `judgeReadOnly` 的**（不是孤立的判据函数） | 判据从 `judgeReadOnly` 的返回里摘掉后，那批「喂一条违规」的否证用例**照样全绿** | 本任务实测踩到过：**自指的假绿** —— 否证用例直接调判据函数、不经过 B10，于是「判据立起来了」是假的。现由三条接线自证守着（违规走完整入口必须红 / 只读必须不报 / **白名单正例走完整入口必须绿**）。**新增判据时照抄这个形状**：否证用例之外**必须**有一条走完整入口的接线断言【已探明】 |
  * | 43 | **B10 白名单的首段判定**（`classifyHomeWrite` + `segmentAfter`）：`$DSH_HOME/<包名>/` 逐字相等才放过 | 靠**文本**认写法：`join(home, 'seg')` / `` `${home}/seg` `` / `home + '/seg'` / `join(env.DSH_HOME ?? '', 'seg')` 四种桥各有一条正则式；段名靠「不以分隔符/引号/空白/逗号/冒号结尾的连续字符」切 | ① **首段是变量取不出**（`join(dshHome, name, …)`）⇒ 判**unknown** ⇒ **保守判红**（要放过就得写字符串字面量，或把判据扩成能解析 const）；② **写法认不出**（多层拼接、先算好路径再传）同样落进 unknown ⇒ 红（响亮，不是漏）；③ 同一行里 `dshHome` 出现多次时**逐次取段、安全优先**（出现任一「不等于包名的确定段」⇒ 红），所以 `function f(dshHome: string) { … join(dshHome, 'pkg', …) }` 不会因类型标注被误判；④ 包名从 `package.json` 读（**没有手抄副本**），`name` 缺失/形状不对由用例自证判红【已探明】 |
+ * | 44 | **A4 的地址扫描**（正则扫 `pnpm-lock.yaml` 原文里出现的每一个 http(s)） | 判据是**文本**扫描（不解析 YAML）；且 pnpm 只在来源**不是默认 registry** 时才写 `tarball: <url>` | ① 镜像被配成**默认 registry** 时 pnpm 不写地址 ⇒ 零地址看着干净（**漏**；要抓得读生效的 registry 配置，那在锁文件之外）；② 地址跨行 / 转义 / 运行时拼出来 ⇒ 漏；③ 主机名按**逐字相等**判（比姊妹仓的 `startsWith` 严）⇒ 官方源带子域会**误红**（响亮）；④ 反空转改挂「有 `lockfileVersion` + 有 `resolution` 条目」⇒ 一份**结构合法但包段被换掉**的锁文件照样绿（那是别的判据的事）。【已探明：真实锁文件 0 地址 / 188 条 resolution】 |
+ * | 45 | **B27 的禁词表** `UNREACHABLE_POINTERS` | 手写的**闭集**（`session log` 一族），且只扫**截断行**那一行（靠 `RENDER_TRUNCATED_RE` 前缀取行） | ① 换个说法指向同一个不可达位置（如「ask the session」）→ **漏**；② 将来新增别的不可达位置（例如把 `data` 说成「在进程内」）→ 需人补表；③ L2 / L3 里别的不可兑现指引**不归它管**（那是评审的活）。**下界**：取不到截断行 → 判红，不 skip（坑 18）。**已实测**：把旧半句逐字加回来 → 红；换说法（`the rest is in the session-log`）→ 也红 |
  *
  * **B10 已知未覆盖的写入通道**（明确列出，不静默排除）：
  * `process.binding`、原生 addon、`require()`（本仓纯 ESM）、把 fs 方法先赋给别的变量再调用
