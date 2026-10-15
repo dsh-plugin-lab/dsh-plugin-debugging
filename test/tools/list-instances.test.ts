@@ -19,11 +19,15 @@ import {
   type SignatureFetch,
 } from '../../src/tools/dsh_list_instances.ts'
 import {
+  listenerScanAttempts,
+  listListeners,
   parseListenerScan,
   parseLsofListeners,
   parseNetstatListeners,
   parseSsListeners,
+  WINDOWS_FALLBACK_COMMAND,
   type ListenerCandidate,
+  type ListenerScanResult,
 } from '../../src/lib/ports.ts'
 import {
   composeDescription,
@@ -42,7 +46,7 @@ import {
   splitRender,
   withPlatform,
 } from './helpers.ts'
-import type { CommandResult, RunCommandOptions } from '../../src/lib/exec.ts'
+import type { CommandResult, RunCommandOptions, SpawnImpl } from '../../src/lib/exec.ts'
 
 /** 造一个「按脚本回答」的签名探针替身，并记录每次请求的 URL。 */
 function probeStub(
@@ -98,6 +102,21 @@ function toolWith(options: {
 /** win32 的 socket 表（`port|pid|name|startedAt`）。 */
 function winTable(): string {
   return ['3080|111|node|2026-01-01T00:00:00.000Z', '4000|222|other|'].join('\r\n')
+}
+
+/**
+ * 跑一次「列出全部监听者」并**原样**拿回扫描结果。
+ *
+ * 为什么单独一条：这层判据要看的正是 `probed` / `candidates` / `unidentified` 三者，
+ * 经工具层再回来时它们已经被折叠进渲染文案与 `key` 了 —— 折叠过的那份盯不住
+ * 「三值有没有塌」。要钉工具层的接线时用 `createListInstancesTool` 那几条。
+ *
+ * ⚠️ **调用必须在钉住的平台上**（坑 25）：方案是按 `process.platform` 现读的。
+ *
+ * @param spawn 注入的 spawn 替身。
+ */
+async function listListenersWith(spawn: SpawnImpl): Promise<ListenerScanResult> {
+  return await listListeners({ spawn, timeoutMs: 1_000 })
 }
 
 describe(`${LIST_INSTANCES_TOOL} · 专有签名：三值互不重叠`, () => {
@@ -503,6 +522,248 @@ describe(`${LIST_INSTANCES_TOOL} · 平台（三条分支都必须被真跑到�
       const data = expectOk(await run(tool, {}))
       expect((data.key['scan'] as Record<string, unknown>)['unidentified']).toBe(2)
       expect(spawn.calls[1]?.command).toBe('netstat')
+    })
+  })
+})
+
+describe(`${LIST_INSTANCES_TOOL} · win32 兜底：Get-NetTCPConnection 不可用时退到 netstat -ano`, () => {
+  // ⚠️ 这一族的判据**必须**用 `withPlatform('win32', …)` 把「构造 + 执行」整段包住
+  // （坑 25 的隐蔽变体：只包构造、让 `execute` 落在平台恢复之后 = 等于没包）。
+  // 本机就是 Windows，所以**本机全绿推不出 CI 绿** —— linux 模拟那一轮才是另一半证据。
+
+  /** Windows `netstat -ano` 的真实输出形状（真机摘录，双栈 + UDP + 非监听态混在里面）。 */
+  function windowsNetstatTable(): string {
+    return [
+      '',
+      'Active Connections',
+      '',
+      '  Proto  Local Address          Foreign Address        State           PID',
+      '  TCP    0.0.0.0:3080            0.0.0.0:0              LISTENING       111',
+      '  TCP    [::]:3080               [::]:0                 LISTENING       111',
+      '  TCP    127.0.0.1:4000          0.0.0.0:0              LISTENING       222',
+      '  TCP    10.0.0.5:5231           10.0.0.8:443            ESTABLISHED     333',
+      '  UDP    0.0.0.0:500            *:*                                    4600',
+      '',
+    ].join('\r\n')
+  }
+
+  it('方案里有两档：PowerShell 在前，`netstat -ano` 在后（顺序即优先级）', () => {
+    const attempts = listenerScanAttempts('win32')
+
+    expect(attempts.map((attempt) => attempt.command)).toEqual([
+      'powershell.exe',
+      WINDOWS_FALLBACK_COMMAND,
+    ])
+    expect(attempts[1]?.args).toEqual(['-ano'])
+    // 两档的解析器**不同**：第一档吃 `port|pid|name|startedAt`，第二档吃 Windows 的 socket 表。
+    // 写成同一个解析器就会出现「PowerShell 的表被 netstat 解析器读成 0 行」这种静默少列。
+    expect(attempts[0]?.parse(winTable()).candidates).toHaveLength(2)
+    expect(attempts[1]?.parse(windowsNetstatTable()).candidates).toHaveLength(3)
+  })
+
+  it('Windows 的行认得出来（状态在第 4 列、**末列是 pid**）⇒ 端口与 pid 都拿到', () => {
+    const parsed = parseNetstatListeners(windowsNetstatTable())
+
+    // 3 条 LISTENING 行（双栈的 3080 各一条 + 4000）。ESTABLISHED / UDP / `Active Connections` 都不认。
+    // rows = 1 行表头 + 3 行监听行。
+    expect(parsed.rows).toBe(4)
+    expect(parsed.candidates).toEqual([
+      { port: 3080, pid: 111 },
+      { port: 3080, pid: 111 },
+      { port: 4000, pid: 222 },
+    ])
+    // `-o` 这一档读得到 pid ⇒ 不计入 unidentified；读不到的是**进程名与启动时间**，
+    // 所以候选里**不留** `(unknown)` 之类的占位串（那会读成「名字真叫 (unknown)」）。
+    expect(parsed.unidentified).toBe(0)
+    expect(parsed.candidates.every((item) => item.processName === undefined)).toBe(true)
+  })
+
+  it('`[::]:port` 与 `0.0.0.0:port` 两种写法都命中（IPv6 字面量的冒号不该把匹配带偏）', () => {
+    const onlyV6 = parseNetstatListeners(
+      '  Proto  Local Address          Foreign Address        State           PID\r\n' +
+        '  TCP    [::]:3080               [::]:0                 LISTENING       111\r\n',
+    )
+    const onlyV4 = parseNetstatListeners(
+      '  Proto  Local Address          Foreign Address        State           PID\r\n' +
+        '  TCP    0.0.0.0:3080            0.0.0.0:0              LISTENING       111\r\n',
+    )
+
+    expect(onlyV6.candidates).toEqual([{ port: 3080, pid: 111 }])
+    expect(onlyV4.candidates).toEqual([{ port: 3080, pid: 111 }])
+  })
+
+  it('⚠️ 对端地址里的端口**不许**被当成监听端口（只取本地地址那一列）', () => {
+    // 这条是「扫全行找 :port」那个写法的否证：Windows 的对端是 `10.0.0.8:443`，
+    // 换成一条对端恰好占着目标端口的行，扫全行的写法就会报出一个根本不监听的端口。
+    const parsed = parseNetstatListeners(
+      '  Proto  Local Address          Foreign Address        State           PID\r\n' +
+        '  TCP    0.0.0.0:22              10.0.0.8:3080            LISTENING       999\r\n',
+    )
+
+    expect(parsed.rows).toBe(2)
+    expect(parsed.candidates).toEqual([{ port: 22, pid: 999 }])
+  })
+
+  it('漏了 `-o`（`netstat -an`，没有 pid 那一列）⇒ 端口仍在、记 unidentified（四态不许塌）', () => {
+    const parsed = parseNetstatListeners(
+      '  Proto  Local Address          Foreign Address        State\r\n' +
+        '  TCP    0.0.0.0:3080            0.0.0.0:0              LISTENING\r\n',
+    )
+
+    // 「知道有东西在听、读不到是谁」不是「没人听」——
+    // 压成「没人听」就是本仓反复记的那一族反向结论。
+    expect(parsed.candidates).toEqual([{ port: 3080 }])
+    expect(parsed.unidentified).toBe(1)
+    expect(parsed.rows).toBe(2)
+  })
+
+  it('**darwin 那张表的行为一个字没变**（`-ano` 这一档不许把原判据吃掉）', () => {
+    const darwin = [
+      'Proto Recv-Q Send-Q  Local Address          Foreign Address        (state)',
+      'tcp4       0      0  127.0.0.1.3080         *.*                    LISTEN',
+      'tcp6       0      0  ::1.4000               *.*                    LISTEN',
+    ].join('\r\n')
+
+    const parsed = parseNetstatListeners(darwin)
+
+    // darwin 的 `netstat` 不给 pid ⇒ 两档里**只有**这一档计入 unidentified。
+    expect(parsed.candidates).toEqual([{ port: 3080 }, { port: 4000 }])
+    expect(parsed.unidentified).toBe(2)
+    expect(parsed.rows).toBe(3)
+    // 反向也钉住：Windows 的行**不许**混进 darwin 的判据（状态值差一个 `ING`）。
+    expect(
+      parseNetstatListeners(windowsNetstatTable()).candidates.every((c) => c.pid !== undefined),
+    ).toBe(true)
+  })
+
+  it('主命令成功 ⇒ **兜底一次都不跑**（白跑一条只是白花一次进程预算）', async () => {
+    await withPlatform('win32', async () => {
+      const { spawn, calls } = recordingSpawn(() => cmdResult({ stdout: winTable() }))
+
+      const scan = await listListenersWith(spawn)
+
+      expect(scan.probed).toBe(true)
+      expect(scan.candidates.map((item) => item.port)).toEqual([3080, 4000])
+      expect(calls.map((call) => call.command)).toEqual(['powershell.exe'])
+    })
+  })
+
+  it('主命令不可用（起不了进程 / 非零退出）⇒ 走兜底且**结果可用**', async () => {
+    await withPlatform('win32', async () => {
+      const spawnError = recordingSpawn((options) =>
+        options.command === 'powershell.exe'
+          ? cmdResult({ code: null, spawnError: 'spawn: ENOENT' })
+          : cmdResult({ stdout: windowsNetstatTable() }),
+      )
+      const nonZero = recordingSpawn((options) =>
+        options.command === 'powershell.exe'
+          ? cmdResult({ code: 1, stderr: 'The term Get-NetTCPConnection is not recognized' })
+          : cmdResult({ stdout: windowsNetstatTable() }),
+      )
+
+      const first = await listListenersWith(spawnError.spawn)
+      const second = await listListenersWith(nonZero.spawn)
+
+      for (const scan of [first, second]) {
+        expect(scan.probed).toBe(true)
+        // 根因事实：兜底看得见「有人在听」——那正是原缺口把结论说反的地方。
+        expect(scan.candidates.map((item) => item.port)).toEqual([3080, 4000])
+        expect(scan.unidentified).toBe(0)
+      }
+      // 两档都真被跑到过（不是「第一条失败就放弃」）。
+      expect(spawnError.calls.map((call) => call.command)).toEqual([
+        'powershell.exe',
+        WINDOWS_FALLBACK_COMMAND,
+      ])
+      expect(nonZero.calls.map((call) => call.command)).toEqual([
+        'powershell.exe',
+        WINDOWS_FALLBACK_COMMAND,
+      ])
+    })
+  })
+
+  it('主命令读得出表（只是端口不是 3080）⇒ 第一档就可信，兜底**不跑**', async () => {
+    await withPlatform('win32', async () => {
+      // 真机上最常见的情形：PowerShell 正常返回表，只是列出的端口都不是目标。
+      const { spawn, calls } = recordingSpawn(() =>
+        cmdResult({ stdout: ['49724|1|node|', '4000|2|node|'].join('\r\n') }),
+      )
+
+      const scan = await listListenersWith(spawn)
+
+      // 「列全部」**没有**目标端口这个概念：这一档读懂了就是读懂了 ⇒ 直接用它。
+      expect(calls.map((call) => call.command)).toEqual(['powershell.exe'])
+      expect(scan.probed).toBe(true)
+      expect(scan.candidates.map((item) => item.port)).toEqual([49724, 4000])
+    })
+  })
+
+  it('两档都不可用 ⇒ `probed=false`，**不是**「没人听」（三值不许塌成两值）', async () => {
+    await withPlatform('win32', async () => {
+      const { spawn, calls } = recordingSpawn(() =>
+        cmdResult({ code: null, spawnError: 'spawn: ENOENT' }),
+      )
+
+      const scan = await listListenersWith(spawn)
+
+      expect(calls).toHaveLength(2)
+      expect(scan.probed).toBe(false)
+      expect(scan.candidates).toEqual([])
+      expect(scan.unidentified).toBe(0)
+      expect(scan.detail.startsWith('win32:')).toBe(true)
+    })
+  })
+
+  it('兜底这一档到**工具层**：PowerShell 缺模块时 `dsh_list_instances` 仍能认领到 DSH', async () => {
+    // 这条是本缺口的**根因断言**（坑 37 的纪律：断的是事实，不是症状）：
+    // 改前这里会是 `unavailable` + 「no DSH host was found」——而 3080 上的宿主正在跑。
+    await withPlatform('win32', async () => {
+      const spawn = recordingSpawn((options) =>
+        options.command === 'powershell.exe'
+          ? cmdResult({ code: 1, stderr: 'Get-NetTCPConnection: not recognized' })
+          : cmdResult({ stdout: windowsNetstatTable() }),
+      )
+      const tool = createListInstancesTool({
+        ...depsFor(configFor('C:\\fake-home'), { spawn: spawn.spawn }),
+        signatureFetch: probeStub((url) =>
+          url.includes('3080')
+            ? { status: 401, body: DSH_UNAUTHORIZED_BODY }
+            : { status: 200, body: 'hi' },
+        ).fetch,
+      })
+
+      const data = expectOk(await run(tool, {}))
+
+      expect((data.key['scan'] as Record<string, unknown>)['status']).toBe('scanned')
+      const instances = data.key['instances'] as Record<string, unknown>[]
+      expect(instances.map((item) => item['authority'])).toEqual([
+        '127.0.0.1:3080',
+        '127.0.0.1:4000',
+      ])
+      expect(instances.map((item) => item['verdict'])).toEqual(['dsh', 'other'])
+      expect(data.verdict).toContain('found 1 DSH host')
+      expect(data.verdict).not.toContain('no DSH host was found')
+    })
+  })
+
+  it('兜底这一档的候选也带 pid（`-o` 比 darwin 那一档多一样，D′ 认领时用得上）', async () => {
+    await withPlatform('win32', async () => {
+      const spawn = recordingSpawn((options) =>
+        options.command === 'powershell.exe'
+          ? cmdResult({ code: null, spawnError: 'spawn: ENOENT' })
+          : cmdResult({ stdout: windowsNetstatTable() }),
+      )
+      const tool = createListInstancesTool({
+        ...depsFor(configFor('C:\\fake-home'), { spawn: spawn.spawn }),
+        signatureFetch: probeStub(() => ({ status: 200, body: 'hi' })).fetch,
+      })
+
+      const data = expectOk(await run(tool, {}))
+      const instances = data.key['instances'] as Record<string, unknown>[]
+
+      expect(instances.map((item) => item['pid'])).toEqual([111, 222])
+      // 进程名读不到 ⇒ 键**不出现**（不是 `null`、也不是 `(unknown)` 占位）。
+      expect(instances.every((item) => item['processName'] === undefined)).toBe(true)
     })
   })
 })

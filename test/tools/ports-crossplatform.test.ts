@@ -28,6 +28,7 @@ import {
   parseSsOutput,
   portLookupPlan,
   PORT_LOOKUP_SHELL,
+  WINDOWS_FALLBACK_COMMAND,
 } from '../../src/lib/ports.ts'
 import { cmdResult, recordingSpawn, withPlatform } from './helpers.ts'
 
@@ -70,17 +71,53 @@ const NETSTAT_OUTPUT = [
   '',
 ].join('\n')
 
+/**
+ * `netstat -ano` 的真实输出形状（Windows；真机摘录，混着非监听态与 UDP 行）。
+ *
+ * ⚠️ 与上面 darwin 那份**形状完全不同**：状态在第 4 列且逐字为 `LISTENING`、
+ * **末列是 pid**、本地地址用冒号分隔。按末列判 `LISTEN` 的写法会把这里每一行都丢掉。
+ */
+const NETSTAT_AN_OUTPUT = [
+  '',
+  'Active Connections',
+  '',
+  '  Proto  Local Address          Foreign Address        State           PID',
+  '  TCP    0.0.0.0:3080            0.0.0.0:0              LISTENING       4242',
+  '  TCP    [::]:3080               [::]:0                 LISTENING       4242',
+  '  TCP    127.0.0.1:4000          0.0.0.0:0              LISTENING       77',
+  '  TCP    10.0.0.5:5231           10.0.0.8:443            ESTABLISHED     9',
+  '  UDP    0.0.0.0:500            *:*                                    4600',
+  '',
+].join('\r\n')
+
 describe('portLookupPlan · 三个平台各自的命令面', () => {
-  it('win32：一次尝试，命令是 PowerShell，脚本按 LocalPort + State 过滤', () => {
+  // ⚠️ 这条用例的标题与 `toHaveLength` **2026-10-15 被有意改过**（Lead 拍板），
+  // 理由写在这里，免得下一个人以为它在守某个不可动的约束：
+  // 它原本逐字是「win32：**一次尝试**」+ `expect(plan?.attempts).toHaveLength(1)` ——
+  // 钉的是「**win32 没有兜底**」这个**事实**，不是「win32 最多只能有一次尝试」这个**能力上限**。
+  // 事实变了（`Get-NetTCPConnection` 缺 `NetTCPPowerShell` 模块时要有救），判据就得跟着变。
+  //
+  // **第一档一个字没动**：它仍是 `powershell.exe`、脚本仍按 `LocalPort` + `State` 过滤 ⇒
+  // 下面那几条 `toContain` 断言（`-LocalPort 3080` / `-State Listen` / `not.toContain('bin.js')`）
+  // **一条都不该动**，它们守的是「问的是哪个端口」与「不用命令行子串」这两条硬规矩。
+  it('win32：两档 —— 第一档 PowerShell 按 LocalPort + State 过滤，第二档兜底 netstat -ano', () => {
     const plan = portLookupPlan('win32', PORT)
 
-    expect(plan?.attempts).toHaveLength(1)
+    // 顺序即优先级：第一档**可信**就返回，兜底只在主命令本身不可用时才被跑到。
+    expect(plan?.attempts.map((attempt) => attempt.command)).toEqual([
+      PORT_LOOKUP_SHELL,
+      WINDOWS_FALLBACK_COMMAND,
+    ])
     expect(plan?.attempts[0]?.command).toBe(PORT_LOOKUP_SHELL)
     const script = plan?.attempts[0]?.args.join(' ') ?? ''
     expect(script).toContain('-LocalPort 3080')
     expect(script).toContain('-State Listen')
     // 「不用命令行子串」是本仓硬规矩（派生 shell 会误匹配）。
     expect(script).not.toContain('bin.js')
+    // 兜底那一档：`-ano` 列全表 + 解析器比对端口，**不是** `findstr :3080` 那种管道过滤
+    // （那会把对端地址里含 `:3080` 的行也算进来）。这条不许被改回「按子串问端口」。
+    expect(plan?.attempts[1]?.args).toEqual(['-ano'])
+    expect(plan?.attempts[1]?.args.join(' ')).not.toContain('3080')
   })
 
   it('linux：两次尝试，同一个 ss，先带 -p 再不带', () => {
@@ -561,6 +598,181 @@ describe('lookupPort · win32 分支（回归网：改非 Windows 分支不许�
       await lookupPort(PORT, { spawn, timeoutMs: 1_000 })
 
       expect(calls.map((c) => c.command)).toEqual([PORT_LOOKUP_SHELL])
+    })
+  })
+})
+
+describe('lookupPort · win32 兜底：Get-NetTCPConnection 缺模块时退到 netstat -ano', () => {
+  // ## 为什么这条族必须也有兜底（2026-10-15 补的理由）
+  //
+  // `Get-NetTCPConnection` 缺 `NetTCPPowerShell` 模块**同时打断两条路**，只补一条是修一半：
+  //
+  // | 路 | 消费者 | 兜底在哪 |
+  // |---|---|---|
+  // | 列全部监听者 | `dsh_list_instances` | `listenerScanAttempts` 的第二档 |
+  // | 查单个端口 `lookupPort` | **`dsh_check_auth`** · **`dsh_dump_config`** | **就是这里** |
+  //
+  // ⇒ 不补的话，在那类机器上 8 个工具里有 2 个照样读不到端口。**修一个落点 ≠ 扫一族。**
+  //
+  // ⚠️ 每条用例都把**构造与执行整段**包进 `withPlatform('win32', …)`（坑 25 的隐蔽变体：
+  // 只包构造、让 `execute` 落在平台恢复之后 = 等于没包）。
+
+  it('主命令成功 ⇒ **兜底一次都不跑**（计数断言；白跑一条只是白花一次进程预算）', async () => {
+    await withPlatform('win32', async () => {
+      const { spawn, calls } = recordingSpawn(() =>
+        cmdResult({ stdout: '4242|node|2026-10-12T20:00:00.0000000+08:00\n' }),
+      )
+
+      const result = await lookupPort(PORT, { spawn, timeoutMs: 1_000 })
+
+      expect(result.probed).toBe(true)
+      expect(result.listeners[0]?.pid).toBe(4242)
+      expect(calls.map((call) => call.command)).toEqual([PORT_LOOKUP_SHELL])
+    })
+  })
+
+  it('主命令起不了进程 ⇒ 兜底**真被跑到**且结果可用（能读到 pid）', async () => {
+    await withPlatform('win32', async () => {
+      const { spawn, calls } = recordingSpawn((options) =>
+        options.command === PORT_LOOKUP_SHELL
+          ? cmdResult({ code: null, spawnError: 'spawn: ENOENT' })
+          : cmdResult({ stdout: NETSTAT_AN_OUTPUT }),
+      )
+
+      const result = await lookupPort(PORT, { spawn, timeoutMs: 1_000 })
+
+      expect(calls.map((call) => call.command)).toEqual([
+        PORT_LOOKUP_SHELL,
+        WINDOWS_FALLBACK_COMMAND,
+      ])
+      expect(result.probed).toBe(true)
+      // 根因事实（坑 37：断的是事实，不是症状）：那台机器上 3080 真的有人在听。
+      expect(result.listening).toBe(true)
+      // `-o` 给了 pid ⇒ 双栈那两行折叠成**同一个 pid 一条**（不是「2 个监听者」）。
+      expect(result.listeners).toEqual([{ pid: 4242, processName: '(unknown)' }])
+      // 别的端口不许混进来（只认目标端口那一列，不扫全行）。
+      expect(result.listeners.map((listener) => listener.pid)).not.toContain(77)
+    })
+  })
+
+  it('主命令非零退出 + stderr（模块缺失长这样）⇒ 兜底顶上', async () => {
+    await withPlatform('win32', async () => {
+      const { spawn, calls } = recordingSpawn((options) =>
+        options.command === PORT_LOOKUP_SHELL
+          ? cmdResult({ code: 1, stderr: 'The term Get-NetTCPConnection is not recognized' })
+          : cmdResult({ stdout: NETSTAT_AN_OUTPUT }),
+      )
+
+      const result = await lookupPort(PORT, { spawn, timeoutMs: 1_000 })
+
+      expect(calls.map((call) => call.command)).toEqual([
+        PORT_LOOKUP_SHELL,
+        WINDOWS_FALLBACK_COMMAND,
+      ])
+      expect(result.probed).toBe(true)
+      expect(result.listening).toBe(true)
+      expect(result.listeners.map((listener) => listener.pid)).toEqual([4242])
+    })
+  })
+
+  it('兜底读到表、但目标端口没人听 ⇒ probed=true 且 listening=false（**不是** probed=false）', async () => {
+    await withPlatform('win32', async () => {
+      const { spawn, calls } = recordingSpawn((options) =>
+        options.command === PORT_LOOKUP_SHELL
+          ? cmdResult({ code: null, spawnError: 'spawn: ENOENT' })
+          : cmdResult({ stdout: NETSTAT_AN_OUTPUT.replaceAll('3080', '9999') }),
+      )
+
+      const result = await lookupPort(PORT, { spawn, timeoutMs: 1_000 })
+
+      expect(calls).toHaveLength(2)
+      // 「表被读懂了、里面没有这一行」= 真的没人听 ⇒ 与「查不了」必须是两件事。
+      expect(result.probed).toBe(true)
+      expect(result.listening).toBe(false)
+      expect(result.listeners).toEqual([])
+    })
+  })
+
+  it('⚠️ 兜底读得到表、但**读不到 pid** ⇒ listening 仍是 true（这是最容易写塌的一处）', async () => {
+    await withPlatform('win32', async () => {
+      // `netstat -an`（漏了 `-o`）那一档：端口看得见、pid 那一列不存在。
+      // 把它写成 `listening: false` 就是「把『查不到是谁』说成『没人听』」—— 反向结论。
+      const withoutPid = NETSTAT_AN_OUTPUT.replace(
+        /^.*LISTENING\s+\d+\r?$/gmu,
+        '  TCP    0.0.0.0:3080            0.0.0.0:0              LISTENING',
+      )
+      const { spawn } = recordingSpawn((options) =>
+        options.command === PORT_LOOKUP_SHELL
+          ? cmdResult({ code: null, spawnError: 'spawn: ENOENT' })
+          : cmdResult({ stdout: withoutPid }),
+      )
+
+      const result = await lookupPort(PORT, { spawn, timeoutMs: 1_000 })
+
+      expect(result.probed).toBe(true)
+      expect(result.listening).toBe(true)
+      expect(result.listeners).toEqual([])
+    })
+  })
+
+  it('两档都不可用 ⇒ probed=false，**不是** listening=false（四态不许塌成两态）', async () => {
+    await withPlatform('win32', async () => {
+      const { spawn, calls } = recordingSpawn(() =>
+        cmdResult({ code: null, spawnError: 'spawn: ENOENT' }),
+      )
+
+      const result = await lookupPort(PORT, { spawn, timeoutMs: 1_000 })
+
+      // 两条尝试都被真跑到（不是「第一条失败就放弃」）。
+      expect(calls).toHaveLength(2)
+      expect(result.probed).toBe(false)
+      expect(result.listening).toBe(false)
+      // 判据认平台标识，不认后面那句文案。
+      expect(result.detail.startsWith('win32:')).toBe(true)
+      expect(result.detail).toContain('ENOENT')
+    })
+  })
+
+  it('兜底那一档真的**按字段比对端口**：换个端口问就认不出来（钉住「不是命令行子串匹配」）', async () => {
+    await withPlatform('win32', async () => {
+      const { spawn } = recordingSpawn((options) =>
+        options.command === PORT_LOOKUP_SHELL
+          ? cmdResult({ code: null, spawnError: 'spawn: ENOENT' })
+          : cmdResult({ stdout: NETSTAT_AN_OUTPUT }),
+      )
+
+      const hit = await lookupPort(PORT, { spawn, timeoutMs: 1_000 })
+      const miss = await lookupPort(4000, { spawn, timeoutMs: 1_000 })
+      const absent = await lookupPort(9999, { spawn, timeoutMs: 1_000 })
+
+      expect(hit.listening).toBe(true)
+      expect(hit.listeners.map((listener) => listener.pid)).toEqual([4242])
+      // 问 4000 时认出来的是 4000 那一行（pid 77），不是表里第一个端口 ——
+      // 「扫全行取第一个 `:port`」的写法在这里会答成 3080。
+      expect(miss.listeners.map((listener) => listener.pid)).toEqual([77])
+      expect(absent.listening).toBe(false)
+      expect(absent.probed).toBe(true)
+    })
+  })
+
+  it('⚠️ 对端地址里含目标端口的行**不许**被算成监听者（钉住「不扫全行」）', async () => {
+    await withPlatform('win32', async () => {
+      // 若兜底写成 `findstr :3080` 之类的管道过滤，这一行就会被算进来 ⇒ 报出一个
+      // 根本不监听 3080 的 pid。反过来，正确实现只认**本地地址那一列**。
+      const peerPort = NETSTAT_AN_OUTPUT.replace(
+        '  TCP    127.0.0.1:4000          0.0.0.0:0              LISTENING       77',
+        '  TCP    127.0.0.1:4000          10.0.0.8:3080            LISTENING       77',
+      )
+      const { spawn } = recordingSpawn((options) =>
+        options.command === PORT_LOOKUP_SHELL
+          ? cmdResult({ code: null, spawnError: 'spawn: ENOENT' })
+          : cmdResult({ stdout: peerPort }),
+      )
+
+      const result = await lookupPort(PORT, { spawn, timeoutMs: 1_000 })
+
+      expect(result.listeners.map((listener) => listener.pid)).toEqual([4242])
+      expect(result.listeners.map((listener) => listener.pid)).not.toContain(77)
     })
   })
 })

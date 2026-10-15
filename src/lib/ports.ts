@@ -60,6 +60,14 @@ export const LINUX_LOOKUP_COMMAND = 'ss'
 export const DARWIN_LOOKUP_COMMAND = 'lsof'
 /** darwin 分支的兜底命令（不带进程信息）。 */
 export const DARWIN_FALLBACK_COMMAND = 'netstat'
+/**
+ * win32 分支的兜底命令（`netstat -ano`）。
+ *
+ * 与 {@link DARWIN_FALLBACK_COMMAND} 是**同一个可执行文件**、不同参数与不同输出形状：
+ * Windows 上 `Get-NetTCPConnection` 依赖 `NetTCPIP` 这个 PowerShell 模块，精简系统 /
+ * Server Core / 某些容器镜像上它压根不在 —— 而 `netstat.exe` 一直都在。
+ */
+export const WINDOWS_FALLBACK_COMMAND = 'netstat'
 
 /**
  * 造查询脚本（**仅 Windows 分支**）。
@@ -402,6 +410,55 @@ export function parseNetstatOutput(stdout: string, port: number): ParsedSocketTa
 }
 
 /**
+ * 把 `netstat -ano` 的「列全部」结果收敛成「**目标这一个端口**」的表。
+ *
+ * ## 为什么复用 {@link parseNetstatListeners} 而不是另写一份
+ *
+ * 两个 `netstat` 形状（Windows 的 `LISTENING` + 末列 pid / darwin 的末列 `LISTEN`）
+ * 的认行与取值规则**逐条相同**，只有「目标端口在不在其中」这一步不同 ——
+ * 另写一份就多一个地方会漂，而两处漂了还是**静默**的（少认一行看起来像「没人听」）。
+ *
+ * ## ⚠️ 为什么**不是**用命令行子串先过滤一遍
+ *
+ * 「问 3080」这个约束由**解析器按字段比对**承担，不是由 `findstr :3080` 之类的
+ * 管道过滤承担：后者会把**对端地址**里含 `:3080` 的行也算进来（`ss` 那条纪律的同族），
+ * 而本仓硬规矩是端口一律**按端口查、不用命令行子串**
+ * —— `portLookupPlan` 那条 `not.toContain('bin.js')` 断言守的正是这一族。
+ *
+ * ## 三值语义
+ *
+ * `unidentified` 在这里**按目标端口重数**（不是照抄整张表的计数），与
+ * {@link parseSsOutput} 的做法一致；读不到 pid 的行进 `unidentified` ⇒
+ * `attemptIsTrusted` 判可信、`toResult` 给 `listening: true` + 空 listeners
+ * —— 「有人听、不知道是谁」绝不会被写成「没人听」。
+ *
+ * @param stdout `netstat -ano` 的标准输出。
+ * @param port 目标端口。
+ */
+function netstatListenersOnPort(stdout: string, port: number): ParsedSocketTable {
+  const scan = parseNetstatListeners(stdout)
+  const listeners: PortListener[] = []
+  const seen = new Set<number>()
+  let unidentified = 0
+
+  for (const candidate of scan.candidates) {
+    if (candidate.port !== port) continue
+    if (candidate.pid === undefined) {
+      // 「有人听、读不到是谁」—— 记 unidentified，不当成「没人听」。
+      unidentified += 1
+      continue
+    }
+    // 双栈监听（IPv4 + IPv6）会让同一 pid 出两行 ⇒ 同 pid 只留一条，
+    // 否则「2 个监听者」是在报同一个进程的两次。
+    if (seen.has(candidate.pid)) continue
+    seen.add(candidate.pid)
+    // `netstat` 不给进程名 ⇒ 按本层既有约定填占位（`parsePortLookup` 等四处同此）。
+    listeners.push({ pid: candidate.pid, processName: '(unknown)' })
+  }
+  return { listeners, unidentified, rows: scan.rows }
+}
+
+/**
  * 取某个平台的查询方案。
  *
  * **返回 `undefined` 就是「这个平台没有命令」**（`aix` / `freebsd` / `sunos` …），
@@ -410,7 +467,13 @@ export function parseNetstatOutput(stdout: string, port: number): ParsedSocketTa
  * 兜底的用意不是「主命令一定失败」，而是主命令**本身不可用**：
  * Linux 上 `ss -ltnp` 与 `ss -ltn` 是同一个二进制，所以真正救场的是
  * 「`-p` 不被支持 / 权限不足导致非零退出」那种构建；darwin 上则是
- * `lsof` 缺失（精简安装里常见）时由 `netstat -an` 顶上。
+ * `lsof` 缺失（精简安装里常见）时由 `netstat -an` 顶上；
+ * **win32 上是 `Get-NetTCPConnection` 缺 `NetTCPIP` 模块**（精简系统 / Server Core /
+ * 某些容器镜像上压根没有）时由 `netstat -ano` 顶上 —— `netstat.exe` 一直都在。
+ * ⚠️ 这不是「win32 特有的锦上添花」：`Get-NetTCPConnection` 缺模块**同时打断两条路**
+ * （列全部由 {@link listenerScanAttempts} 兜、查单端口在这里兜），
+ * 只补其中一条会让 `dsh_list_instances` 好了、`dsh_check_auth` / `dsh_dump_config`
+ * 在同一台机器上照样瞎 —— **修一个落点 ≠ 扫一族**。
  *
  * 端口是**参数**而不是模块里的常量：它同时出现在参数表（`-iTCP:<port>`、PowerShell 脚本）
  * 与解析器里，两处必须是同一个值 —— 写死一处就会出现「问的是 3080、过滤的是 0」
@@ -431,6 +494,13 @@ export function portLookupPlan(platform: string, port: number): PortLookupPlan |
             const listeners = parsePortLookup(stdout)
             return { listeners, unidentified: 0, rows: listeners.length }
           },
+        },
+        // 兜底：`-ano` 认全表、**解析器按字段比对端口**（不是命令行子串过滤 ——
+        // 那会把对端地址里含 `:3080` 的行算进来，而端口一律按端口查是本仓硬规矩）。
+        {
+          command: WINDOWS_FALLBACK_COMMAND,
+          args: ['-ano'],
+          parse: (stdout) => netstatListenersOnPort(stdout, port),
         },
       ],
     }
@@ -831,12 +901,87 @@ function netstatPortOf(fields: readonly string[]): number | undefined {
   return isPort(port) ? port : undefined
 }
 
+// ── Windows 那张表（`netstat -ano`） ───────────────────────────────────────
+//
+// 两种 `netstat` 的行形状**完全不同**，所以「状态在哪一列」也完全不同：
+//
+//   darwin : tcp4 0 0 127.0.0.1.3080 *.* LISTEN            ← 状态在**末列**
+//   Windows: TCP 0.0.0.0:135 0.0.0.0:0 LISTENING 1044      ← 状态在**第 4 列**，末列是 pid
+//
+// ⇒ 只认末列会把 **Windows 的每一行都丢掉**，而丢弃 = 「找不到任何监听者」
+// ⇒ 兜底等于没有。所以解析器必须**同时**认这两种。
+//
+// 下面三条纪律与 `ss` / darwin 那两条逐字同一个理由：
+// 1. **不扫全行找端口**：Windows 的对端地址也带 `:port`（`10.0.0.8:443`），
+//    扫全行会把**别的进程的端口**报成监听端口 —— 那正是静默给出假结论的形状；
+// 2. 本地地址取**结构内**下标，且那张表的形状**自校验**（proto + 状态列 + pid 列）；
+// 3. 形状认不出就**降级**（这一行不计入 `rows`），不去猜哪一列是什么。
+
+/** `netstat -ano` 的 proto 列逐字值（Windows 印 `TCP`/`UDP`，darwin 印 `tcp4`/`tcp6`）。 */
+const WINDOWS_NETSTAT_PROTO = 'TCP'
+/** `netstat -ano` 的监听态逐字值（darwin 那个是 `LISTEN`，**少一个 `ING`**）。 */
+const WINDOWS_NETSTAT_LISTEN_STATE = 'LISTENING'
+/** `netstat -ano` 一行里**本地地址**那一列的下标（`Proto Local Foreign State PID`）。 */
+const WINDOWS_NETSTAT_LOCAL_INDEX = 1
+/** 同一张表里**状态**那一列的下标。 */
+const WINDOWS_NETSTAT_STATE_INDEX = 3
+/** 同一张表里 **pid** 那一列的下标（`netstat -an` 不带 `-o` 时这一列不存在）。 */
+const WINDOWS_NETSTAT_PID_INDEX = 4
+/** `netstat -ano` 一行里本地地址那一列的端口（`0.0.0.0:135` / `[::]:135`，冒号分隔）。 */
+const WINDOWS_NETSTAT_LOCAL_PORT = /:(\d+)$/u
+
 /**
- * 解析 `netstat -an` 的**全部** tcp 监听行（darwin 的最后一档兜底）。
+ * `netstat -ano` 一行里本地地址那一列的端口。
  *
- * **`netstat` 不给 pid**，所以每一条都同时进 `unidentified` 与 `candidates`（只带端口）：
- * 「知道有东西在听、不知道是谁」是如实结论，而那个端口**仍然值得去探一次签名**
- * （D′ 只需要 authority，不需要 pid）。
+ * 与 {@link netstatPortOf} 同一个纪律（**只取本地地址那一列**），只是分隔符不同。
+ *
+ * @param fields 行的空白切分结果（**已确认是 Windows 那张表的监听行**）。
+ */
+function windowsNetstatPortOf(fields: readonly string[]): number | undefined {
+  const match = WINDOWS_NETSTAT_LOCAL_PORT.exec(fields[WINDOWS_NETSTAT_LOCAL_INDEX] ?? '')
+  const port = match === null ? Number.NaN : Number(match[1])
+  return isPort(port) ? port : undefined
+}
+
+/**
+ * 判断一行是不是 **Windows `netstat`** 的监听行（形状自校验）。
+ *
+ * 认下的条件是两条，缺一即降级：proto 列逐字为 `TCP`（darwin 印的是 `tcp4`/`tcp6`）、
+ * **状态列**逐字为 `LISTENING`。
+ *
+ * ⚠️ 判的是**状态列**而不是末列：`netstat -ano` 的末列是 pid（`LISTENING 1044`），
+ * 按末列判会把 Windows 的每一行都丢掉 —— 而丢掉 = 「找不到任何监听者」= 兜底形同虚设。
+ *
+ * pid 列**不参与**认行：`-ano` 有它、`-an`（漏了 `-o`）没有，两种都必须读得出来，
+ * 所以 pid 的有无是**取值时**的分支，不是**认行时**的条件。
+ *
+ * @param fields 行的空白切分结果。
+ */
+function windowsNetstatRowIsListening(fields: readonly string[]): boolean {
+  if (fields[0] !== WINDOWS_NETSTAT_PROTO) return false
+  return fields[WINDOWS_NETSTAT_STATE_INDEX] === WINDOWS_NETSTAT_LISTEN_STATE
+}
+
+/**
+ * 解析 `netstat` 的**全部** tcp 监听行（darwin 的 `-an` 与 win32 的 `-ano` 两种形状）。
+ *
+ * ## 两种形状，判据逐条列出
+ *
+ * 1. 表头首列是 `Proto`（两平台相同，**计入 `rows`**）；`Active Connections` 那行、
+ *    `UDP` 行与 unix 域那一段都不认；
+ * 2. **darwin**（`netstat -an`）：监听态在**末列**逐字为 `LISTEN`，本地地址是第 4 列
+ *    （`127.0.0.1.3080` / `*.3080`），**不给 pid** ⇒ 命中的行**一律**进 `unidentified`；
+ * 3. **win32**（`netstat -ano`）：监听态在**状态列**逐字为 `LISTENING`，本地地址是第 2 列
+ *    （`0.0.0.0:3080` / `[::]:3080`），**pid 在末列** ⇒ 带 pid 的候选（见下）；
+ * 4. **不扫全行找端口**：两个平台的对端地址都带端口，扫全行会报出别人的端口。
+ *
+ * ## 三值语义（这一档尤其容易塌）
+ *
+ * `-o` 这一档**读得到 pid**，所以带 pid 的行**不计入** `unidentified`
+ * —— 该栏的定义是「读不到 **pid** 的条数」，而 pid 就在那一列；
+ * 但它**读不到进程名与启动时间**，所以候选只带 `port` + `pid`（不留空串占位）。
+ * 两种形态都仍然是「**端口上有人在听**」：
+ * 「没人听」只由「这张表被读懂了、而它没有这一行」来表达。
  *
  * @param stdout `netstat` 的标准输出。
  */
@@ -846,13 +991,36 @@ export function parseNetstatListeners(stdout: string): ParsedListenerTable {
     const line = rawLine.trim()
     if (line === '') continue
     const fields = line.split(/\s+/u)
-    const proto = (fields[0] ?? '').toLowerCase()
-    if (proto === 'proto') {
+    const proto = fields[0] ?? ''
+    if (proto.toLowerCase() === 'proto') {
       table.rows += 1
       continue
     }
-    if (!proto.startsWith('tcp')) continue
+
+    // ── win32（`netstat -ano`）：状态在第 4 列、**末列是 pid** ──
+    if (proto === WINDOWS_NETSTAT_PROTO) {
+      if (!windowsNetstatRowIsListening(fields)) continue
+      // 认行：到这一行就说明「输出是我认识的那张表」，与端口无关。
+      table.rows += 1
+      const port = windowsNetstatPortOf(fields)
+      if (port === undefined) continue
+      const pid = Number.parseInt(fields[WINDOWS_NETSTAT_PID_INDEX] ?? '', 10)
+      if (!isPid(pid)) {
+        // `netstat -an`（漏了 `-o`）没有 pid 那一列 ⇒ 如实记 unidentified：
+        // 「端口上有东西在听、读不到是谁」不是「没人听」。
+        table.unidentified += 1
+        table.candidates.push({ port })
+        continue
+      }
+      // pid 读到了，但**进程名与启动时间读不到** ⇒ 不留占位串（占位会读成「名字叫 (unknown)」）。
+      table.candidates.push({ port, pid })
+      continue
+    }
+
+    // ── darwin（`netstat -an`）：监听态在**末列**、`netstat` 不给 pid ──
+    if (!proto.toLowerCase().startsWith('tcp')) continue
     if (fields[fields.length - 1] !== 'LISTEN') continue
+    // 认行：到这一行就说明「输出是我认识的那张表」，与端口无关。
     table.rows += 1
     const port = netstatPortOf(fields)
     if (port === undefined) continue
@@ -877,6 +1045,10 @@ export interface ListenerScanAttempt {
  * （`-LocalPort` / `-iTCP:<port>` 都得去掉），把它们塞进一个函数只会让
  * 「传不传端口」变成一个运行期分支 —— 而那个分支写错的形状正是**静默少列**。
  *
+ * 兜底的用意与那条注释逐字同一个：**主命令本身不可用**（`Get-NetTCPConnection` 缺模块、
+ * `lsof` 没装、`-p` 不被支持），不是「主命令慢」。所以顺序即优先级，
+ * 第一条**可信**就返回 —— 兜底只在前面每一条都被判成不可信时才会被跑到。
+ *
  * @param platform `process.platform`（**调用时**读）。
  */
 export function listenerScanAttempts(platform: string): ListenerScanAttempt[] {
@@ -887,6 +1059,11 @@ export function listenerScanAttempts(platform: string): ListenerScanAttempt[] {
         args: ['-NoProfile', '-NonInteractive', '-Command', listenerScanScript()],
         parse: parseListenerScan,
       },
+      // 兜底：`Get-NetTCPConnection` 依赖 `NetTCPIP` 这个 PowerShell 模块 ——
+      // 精简系统 / Server Core / 某些容器镜像上它压根不在，于是第一档**一条行都读不出来**
+      // ⇒ `unavailable` ⇒ `dsh_list_instances` 报「一个 DSH 宿主都没有」，而宿主可能就在跑。
+      // `-o` 这一档能填 pid（比 darwin 那一档还多一样），但进程名与启动时间拿不到。
+      { command: WINDOWS_FALLBACK_COMMAND, args: ['-ano'], parse: parseNetstatListeners },
     ]
   }
   if (platform === 'linux') {

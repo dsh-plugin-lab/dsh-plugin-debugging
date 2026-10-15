@@ -35,6 +35,22 @@
  * 3. **唤醒失败 ⇒ 保留 marker**（不标已消费），下次启动再试。**没有**「超时之后把 marker
  *    清掉」这条路 —— 那会把证据一起删掉、永久不可恢复（`dsh-restart` 的反面教材）。
  *
+ * ## ⚠️ 等得到服务 ≠ 等得到「答案」：读与唤醒都必须轮询（真机没跑通那一轮的成因）
+ *
+ * 2026-10-14 23:50 在活宿主上真跑了一次 `dsh_restart`：工具壳那一半成立（marker 落盘、
+ * 宿主退出、新宿主起来），**恢复半一条 notice 都没投**，marker 至今留在 `armed`。
+ * 下面是那一轮的成因分析**落到代码上**的三条结论（每条都能按检索串复核）：
+ *
+ * | # | 事实 | 出处 |
+ * |---|---|---|
+ * | ① | **读 marker 那一路原本零重试** —— `readRestartMarker` 只被调一次，而 `ctx.get('fs')` 在 apply 期取不到，于是读到 `unreadable`、立刻 `refused` 收工；「读不到」这件事**从未被当成「还没就绪」** | 本文件 `readMarkerWithRetries` 的调用点（原为单次调用）· `restart-fs.ts` 的 `read` 在 `hostFsOf` 返回 `undefined` 时给 `unreadable` |
+ * | ② | **唤醒窗口短于实测可用窗口** —— 原 `5 × 300 ms` 的最后一次尝试落在 apply 后 **2200 ms**（`1000 + 4 × 300`；注意**最后一次尝试之后不再 sleep**，文件头原先那句「约 2.5 秒」把那次不存在的等待也算进去了），而台账 C32 在同一套组合里实测 `sessionController` 要 **2400–2800 ms** 才可用 ⇒ **窗口上界落在可用窗口之内**，服务真的晚到时五次全灭 | 本文件 `wakeWithRetries` · HOST-CONTRACTS §2.4.1 的 C26 / C32 |
+ * | ③ | **事后分不开「没跑 / 跑了读不到 fs / 读了唤醒失败」** —— 结论 `RecoveryOutcome` 被 `src/index.ts` 用 `void …` 丢掉；唯一的留痕走 `ctx.logger(name).info`，而宿主启动期那个 exporter **只收 `warn` / `error`**（`dsh-app-boot/lib/index.js` 的 `boot()`：`levels: { default: 2 }` 且只 push `warn` / `error`），并且 `startup-*.log` **只在启动失败时**才落盘（同一函数里只有 `StartupError` 分支带 `messages`）。真机那条路又是 `schtasks → cmd /c` 且不重定向 ⇒ **一条 INFO 留痕在任何地方都不留档** | 本文件 `recoveryLogOf` · 宿主 `dsh-app-boot/lib/index.js` 的 `boot()` |
+ *
+ * ⇒ 处置三条各落一处：**读路径轮询**（①）、**窗口覆盖实测上界**（②）、**落盘 receipt**（③）。
+ * ⚠️ **receipt 写不出去的那一格仍是宿主的限制**：`fs` 全程不可用时盘上一个字节都动不了，
+ * 那时本层只能靠 `console` / logger 的 `warn` 说一句 —— **做不到「留痕在盘上」，如实记**。
+ *
  * ## 顺序：notice 在 consume 之前，所以 notice 说的是「会被消费」
  *
  * 先唤醒投递、**全部成功之后**才写回 `consumed`。于是 notice 里那句不能写成「已经消费了」
@@ -48,12 +64,16 @@
  * 「静默丢掉一次恢复」的代价 —— 而后者是不可逆的。
  */
 import { randomUUID } from 'node:crypto'
+import { join } from 'node:path'
 
 import { createRestartFsPort, type ContextLike } from './restart-fs.js'
 import {
   consumeRestartMarker,
   decideRecovery,
+  markerState,
   readRestartMarker,
+  type MarkerRead,
+  type MarkerState,
   type RecoveryDecision,
   type RestartFsPort,
   type RestartMarker,
@@ -87,21 +107,42 @@ export const NOTICE_SUMMARY_MAX_CHARS = 120
 export const STATE_TOOL = 'dsh_check_effect_mode'
 
 /**
- * 启动期恢复的延迟（毫秒）。
+ * 启动期恢复的延迟（毫秒）—— 从本层 apply 起算的**第一段**等待。
  *
- * 取值理由：`task-34` 实测 `sessionController` 在 apply 后 **138–157 ms** 才有（C26），
- * 所以秒级以下就够；取 1 秒是那个观测值的约 6 倍，给「服务起来得比探针那次慢」留余量，
- * 同时不让 notice 白等。**不是**参考实现那个 3 秒 —— 那是对 `agents.get` 的经验值
- * （C13），而 `resolveAgent` **没有就绪窗口**（C25），两者不是一回事。
- *
- * ⚠️ **别把这个数当成「服务可用窗口」的通用值**（C32）：另一套探针在同一组合里量到 `fs`
- * **2.2–2.5 s**、`sessionController` **2.4–2.8 s** 才可用，而那两个数是**从探针自己的 apply
- * 起算**的，与 C26 的基准不是同一个 ⇒ **两个窗口不能混着用**（C32 的成因仍标 `[无法判定]`）。
- * 本层的兜底因此**不是**「把 1 秒调大」，而是**重试 + 失败保留 marker**：
- * `RECOVERY_WAKE_ATTEMPTS` 次 × `RECOVERY_WAKE_RETRY_MS` 覆盖到 apply 后约 2.5 秒；
- * 真到那时还没就绪就如实报 `pending`、marker 留盘、**下次启动再试**（绝不清掉它）。
+ * ⚠️ **它不是「服务可用窗口」，只是「第一次尝试的时刻」**（真机那一轮的成因，见文件头 ①②）：
+ * 取 1 秒是 C26（`sessionController` 在 apply 后 138–157 ms 才有）的约 6 倍。
+ * 真正的兜底**不是**把它调大，而是**轮询**：读走 {@link RECOVERY_READ_ATTEMPTS} ×
+ * {@link RECOVERY_POLL_INTERVAL_MS}，唤醒走 {@link RECOVERY_WAKE_ATTEMPTS} ×
+ * {@link RECOVERY_WAKE_RETRY_MS}，两段的**末次尝试**都必须越过 C32 实测的服务可用上界
+ * —— 那条不等式由 `test/tools/restart-recovery.test.ts` 钉住（数值不是抄在注释里的承诺）。
  */
 export const RECOVERY_STARTUP_DELAY_MS = 1_000
+
+/**
+ * 「等宿主服务」的**总预算**（毫秒，从恢复开始起算，即 apply 后 `1_000 + 本值`）。
+ *
+ * 取 4 秒的理由是 C32 的**实测上界**（同一套组合里 `fs` 2.2–2.5 s、`sessionController`
+ * 2.4–2.8 s）：整条链最后一个动作落在 apply 后 5 秒，比 2.8 秒留出约 2.2 秒余量。
+ * ⚠️ C26 记的是 138–157 ms、**基准不同**，两个数不能混着用（C32 成因本身标 `[无法判定]`）——
+ * 本值取的是**较大那个**的保守侧。
+ */
+export const RECOVERY_SERVICE_WINDOW_MS = 4_000
+
+/** 读 marker 那条路两次尝试之间的等待（毫秒）。 */
+export const RECOVERY_POLL_INTERVAL_MS = 250
+
+/**
+ * 读 marker 的尝试次数上限（**由窗口与间隔推导，不另抄一份**）。
+ *
+ * 为什么读也要重试（文件头 ①）：`ctx.get('fs')` 在 apply 期取不到（`restart-fs.ts` 的 `read`
+ * 因此给 `unreadable`），而**单次**读到 `unreadable` 就 `refused` 收工，等于把「服务还没起来」
+ * 印成「读不到」—— 真机那一轮就是这样一条 notice 都没投出来的。
+ *
+ * 为什么**按次数**而不是按时钟：这个 `sleep` / `now` 都是注入点，判据里 `sleep` 立即返回、
+ * `now` 是常数 ⇒ 任何按挂钟收敛的循环在判据里**不会终止**。次数上限既可注入、也能被断言。
+ */
+export const RECOVERY_READ_ATTEMPTS =
+  Math.ceil(RECOVERY_SERVICE_WINDOW_MS / RECOVERY_POLL_INTERVAL_MS) + 1
 
 /**
  * 每个会话的唤醒尝试次数上限。
@@ -109,10 +150,16 @@ export const RECOVERY_STARTUP_DELAY_MS = 1_000
  * 「等不到」是**正常分支**（C10）：它只意味着这次恢复做不成，**不**意味着要把 marker
  * 清掉。重试是为了吃掉「服务还没起来」，不是为了保证成功。
  */
-export const RECOVERY_WAKE_ATTEMPTS = 5
+export const RECOVERY_WAKE_ATTEMPTS = 6
 
-/** 两次唤醒尝试之间的等待（毫秒）。5 次 × 300 ms 覆盖到启动后约 1.5 秒。 */
-export const RECOVERY_WAKE_RETRY_MS = 300
+/**
+ * 两次唤醒尝试之间的等待（毫秒）。
+ *
+ * ⚠️ **与次数一起看才有意义**：末次尝试落在 apply 后 `1_000 + (6-1) × 800 = 5_000 ms`，
+ * 越过 C32 实测的 2.8 秒上界。原先的 `5 × 300` 只到 **2 200 ms**（**最后一次之后不再等**），
+ * 比实测上界还早 —— 窗口整段落在可用窗口之内，服务真晚到时五次全灭（文件头 ②）。
+ */
+export const RECOVERY_WAKE_RETRY_MS = 800
 
 /**
  * 写 marker 时显式传给宿主 `fs.writeText` 的**文件沙箱**档位。
@@ -346,6 +393,73 @@ export type RecoveryOutcome =
   | { kind: 'failed'; verdict: string; detail: string }
 
 /**
+ * 一次恢复尝试的**盘上回执**（receipt）——「这次启动到底有没有恢复」的可观测面。
+ *
+ * ## 为什么需要它（文件头 ③ 的实测依据）
+ *
+ * `RecoveryOutcome` 只回到调用方，而调用方（`src/index.ts`）用 `void …` 把它丢掉了；
+ * 之前唯一的留痕是 `ctx.logger(name).info`，而宿主启动期只把 `warn` / `error` 收进
+ * `startup-*.log`、且那个文件**只在启动失败时**才落盘 ⇒ 真机那条 `schtasks → cmd /c`
+ * 的路上，**一条 INFO 在任何地方都不留档**。于是真机事后看到的三样东西
+ * （marker 仍 `armed` / notice 0 条 / 插件 active）**同时兼容**「没跑」「跑了读不到 fs」
+ * 「读了唤醒失败」三条 —— 分不开本身就是缺陷。
+ *
+ * ## 它答的是哪三个问题
+ *
+ * 读这一个文件就能分：
+ * ① **有没有跑** —— 文件带本次启动的时刻戳；只有上一次的旧时间戳 ⇒ 这一轮**真的没跑**；
+ * ② **跑到哪一步** —— `markerReadAttempts` 与 `markerStateAtRead` 说清读了几次、读到的是什么；
+ * ③ **结果是什么** —— `outcome` / `detail` / `failures` 三件对应 `recovered` / `pending` /
+ * `refused` / `failed`，**与 marker 的 `state` 互相独立**（marker 只在成功时被改，
+ * 它因此答不了「失败在哪一步」）。
+ *
+ * ## 什么时候**不**写（刻意：正常启动不许有噪音）
+ *
+ * `idle` 两个分支都不写：`absent` 是「没有待办」，`consumed` 是「已经处理过了」——
+ * 后者的审计价值本来就在 marker 自己身上（`consumed at …` 留痕）。
+ * ⇒ **只有「动了」或「说不清」的终局才落盘**。
+ */
+export interface RecoveryReceipt {
+  /** 回执自身的格式版本（与 marker 的 `version` 是两件事：那份被消费时改，这份被覆盖）。 */
+  version: number
+  /** 这一次恢复**开始**的时刻（ISO 8601）。 */
+  startedAt: string
+  /** 这一次恢复**结束**的时刻（ISO 8601）。 */
+  finishedAt: string
+  /** 终局。**不含 `idle`**（那一格刻意不落盘，见上）。 */
+  outcome: 'recovered' | 'pending' | 'refused' | 'failed'
+  /** 读了几次才拿到**确定答案**（含第一次）。1 = 服务一上来就在。 */
+  markerReadAttempts: number
+  /** 读到时 marker 的状态；读都没成功时缺席。 */
+  markerStateAtRead?: MarkerState
+  /** **根因事实**：这次结束时 marker 真的被标成已消费了吗。 */
+  markerConsumed: boolean
+  /** 唤醒失败逐条（只有 `pending` 非空）。 */
+  failures?: readonly WakeFailure[]
+  /** 一句话结论（英文；与 `RecoveryOutcome.verdict` 同源）。 */
+  detail: string
+}
+
+/** 回执的格式版本。与 `MARKER_VERSION` 是两件事，**不共用**（marker 那份被消费时会被改写）。 */
+export const RECOVERY_RECEIPT_VERSION = 1
+
+/**
+ * 回执的绝对路径：`$DSH_HOME/<包名>/restart/last-attempt.json`。
+ *
+ * ⚠️ **与 marker 同目录、不同文件名**，理由有两条，都不是「顺手」：
+ * ① **B10 的白名单只认「紧跟 home 的首段逐字等于包名」**，所以这一段必须是**字面量**，
+ *    不能写成 `join(dshHome, OWN_NAMESPACE, …)`（那会被保守判红，与 `restart.ts` 的
+ *    `restartMarkerPath` 同一条纪律）；
+ * ② **绝不能复用 marker 那个文件**：marker 是恢复的**输入**，往它身上追加字段会改变
+ *    「读到了但没懂 / 幂等」那两条已实测语义（C28–C32 一格都不许回退）。
+ *
+ * @param dshHome 宿主数据目录（`$DSH_HOME`）。
+ */
+export function recoveryReceiptPath(dshHome: string): string {
+  return join(dshHome, 'dsh-plugin-debugging', 'restart', 'last-attempt.json')
+}
+
+/**
  * 启动期恢复的**唯一入口**。
  *
  * 顺序：读 marker → 判定 → （`recover` 时）逐个唤醒 + 投 notice → **全部成功才**消费。
@@ -367,22 +481,57 @@ export async function recoverRestart(
   // 没有原子性承诺）。这与 `dsh_restart` 兜底那句 stage-blind 的「没开始」是**同一族**
   // 漏改落点（本卡同族自查的第三处）。
   let markerWrite: 'none' | 'attempted' | 'done' = 'none'
+  // 回执要用的两个事实：一个「开始时刻」（证明这一轮**跑过**），一个「读了几次」。
+  const startedAt = ports.now()
+  let markerReadAttempts = 0
+  let markerStateAtRead: MarkerState | undefined
+
+  /** 落盘这一次尝试的回执。**绝不抛、绝不改变结论**（观测面坏了不许反过来搞坏恢复）。 */
+  const writeReceipt = async (
+    outcome: Exclude<RecoveryOutcome, { kind: 'idle' }>,
+    failures?: readonly WakeFailure[],
+  ): Promise<void> => {
+    // ⚠️ `markerConsumed` 只在 `recovered` / `pending` 上有；`refused` / `failed` 那一格
+    // 的答案是「**否**」而不是「不知道」—— 它们都发生在消费之前（硬要求：读不懂不动它）。
+    const consumed = 'markerConsumed' in outcome && outcome.markerConsumed === true
+    await writeRecoveryReceipt(request.dshHome, ports, {
+      version: RECOVERY_RECEIPT_VERSION,
+      startedAt: new Date(startedAt).toISOString(),
+      finishedAt: new Date(ports.now()).toISOString(),
+      outcome: outcome.kind,
+      markerReadAttempts,
+      ...(markerStateAtRead === undefined ? {} : { markerStateAtRead }),
+      markerConsumed: consumed,
+      ...(failures === undefined || failures.length === 0 ? {} : { failures }),
+      detail: outcome.verdict,
+    })
+  }
+
   try {
     if (request.dshHome.trim() === '') {
-      return failed(
+      const outcome = failed(
         'the restart recovery did not run: no $DSH_HOME is known, so the marker cannot be located',
         'dshHome is empty',
         ports,
       )
+      await writeReceipt(outcome)
+      return outcome
     }
 
-    const read = await readRestartMarker(ports.fs, request.dshHome)
+    // ⚠️ **轮询读**，不是单次读（文件头 ①）：`ctx.get('fs')` 在 apply 期取不到，
+    // 单次读到 `unreadable` 就收工会把「服务还没起来」印成「读不到」⇒ 真机零 notice。
+    const read = await readMarkerWithRetries(request.dshHome, ports, (attempts) => {
+      markerReadAttempts = attempts
+    })
     const decision = decideRecovery(read)
+    if (read.status === 'ok') markerStateAtRead = markerState(read.marker)
 
     switch (decision.action) {
       case 'none': {
         if (decision.reason === 'absent') {
           // 安静是**对**的：这里确实什么都没有，留痕只会变成每次启动一条噪音。
+          // ⚠️ `absent` 是**确定答案**（服务可用、文件不在），所以上面的轮询**一次就停**，
+          // 不该有任何等待 —— 正常启动的代价仍然是零。
           return {
             kind: 'idle',
             reason: 'absent',
@@ -390,6 +539,7 @@ export async function recoverRestart(
           }
         }
         // ⚠️ 这一支**必须**与上面分开：marker 在、只是处理过了 —— 它仍是一条审计记录。
+        // （这一格也**不**落 receipt：审计价值在 marker 的 `consumed at …` 上，见类型注释。）
         return {
           kind: 'idle',
           reason: 'consumed',
@@ -398,17 +548,20 @@ export async function recoverRestart(
         }
       }
       case 'refuse': {
-        // **读到了但没懂**：留痕 + 结构化报告，marker 原地不动（给人工看）。
+        // **读到了但没懂**（或读了一路都没读成）：留痕 + 结构化报告 + **盘上回执**，
+        // marker 原地不动（给人工看）。这是「事后能分得开」的关键那一格。
         ports.log(
-          `restart recovery refused (${decision.code}): ${decision.verdict} — remedy: ${decision.remedy}`,
+          `restart recovery refused (${decision.code}) after ${String(markerReadAttempts)} marker read attempt(s): ${decision.verdict} — remedy: ${decision.remedy}`,
         )
-        return {
+        const outcome: RecoveryOutcome = {
           kind: 'refused',
           code: decision.code,
           verdict: decision.verdict,
           remedy: decision.remedy,
           evidence: decision.evidence,
         }
+        await writeReceipt(outcome)
+        return outcome
       }
       case 'recover': {
         const marker = decision.marker
@@ -430,7 +583,7 @@ export async function recoverRestart(
               `restart recovery kept the marker armed: waking ${failure.sessionId} failed after ${String(failure.attempts)} attempt(s): ${failure.reason}`,
             )
           }
-          return {
+          const outcome: RecoveryOutcome = {
             kind: 'pending',
             marker,
             woken,
@@ -438,6 +591,8 @@ export async function recoverRestart(
             markerConsumed: false,
             verdict: `a restart marker is armed and ${String(woken.length)}/${String(targets.length)} session(s) were woken; ${String(failures.length)} could not be woken, so the marker is kept armed and the next startup will try again`,
           }
+          await writeReceipt(outcome, failures)
+          return outcome
         }
 
         markerWrite = 'attempted'
@@ -446,7 +601,7 @@ export async function recoverRestart(
         ports.log(
           `restart recovery delivered the notice to ${String(woken.length)} session(s) and marked the marker consumed (${request.dshHome})`,
         )
-        return {
+        const outcome: RecoveryOutcome = {
           kind: 'recovered',
           marker,
           consumed,
@@ -455,10 +610,88 @@ export async function recoverRestart(
           markerConsumed: true,
           verdict: `the restart notice was delivered to ${String(woken.length)} session(s) and the marker was marked consumed`,
         }
+        await writeReceipt(outcome)
+        return outcome
       }
     }
   } catch (error) {
-    return failed(markerWriteVerdict(markerWrite, messageOf(error)), messageOf(error), ports)
+    const outcome = failed(markerWriteVerdict(markerWrite, messageOf(error)), messageOf(error), ports)
+    await writeReceipt(outcome)
+    return outcome
+  }
+}
+
+/**
+ * 读 marker，**读不到就重试**（文件头 ① 的处置）。
+ *
+ * ## 只有一种读法可重试
+ *
+ * `absent`（文件不在）与 `ok` / `malformed` / `unsupported-version` 都是**确定答案**：
+ * 服务已经可用并给出了结论 ⇒ 立刻返回，不多等一拍。**只有 `unreadable` 会重试** ——
+ * 它同时覆盖「服务还没注册」与「真读不动了」两种情形，两者重试都是安全的
+ * （读是纯的，且拿不到就只会一直拿不到）。
+ *
+ * ## 留痕只留三处（不是每次都留）
+ *
+ * 第一次失败、**失败之后第一次成功**、以及用光次数。三处合起来正好把
+ * 「晚到了但最终读到了」与「一直读不到」在日志上分开 —— 而这正是真机分不开的那两条。
+ *
+ * @param dshHome 宿主数据目录。
+ * @param ports IO 端口。
+ * @param onAttempts 每次尝试后回调（把次数带给上层写回执；用它而不是返回值是为了不重排联合类型）。
+ */
+async function readMarkerWithRetries(
+  dshHome: string,
+  ports: RecoveryPorts,
+  onAttempts: (attempts: number) => void,
+): Promise<MarkerRead> {
+  let last: MarkerRead = { status: 'unreadable', reason: 'the marker was never read' }
+  for (let attempt = 1; attempt <= RECOVERY_READ_ATTEMPTS; attempt += 1) {
+    onAttempts(attempt)
+    last = await readRestartMarker(ports.fs, dshHome)
+    if (last.status !== 'unreadable') {
+      if (attempt > 1) {
+        ports.log(
+          `restart recovery: the marker became readable on read attempt ${String(attempt)}/${String(RECOVERY_READ_ATTEMPTS)}, so the host services were only late, not absent`,
+        )
+      }
+      return last
+    }
+    if (attempt === 1) {
+      ports.log(
+        `restart recovery: the marker could not be read on the first attempt and will be retried up to ${String(RECOVERY_READ_ATTEMPTS)} time(s) within the startup window (${last.reason})`,
+      )
+    }
+    if (attempt < RECOVERY_READ_ATTEMPTS) await ports.sleep(RECOVERY_POLL_INTERVAL_MS)
+  }
+  ports.log(
+    `restart recovery gave up reading the marker after ${String(RECOVERY_READ_ATTEMPTS)} attempt(s) inside the startup window; the marker was left untouched and the next startup will try again (${last.status === 'unreadable' ? last.reason : 'unknown'})`,
+  )
+  return last
+}
+
+/**
+ * 落盘一次尝试的回执。**绝不抛**：观测面坏了不许反过来把恢复搞坏。
+ *
+ * 写不出去只有一格 —— **`fs` 全程不可用**（`restart-fs.ts` 的 `write` 在拿不到服务时抛）。
+ * 那时盘上一个字节都动不了，所以本层只能**再喊一声** `log`；「留痕在盘上」在这一格
+ * **做不到**，如实说，不假装做到。
+ *
+ * @param dshHome 宿主数据目录。
+ * @param ports IO 端口。
+ * @param receipt 回执内容。
+ */
+async function writeRecoveryReceipt(
+  dshHome: string,
+  ports: RecoveryPorts,
+  receipt: RecoveryReceipt,
+): Promise<void> {
+  try {
+    await ports.fs.write(recoveryReceiptPath(dshHome), `${JSON.stringify(receipt, null, 2)}\n`)
+  } catch (error) {
+    ports.log(
+      `restart recovery could not write its own receipt (${messageOf(error)}); the outcome above is still reported through the log line, but this attempt leaves no on-disk record`,
+    )
   }
 }
 
@@ -514,11 +747,18 @@ async function wakeWithRetries(
 /**
  * 收敛一次本层自己的意外（**绝不抛**）。
  *
+ * 返回类型**收窄**到 `failed` 那一支（而不是整个 `RecoveryOutcome`）——
+ * 这样调用方不必再判一次 `kind`，而「兜底一定是失败」这件事由类型守着。
+ *
  * @param verdict 一句英文结论（进结构化报告）。
  * @param detail 机器可读的细节。
  * @param ports IO 端口（用来留痕）。
  */
-function failed(verdict: string, detail: string, ports: RecoveryPorts): RecoveryOutcome {
+function failed(
+  verdict: string,
+  detail: string,
+  ports: RecoveryPorts,
+): Extract<RecoveryOutcome, { kind: 'failed' }> {
   ports.log(`restart recovery failed: ${detail}`)
   return { kind: 'failed', verdict, detail }
 }
@@ -607,6 +847,17 @@ export function createRecoveryChannel(ctx: ContextLike): RecoveryChannel {
  * **退回 console 而不是静默**：这条痕迹是 `refuse` 分支唯一能被人看见的地方
  * （marker 原地不动、结构化报告只回到调用方），做成空操作就等于「静默地没恢复」。
  *
+ * ## 为什么是 `warn` 而不是 `info`（真机实测出来的，不是偏好）
+ *
+ * 宿主启动期那个 exporter **只收 `warn` / `error`**（`dsh-app-boot/lib/index.js` 的 `boot()`：
+ * `levels: { default: 2 }` 且只 push `warn` / `error`），并且 `startup-*.log`
+ * **只在启动失败时**才落盘（只有 `StartupError` 分支把 `messages` 带出去）。
+ * ⇒ 走 `info` 的话，这条留痕在**任何一次正常启动里都不留档** —— 真机那条
+ * `schtasks → cmd /c` 的路上更是连 stderr 都没人接。改用 `warn` 之后，它至少能进
+ * 「本次启动有 warn/error」的那份 `startup-*.log`。
+ * ⚠️ **这一格仍不够**：正常启动不会写那份文件，所以「留痕在盘上」那条只能靠
+ * {@link RecoveryReceipt}，本函数只负责「启动失败时看得见」。
+ *
  * @param ctx 宿主上下文（可以是单测替身）。
  */
 export function recoveryLogOf(ctx: unknown): (line: string) => void {
@@ -614,9 +865,9 @@ export function recoveryLogOf(ctx: unknown): (line: string) => void {
   if (typeof candidate === 'function') {
     try {
       const logger = (candidate as (name: string) => unknown).call(ctx, NOTICE_SOURCE_KIND)
-      const info = (logger as { info?: unknown } | null | undefined)?.info
-      if (typeof info === 'function') {
-        const write = info as (message: string) => void
+      const warn = (logger as { warn?: unknown } | null | undefined)?.warn
+      if (typeof warn === 'function') {
+        const write = warn as (message: string) => void
         return (line: string): void => {
           write.call(logger, line)
         }
@@ -659,14 +910,20 @@ export function createRecoveryPorts(ctx: ContextLike): RecoveryPorts {
  *
  * @param ctx 宿主上下文。
  * @param dshHome 宿主数据目录。
+ * @param portsOverride **只给判据用的注入口**（生产路径不传）：真实端口的
+ *   `sleep` 是 `setTimeout`，而读路径现在会**按 {@link RECOVERY_READ_ATTEMPTS} 轮询**
+ *   ⇒ 不注入的话，测「服务全程不可用」那一条要真等整个窗口。
+ *   ⚠️ 只替换 `sleep` / `now` 是不够的：`createRecoveryPorts(ctx)` 返回的 `fs` 与 `channel`
+ *   都现取服务，**保留**它们才是在测真实适配器（替身只该把「等」这件事变成零）。
  */
 export async function runStartupRecovery(
   ctx: ContextLike,
   dshHome: string,
+  portsOverride?: Partial<RecoveryPorts>,
 ): Promise<RecoveryOutcome> {
   let ports: RecoveryPorts
   try {
-    ports = createRecoveryPorts(ctx)
+    ports = portsOverride === undefined ? createRecoveryPorts(ctx) : { ...createRecoveryPorts(ctx), ...portsOverride }
   } catch (error) {
     const detail = messageOf(error)
     console.warn(`[${NOTICE_SOURCE_KIND}] restart recovery could not be assembled: ${detail}`)
