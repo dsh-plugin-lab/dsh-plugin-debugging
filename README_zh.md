@@ -4,6 +4,10 @@
 
 <h1 align="center">dsh-plugin-debugging</h1>
 
+<p align="center">
+  <img src="assets/banner.jpg" alt="dsh-plugin-debugging：让 DSH Agent 自检自修它身处的运行时" width="600">
+</p>
+
 <div align="center">
   <p><strong>让 DSH agent 自检自修它身处的运行时</strong></p>
   <p><em>Let your DSH agent inspect and fix its own runtime</em></p>
