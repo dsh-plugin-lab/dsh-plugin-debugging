@@ -32,7 +32,16 @@ import {
   signCookie,
 } from '../../src/lib/cookie-sign.ts'
 import { composeDescription } from '../../src/tools/describe.ts'
-import { configFor, depsFor, expectFail, expectOk, run, tempDshHome, writeText } from './helpers.ts'
+import {
+  configFor,
+  depsFor,
+  expectFail,
+  expectOk,
+  renderText,
+  run,
+  tempDshHome,
+  writeText,
+} from './helpers.ts'
 
 /** 一份「有 browser-session 密钥」的凭证文件文本（密钥现造，不是常量）。 */
 function credentialsWithGrant(secret?: string): string {
@@ -225,6 +234,35 @@ describe(SIGN_COOKIE_TOOL, () => {
         30 * 24 * 60 * 60 * 1e3,
       )
     })
+
+    it('成功路径的 L1 是**陈述**：不许指路去拿一个拿不到的值（A4）', async () => {
+      const home = await homeWithCredentials(credentialsWithGrant())
+      const tool = createSignCookieTool(depsFor(configFor(home, { port: 3080 })))
+
+      const data = expectOk(await run(tool, { port: 3080 }))
+      // 病句一「去读宿主已经设好的那个 cookie」：模型没有读浏览器 cookie 的途径，
+      // 而且宿主若已给过有效 cookie，本工具本就不必调。
+      expect(data.verdict).not.toContain('read it from the cookie the host already set')
+      // 病句二「用同一把密钥自己签」：密钥刻意不进任何返回值 ⇒ 模型签不了。
+      expect(data.verdict).not.toContain('sign it yourself')
+      // 说清「值不回到这个通道」，并点明谁才拿得到。
+      expect(data.verdict).toContain('not returned to this channel')
+      expect(data.verdict).toContain('call the signer directly')
+    })
+
+    it('成功路径的下一步不许指向 `dsh_check_auth` 去「确认 cookie 被接受」（A4）', async () => {
+      const home = await homeWithCredentials(credentialsWithGrant())
+      const tool = createSignCookieTool(depsFor(configFor(home, { port: 3080 })))
+
+      const result = await run(tool, { port: 3080 })
+      // `dsh_check_auth` 的参数只有 port / host，它的探测**不发任何凭据** ⇒
+      // 「confirm the signed cookie is accepted」能力上不可能；而 cookie 值压根没返回，
+      // 「把 authority 当 Cookie 头值发出去」本身也不成立（cookie 头是 `name=value`）。
+      expect(Object.hasOwn(result.nextStep ?? {}, 'tool')).toBe(false)
+      expect(result.nextStep).toHaveProperty('manual', true)
+      expect(result.nextStep?.why).toContain('never leaves the signing side')
+      expect(result.nextStep?.why).not.toContain('Cookie header value')
+    })
   })
 
   describe('⚠️ 凭证绝不外泄（本工具存在的全部理由）', () => {
@@ -331,9 +369,20 @@ describe(SIGN_COOKIE_TOOL, () => {
 
       for (const bad of [0, -1]) {
         const failed = expectFail(await run(tool, { port: 3080, maxAgeDays: bad }))
+        // `internal` =「本插件自己的意外 / bug」—— 而这里明明是**输入无效**。
+        // 用 `internal` 会让首行印成 `failed (internal)`、正文却说输入不是正整数：自相矛盾（S5）。
+        expect(failed.kind).not.toBe('internal')
+        expect(failed.kind).toBe('not-configured')
         expect(failed.data.verdict).toContain('no cookie was signed')
+        expect(failed.data.verdict).toContain('maxAgeDays')
         expect(failed.data.key['expiresAt']).toBeUndefined()
       }
+
+      // 头行逐字：不许是 `failed (internal)`（那是 S5 的原始症状）。
+      const badArgs = { port: 3080, maxAgeDays: 0 }
+      const text = renderText(tool, badArgs, await run(tool, badArgs))
+      expect(text).toContain(`[${SIGN_COOKIE_TOOL}] failed (not-configured)`)
+      expect(text).not.toContain('failed (internal)')
       // ⚠️ **小数那条由宿主在参数校验层就拒**（实测报 `"maxAgeDays" must be an integer`），
       // 比我们自己的检查更早一道 ⇒ 它**进不到** `execute`，也就没有 verdict 可断言。
       // 这条断言记的是「那道防线存在」，不是「我们的校验拦住了它」。
@@ -407,6 +456,8 @@ describe(SIGN_COOKIE_TOOL, () => {
         total += description.length
       }
       expect(total).toBeGreaterThan(0)
+      // S5 的配套：描述里要说清下界，否则模型很容易给出 0（参数名只暗示「天数」）。
+      expect(params.properties?.['maxAgeDays']?.description ?? '').toContain('positive')
     })
 
     it('`data` 恰好三键（顶层不许有第四个）', async () => {

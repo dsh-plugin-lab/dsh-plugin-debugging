@@ -282,7 +282,11 @@ nextStep: <why>                         ← manual 支：**不印 `—`**，也�
 1. **`audit` 不进这段文本**（B22 用哨兵断言）。渲染只读 `verdict` 与 `key`。
 2. **L3 只在 `nextStep` 存在时出现**；两支都要能印出来，`manual` 支不印空括号（现状 `nextStep: — <why>` 那种空指代必须消失）。
 3. **截断要明说并给总数**（照 `presentation.d.ts` 的 `truncated` + `total` 判例）：超 `maxKeyLines` 时末行写
-   `<n> more line(s) not shown — the full record is in the session log`。
+   `<n> more line(s) not shown`。
+   ⚠️ **末尾到此为止是有意的分歧，不是漏印** —— `— the full record is in the session log` 那半句**不许加回来**：
+   **不许在模型通道里指向模型够不到的位置** —— 会话日志里 `tool/result` **没有 `value`**（§8.1 的 `[已核]`），
+   被截掉的那些行**任何通道都拿不到**（本仓也没有读会话日志的工具）。B27 按**规则**判这件事（换个同义
+   说法一样红），不按这一行的字面判。
 4. **不再输出整块 JSON**。形状不合法的值 → 退化成一行 `[dsh_x] <stable JSON>`（保持「永远有输出」）。
 5. **B16 的判定范围 = 只看 `verdict:` 与 L2 这些行**，**排除** `[dsh_x] …` 头行与 `nextStep:` 行 ——
    否则两个 fixture 里相同的 `nextStep` 会造成**假红**。这条必须写进红线实现。
@@ -543,7 +547,7 @@ data
 **返回形状**（逐字真源在 `src/lib/restart.ts` 与 `src/tools/dsh_restart.ts`，**不在此抄**）：库半边报 `gates=4/4 passed` + marker 路径 + 「marker 已在任何拉起之前写好」；工具壳报闸门 / 审批 / marker / 拉起 / 退出这几件事。`nextStep` **无**（本进程即将退出）；被闸门拒绝时按 §3 的三层输出，`L3` 给 `dsh_check_effect_mode`。
 **验收**：四道闸**各一条拒绝用例**；真机一条「重启 → 会话被唤醒 → notice 到达发起者」闭环；反向用例「marker 存在但新进程没起来」→ 下次启动仍能恢复或明确报「上次重启未完成」；真机判据由**独立角色**跑，写者不自己验自己（[ARCHITECTURE.md](ARCHITECTURE.md) §8）。
 
-**协作纪律（契约，不是建议）**：`dsh_check_effect_mode` 先行 —— `mode=hot` 且 `hmr=present` → 通常不需要写侧工具 `[已实测]`；`mode=hot` 但 `hmr=absent` → 改 config **必须重启** `[已实测]`；`mode=restart-required` → 走 `dsh_restart`。
+**协作纪律（契约，不是建议）**：`dsh_check_effect_mode` 先行 —— `mode=hot` 且 `hmr=present` → 通常不需要写侧工具 `[已实测]`；`mode=hot` 但 `hmr=absent` → 改 config **必须重启** `[已实测]`；`mode=hot` 且 `hmr=present-conditional`（`disabled:` 是运行时表达式 ⇒ 当时按**可用**处理，条件进 L1/L2）→ **按 `present` 那档走，但结论只在那个表达式求值为启用时成立**，这一档**没有实测**；`mode=restart-required` → 走 `dsh_restart`。
 **拒绝不是失败**：闸门拒绝是设计的一部分，模型应原样报给用户。
 **闸②（别的会话在飞）另有一个显式逃生口 `force: true`**（维护者 2026-10-14 拍板）：
 它**只覆盖闸②** —— ①③④ 是「这件事根本做不成」，不是「用户知情后的选择」，因此**不可绕过**；
@@ -768,7 +772,7 @@ interface ToolResult { content: ContentBlock[]; isError: boolean; meta?: JsonVal
 
 | # | 红线 | 怎么断言（机械判据） |
 |---|---|---|
-| **B16** | **输出里不许有恒定块** | 同一工具用**两份不同 fixture** 各渲染一次，取所有 ≥40 字符的行；**两份都出现的行 → 判红**。**判定范围只看 `verdict:` 行与 L2 行**，**必须排除**：`[tool] …` 头行、`nextStep:` 行（两份 fixture 的 nextStep 合法地相同）、**截断模板行**（`<n> more line(s) not shown …` 是恒定模板，同 n 时误红）。不排除就是假红（§3.1 规则 5）<br>⚠️ **两份 fixture 还必须换环境（各一份临时 home）**：`resolved:` 这类行按环境恒定 ⇒ 共用同一个 home 时必然逐字相同 → **假红**（W1 实测踩到，§3.1 规则 6） |
+| **B16** | **输出里不许有恒定块** | 同一工具用**两份不同 fixture** 各渲染一次，取所有 ≥40 字符的行；**两份都出现的行 → 判红**。**判定范围只看 `verdict:` 行与 L2 行**，**必须排除**：`[tool] …` 头行、`nextStep:` 行（两份 fixture 的 nextStep 合法地相同）、**截断模板行**（`<n> more line(s) not shown` 是恒定模板，同 n 时误红）。不排除就是假红（§3.1 规则 5）<br>⚠️ **两份 fixture 还必须换环境（各一份临时 home）**：`resolved:` 这类行按环境恒定 ⇒ 共用同一个 home 时必然逐字相同 → **假红**（W1 实测踩到，§3.1 规则 6） |
 | **B17** | **下一个工具的参数标识符必须出现** | 对含 `nextStep.args` 的 fixture，断言每个值能在**模型看得到的地方**找到：**`verdict:` 行 / L2 行 ∪ 目标工具自己的描述与参数文本**。⚠️ **范围必须排除 `nextStep:` 行** —— 那一行按格式**本来就会**把 `args` 印出来，不排除则本条**恒真**（redline-verifier 实测确认）。<br>⚠️ **取值面是「看过没有」，不是「这次输出里有没有」**（2026-10-13 修正）：本条的**本意**是「别让模型去用一个它从没见过的**标识符**」（entryId / port / authority / 路径 / 包名）。而 `change:'host-code'` 这种**目标工具自己的封闭枚举**，模型在**那个工具的参数描述里**就读得到 —— 逼它出现在本次输出里是**错的红线**（W1 因此把可派发的工具建议降级成了 `manual`，那是真损失）。所以要扩成上面那条并集。<br>三个例外：`0`/`1`/空串这类到处都在的值不算数；`args` 为空对象时**不适用**（**跳过并计数，不许静默 skip** —— 活跃坑 18） |
 | **B18a** | **`nextStep` 出现时必须带动作** | 断言它属于 §4 的两支之一：`{tool, why}`（`tool` 非空字符串）或 `{manual: true, why}`。**这条是根因**：没有动作的 `nextStep` 在类型上写不出来 |
 | **B18b** | **L3 的 `why` 不许逐字等于 L1** | 断言两者字符串**不相等**。**这条是防御性症状监控**，不是根因判据 —— 与 B18a 拆开正因为「结论恰好等于动作描述」是合法的，而「结论被当下一步复述」是坏的：前者由 B18a 排除，后者由本条报警 |
@@ -780,6 +784,7 @@ interface ToolResult { content: ContentBlock[]; isError: boolean; meta?: JsonVal
 | **B23** | **观察层不许自己写文件** | 在 B10 的扫描上加。**注意它大部分是 B10 的子集**（`[已核]` B10 已扫全 `src/**`，其 `FS_WRITE_NAMES` 已含 `writeFile`/`mkdir`）—— **真实增量只有两条**：① 项目内 helper 名（如 `writeText`），B10 那条「须有 `node:fs` 来源」的规则照不到；② 把判据钉在**观察层闭包**而不是整个 `src/**`。不写明这一点，下一个人会以为 B23 提供了 B10 没有的 fs 覆盖 |
 | **B24** | **`execute` 全路径不抛** | 对**每个工具**注入「底层端口抛异常」的替身（`spawn` / `fetch` / `loader` / `reload` 各来一次），断言 `execute` **返回一个合法的 `ToolResult` 而不是抛出**。判据是 **`ensureToolResult(value) === value`**（恒等 ⇒ 这个值是过了守卫的，不是被合成的兜底），不是「没报错」 |
 | **B26** | **返回值必须可无损落 JSON** | 对每个返回值做**一次 JSON 往返**后断言**深度相等**（`isDeepStrictEqual`，**不是** `toEqual` —— 后者忽略值为 `undefined` 的属性，恰好放过本条要抓的那一类）。抓住四类：`undefined` 值（往返后该键消失）、`NaN` / `±Infinity`（变 `null`）、`-0`（`Object.is` 不等）、循环引用（`stringify` 抛），外加 `Date` / `Map` / 类实例变成别的形状。<br>⚠️ **为什么不能靠 B21 的形状表顶替**（本条存在的理由）：形状表照不到宿主的**逐值**判据。实测（2026-10-13 真机回归）`audit.startupLogs…messages[2].text` 是一个**值为 `undefined` 的自有可枚举属性** —— B21 逐条全绿，宿主却在同一次调用上抛 `ToolOutputError(…, ['value is not lossless JSON'])`，模型**一个字段都拿不到**（不是「少一个字段」，是整个工具不可用）。宿主那条边界的完整清单见 [HOST-CONTRACTS.md](HOST-CONTRACTS.md) **§0**。<br>⚠️ **判据必须是往返 + 深度相等，不是 `toEqual`**（换成 `toEqual` 这条就只剩下面那半在起作用）；<br>⚠️ **并且每条都要断言「返回值**不是**守卫合成的兜底」**（`data.audit.received` 存在即是）：工具自己的 `toOutput()` 在返回前就调过 `ensureToolResult`，所以宿主与本红线拿到的**永远是兜底** —— 而兜底当然无损、也当然过自己的守卫。**只断言「往返能过」是坑 37 的原样形状**（症状消失 ≠ 根因修好）：实测把真机缺陷改回去，B26 仍然全绿 |
+| **B27** | **截断行不许指向模型够不到的位置** | 从渲染文本里**按前缀**取出截断行（`RENDER_TRUNCATED_RE`），断言它**明说并给总数**、且**不含** `UNREACHABLE_POINTERS` 里的任何位置（`session log` 一族 —— 会话日志里没有完整 `data`，见 §8.1）。**为什么禁词按规则判**：逐字断言（`RENDER_TRUNCATED_RE`、各工具测试里的 `toContain`）在「两处同改」时照样绿 —— 把假话换个说法加回来一条都不会红，所以这里钉**规则**不钉字面（`session log` 一族的同义说法一样红）。<br>⚠️ **禁词表是闭集**：换个说法指向**别的**够不到的位置（表外的说法）它抓不到 —— 要新增不可达位置时**同批补表并写理由**。<br>⚠️ **下界**：取不到截断行 ⇒ 判红，不许 skip（§10.0） |
 
 **B24 为什么是红线而不是注释**（维护者 2026-10-13 拍板）：失败形状的承载条件是**契约**，不该只活在注释里。
 

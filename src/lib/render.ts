@@ -17,7 +17,11 @@
  * 三条纪律（都在 §3.1 里，这里只留指针）：
  * - `audit` **不进**这段文本（B22 用哨兵断言）—— 渲染只读 `data.verdict` 与 `table.key(data)`。
  * - L3 只在 `nextStep` 存在时出现；`manual` 支不印 `—`、不印空括号。
- * - 截断要**明说并给总数**（官方的 `truncated` + `total` 判例）。
+ * - 截断要**明说并给总数**（官方的 `truncated` + `total` 判例），但**不许**在截断行里指向
+ *   模型够不到的位置。原先那句「the full record is in the session log」正是反例：会话日志里
+ *   **没有完整 `value`**（宿主 `appendToolResult` 只写 `{turn, step, message, error?, meta?}`，
+ *   见 SHAPE §8.1 的 `[已核]`），本仓也没有任何读会话日志的工具 ⇒ 被截掉的行任何通道都没有，
+ *   那句指引**说了但兑现不了**（由红线 B27 守着，别再换个说法加回来）。
  */
 import type { NextStep, ToolData, ToolResult } from './errors.js'
 import { toolResultProblem } from './errors.js'
@@ -123,7 +127,7 @@ function truncateKeyLines(lines: readonly string[], max: number): string[] {
   const hidden = lines.length - max
   return [
     ...lines.slice(0, max),
-    `${String(hidden)} more line(s) not shown — the full record is in the session log`,
+    `${String(hidden)} more line(s) not shown`,
   ]
 }
 

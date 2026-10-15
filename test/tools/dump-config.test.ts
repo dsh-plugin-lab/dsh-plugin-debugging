@@ -597,6 +597,14 @@ describe('dsh_dump_config', () => {
         args: { profile: 'web' },
         why: expect.stringContaining('retry'),
       })
+      // ⚠️ `schemaDumpTimeoutMs` 是**插件配置字段**，不是本工具的参数（`defineTool` 的
+      // `timeoutMs` 注册期定死，工具 schema 送到模型前只保留 name/description/parameters）
+      // ⇒ 「让模型去调大它」是它永远做不到的指引。判据断的是根因：动作必须指给**人**。
+      const why = (failure.nextStep as { why?: string } | undefined)?.why ?? ''
+      expect(why).toContain('human')
+      expect(why, '超时分支又让模型去调大预算了（模型做不到这件事）').not.toMatch(
+        /raise schemaDumpTimeoutMs/u,
+      )
       // B17：args 里的 profile 必须出现在 L1/L2 里。
       const parts = splitRender(renderText(tool, {}, result))
       const haystack = [parts.verdict ?? '', ...parts.l2].join('\n')
@@ -683,7 +691,8 @@ describe('dsh_dump_config', () => {
       // 默认上限 15 行。
       expect(parts.l2).toHaveLength(15)
       // 截断必须明说，而且**给出被藏起来的条数**（20 + 4 条框架行 = 24 → 藏 9）。
-      expect(text).toContain('9 more line(s) not shown — the full record is in the session log')
+      // ⚠️ 断言**整行逐字**（不是 `toContain`）：`toContain` 是子串判据，句尾再挂半句也照样绿。
+      expect(text.split('\n')).toContain('9 more line(s) not shown')
     })
 
     it('形状不合法的值退化成一行，不抛', async () => {

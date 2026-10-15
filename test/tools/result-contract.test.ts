@@ -415,13 +415,7 @@ describe('契约：三层渲染（旧「渲染层打 evidence」组 → 新形�
   it('截断要**明说**并给总数（超 `maxKeyLines` 时末行是冻结模板）', () => {
     const table: RenderTable<{ port: number }> = { key: () => ['a', 'b', 'c', 'd'], maxKeyLines: 2 }
     const text = renderToolResultText('t', ok(dataFor('v')), table)
-    expect(text.split('\n')).toEqual([
-      '[t] ok',
-      'verdict: v',
-      'a',
-      'b',
-      '2 more line(s) not shown — the full record is in the session log',
-    ])
+    expect(text.split('\n')).toEqual(['[t] ok', 'verdict: v', 'a', 'b', '2 more line(s) not shown'])
   })
 
   it('不声明 `maxKeyLines` 时用默认上限（15）', () => {
@@ -432,7 +426,7 @@ describe('契约：三层渲染（旧「渲染层打 evidence」组 → 新形�
     const text = renderToolResultText('t', ok(dataFor('v')), { key: () => lines })
     const shown = text.split('\n')
     expect(shown.length).toBe(DEFAULT_MAX_KEY_LINES + 3) // 头行 + verdict 行 + 15 行 + 截断行
-    expect(shown.at(-1)).toBe('1 more line(s) not shown — the full record is in the session log')
+    expect(shown.at(-1)).toBe('1 more line(s) not shown')
   })
 
   it('`audit` 的叶子值**不进**模型文本（哨兵；B22 的判据）', () => {

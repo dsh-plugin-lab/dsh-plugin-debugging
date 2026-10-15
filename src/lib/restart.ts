@@ -520,8 +520,11 @@ export function judgeBusySession(input: BusySessionInput): GateDecision {
       passed: false,
       code: 'busy',
       verdict: `refused by the busy-session gate: the busy state could not be determined (${input.busy.reason}), and this tool does not treat an unknown busy state as idle`,
+      // ⚠️ 原话是「等 agent / job 服务可读了再试」—— 而「服务可读了没有」**不是模型能观察的量**
+      // （本插件 8 个工具里没有一个是服务探针）⇒ 模型只能盲重试，再被同一道闸拒。
+      // 改法：把不可观察的那半交给人，留下可兑现的「先让人把它弄可读」。
       remedy:
-        'retry once the agent and job services are readable; interrupting a running turn cannot be undone, so an unknown busy state is a refusal',
+        'the busy state could not be determined in this composition; ask the user to make the agent and job services readable, then call again, because interrupting a running turn cannot be undone and this tool never treats an unknown busy state as idle',
       evidence: [input.busy.reason],
     }
   }
@@ -533,7 +536,10 @@ export function judgeBusySession(input: BusySessionInput): GateDecision {
       code: 'busy',
       verdict:
         'refused by the busy-session gate: the calling session id could not be normalized, so this tool cannot tell the caller apart from the sessions it would interrupt',
-      remedy: 'call again from a session with a valid session id',
+      // 与工具壳的「没有 session id」那条同族：**模型无法选择自己在哪个会话**，
+      // 所以「换一个合法 id 的会话再调」对它不是可执行的动作，交给人。
+      remedy:
+        'ask the user to start the restart from a session with a valid session id; this tool cannot choose the session it runs in',
       evidence: [input.callingSession],
     }
   }
@@ -576,8 +582,12 @@ export function judgeBusySession(input: BusySessionInput): GateDecision {
     passed: false,
     code: 'busy',
     verdict: `refused by the busy-session gate: ${String(blocked.length)} other active source(s) would be interrupted (${listed}), and interrupting a running turn cannot be undone`,
+    // ⚠️ 原话是「等那些跑完再调」—— 但阻塞者是 `job:<id>` / `turn:session-<uuid>` /
+    // `schedule:<id>`，而本插件 8 个工具里**没有任何一个**能列后台作业、看别的会话的回合、
+    // 看定时提醒 ⇒ 模型观察不到它们何时结束，只能盲重试；而盲重试会再被闸②拒、或撞上闸①
+    // 的 60 秒冷却，且模型分不清是哪一道。⇒ 把「等」交给人，只留可兑现的那半。
     remedy:
-      'wait for those to finish and call again, or call again with force: true if you accept that their work is interrupted',
+      'those blockers are other sessions (turns), background jobs or schedules, and this tool cannot watch them finish; ask the user whether to wait or to interrupt them, and calling again with force: true interrupts them',
     evidence: blocked,
   }
 }
@@ -845,7 +855,18 @@ export async function planRestart(request: RestartRequest, ports: RestartPorts):
         verdict: `gates=4/4 passed · marker=${markerPath} · dry run: nothing was written`,
       }
     }
-    await writeRestartMarker(ports.fs, request.dshHome, marker)
+    // ⚠️ **写失败必须单独收敛**（S6 的因果修正）：写已经发出去了，而端口契约只要求
+    // 「失败要抛」、**没有原子性承诺**（见 {@link RestartFsPort.write}）⇒ 部分落盘是可能的。
+    // 所以这一格**不许**说「什么都没写」，也不许把它归到「闸门检查出错」上。
+    try {
+      await writeRestartMarker(ports.fs, request.dshHome, marker)
+    } catch (error) {
+      return {
+        kind: 'failed',
+        verdict: `the restart was not started: the marker write failed (${messageOf(error)}), so nothing was relaunched and the marker may be absent or incomplete on disk`,
+        detail: messageOf(error),
+      }
+    }
     return {
       kind: 'ready',
       dryRun: false,
@@ -856,9 +877,11 @@ export async function planRestart(request: RestartRequest, ports: RestartPorts):
       verdict: `gates=4/4 passed · marker=${markerPath} · marker written before any launch; this half does not start the process, so no new pid exists yet`,
     }
   } catch (error) {
+    // 走到这里说明**还没轮到写 marker**（写那一步有自己的 catch 在上面）——
+    // 于是「什么都没写」在这一格是**结构性成立**的，不再是审查员指出的那句推断。
     return {
       kind: 'failed',
-      verdict: `the restart was not planned: an unexpected error stopped the gate check (${messageOf(error)}), so nothing was written`,
+      verdict: `the restart was not planned: an unexpected error stopped the restart before the marker was written (${messageOf(error)}), so nothing was written`,
       detail: messageOf(error),
     }
   }

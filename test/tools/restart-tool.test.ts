@@ -193,6 +193,26 @@ interface Harness {
 }
 
 /**
+ * 让出**一个宏任务**，把 `dsh_restart` 排到下一 tick 的那次退出等它真的跑完。
+ *
+ * 为什么需要它：成功路径上工具**先返回结论、再退出**（结论必须比退出先到，否则真机上
+ * 那句 verdict 永远落不了盘 —— 2026-10-14 实测）。退出被排进 `setImmediate`，所以
+ * `execute()` resolve 的那一刻 `exitCalls` **还是空的**。
+ *
+ * ⚠️ 所以「退出被调用过」这条断言**必须**在这个 flush 之后断，否则它量的是「还没轮到
+ * 退出」，是**假红**；反过来，只在 flush 之后断，又会漏掉「退出排在了结论之前」那个
+ * 真缺陷 —— **两处都要**：先断 `execute` resolve 时 `exitCalls` 仍为空（结论先到），
+ * 再 flush 后断它变成 `[0]`（退出确实发生）。只有后者会放过原来的 bug。
+ *
+ * @returns 一个 resolve 之后即已让出宏任务的 promise。
+ */
+async function flushDeferredExit(): Promise<void> {
+  await new Promise<void>((resolve) => {
+    setImmediate(resolve)
+  })
+}
+
+/**
  * 造一套夹具。
  *
  * 默认四道闸全绿、审批档 `never`（不问）、拉起成功、退出通道在场。
@@ -365,6 +385,11 @@ describe('dsh_restart · 形状与不抛', () => {
     const failure = expectFail(result)
     expect(failure.data.verdict).toContain('no session id')
     expect(h.launchCalls).toHaveLength(0)
+    // ⚠️ O3：模型**无法选择自己在哪个会话** ⇒ 下一步必须是**人**的动作，
+    // 而不是「换一个带 session id 的会话再调」（那对它不是可执行的动作，重试必然同样失败）。
+    const why = String((failure.nextStep as { why?: string } | undefined)?.why)
+    expect(why, '让模型去换一个会话 —— 它做不到').toContain('ask the user')
+    expect(why).not.toContain('call again from a session that has a session id')
   })
 })
 
@@ -379,6 +404,9 @@ describe('dsh_restart · `ask` 档：只有 allowed-once 算允许', () => {
     expect(h.requestCalls, '没有走审批门').toHaveLength(1)
     expect(h.fs.writes, 'marker 没写').toHaveLength(1)
     expect(h.launchCalls).toHaveLength(1)
+    // 顺序（两条都要）：结论先到、退出后到。少断前一条就放过「退出排在结论之前」那个真缺陷。
+    expect(h.exitCalls, '退出排在了结论之前 ⇒ 真机上 verdict 不会落盘').toEqual([])
+    await flushDeferredExit()
     expect(h.exitCalls).toEqual([0])
     expect(data.key['approval']).toBe('allowed-once')
   })
@@ -403,6 +431,35 @@ describe('dsh_restart · `ask` 档：只有 allowed-once 算允许', () => {
     const rejected = harnessFor(home, { policy: 'ask', outcome: 'rejected' })
     expect(expectFail(await run(rejected.tool, ARGS, execFor())).kind).toBe('cancelled')
   })
+
+  it('`cancelled` 与 `rejected` 的下一步**必须分开**（S4）：取消弹窗 ≠ 拒绝', async () => {
+    const home = await tempDshHome()
+    const whys: string[] = []
+    for (const outcome of ['rejected', 'cancelled'] as const) {
+      const h = harnessFor(home, { policy: 'ask', outcome })
+      const failure = expectFail(await run(h.tool, ARGS, execFor()))
+      whys.push(String((failure.nextStep as { why?: string } | undefined)?.why))
+    }
+    // `rejected` 是明确的拒绝：请用户批准再调。
+    expect(whys[0], 'rejected 的下一步丢了「让用户批准」').toContain('ask the user to approve')
+    // `cancelled` 是用户**取消了弹窗**（没有说「不」）⇒ 同一句会让模型立刻再弹一次。
+    expect(whys[1], 'cancelled 与 rejected 共用同一句 —— 模型会立刻再弹一次').not.toBe(whys[0])
+    expect(whys[1]).toContain('dismissed')
+  })
+
+  it('`unavailable` 的措辞不许把「没拿到值」说成「答了 unavailable」（S4 附带）', async () => {
+    const home = await tempDshHome()
+    const h = harnessFor(home, { policy: 'ask', outcome: 'unavailable' })
+    const failure = expectFail(await run(h.tool, ARGS, execFor()))
+    // 判据面还在（渲染文本里仍要认得出是哪一格）。
+    expect(failure.data.verdict).toContain('unavailable')
+    // ⚠️ 根因：`approvalRequestOf` 在**服务缺席 / 抛异常 / 返回非闭集值**时也归 `unavailable`，
+    // 而那三种**没有 resolve 出任何值** ⇒ 「resolved "unavailable"」比事实肯定。
+    expect(failure.data.verdict, '把「没拿到值」说成了「答了 unavailable」').toContain(
+      'or could not be reached',
+    )
+    expect(failure.message).toContain('or could not be reached')
+  })
 })
 
 // ── 3. `never` 档 ─────────────────────────────────────────────────────────
@@ -418,6 +475,8 @@ describe('dsh_restart · `never` 档：不问，直接执行', () => {
     expect(h.policyCalls, '没读档位就决定了问不问').toHaveLength(1)
     expect(h.fs.writes).toHaveLength(1)
     expect(h.launchCalls).toHaveLength(1)
+    expect(h.exitCalls, '退出排在了结论之前').toEqual([])
+    await flushDeferredExit()
     expect(h.exitCalls).toEqual([0])
     expect(data.key['approval']).toBe('not-required (policy=never)')
     expect(renderText(h.tool, ARGS, result)).toContain('not-required (policy=never)')
@@ -459,6 +518,8 @@ describe('dsh_restart · dryRun 零写零拉起零退出（配一条反空转）
     expectOk(await run(real.tool, ARGS, execFor()))
     expect(real.fs.writes).toHaveLength(1)
     expect(real.launchCalls).toHaveLength(1)
+    // 退出排在结论之后，所以这里要先 flush 再数（否则量到的是「还没轮到退出」）。
+    await flushDeferredExit()
     expect(real.exitCalls).toHaveLength(1)
   })
 
@@ -470,6 +531,28 @@ describe('dsh_restart · dryRun 零写零拉起零退出（配一条反空转）
     expect(data.key['dryRun']).toBe(true)
     expect(data.key['markerWritten']).toBe(false)
     expect(String(data.key['relaunch'])).toContain('bin.js')
+  })
+
+  it('dryRun 的 nextStep **不指向错的工具**（B1：那个工具既没有 dryRun、也不会停宿主）', async () => {
+    const home = await tempDshHome()
+    const h = harnessFor(home, { policy: 'never' })
+    const result = await run(h.tool, { ...ARGS, dryRun: true }, execFor())
+    expectOk(result)
+    const step = result.nextStep as
+      { tool?: unknown; args?: unknown; manual?: unknown; why?: string } | undefined
+    expect(step).toBeDefined()
+    // 判据一（根因）：这一步**没有工具可调** —— 正确的下一步是「再调一次本工具、去掉 dryRun」。
+    // 把这一支改回 `tool: dsh_check_effect_mode` 时，下面两条各自判红。
+    expect(step?.tool, '演练支指向了工具 —— 那个工具没有 dryRun，也不会停任何宿主').toBeUndefined()
+    expect(step?.manual).toBe(true)
+    expect(step?.why).toContain('dsh_restart')
+    expect(step?.why).toContain('dryRun')
+    // 判据二：`change: 'config'` 是**硬编码**的（本工具根本没有 `change` 参数，演练时它
+    // 不知道这次改动是哪一类）⇒ 不许再出现在这一步里。
+    expect(JSON.stringify(step)).not.toContain('change')
+    // 判据三（模型真正读到的那一层）：L3 里不许出现那个只读工具名。
+    const text = renderText(h.tool, { ...ARGS, dryRun: true }, result)
+    expect(text, '演练支的 L3 指向了不会停宿主的只读工具').not.toContain('dsh_check_effect_mode')
   })
 })
 
@@ -544,6 +627,61 @@ describe('dsh_restart · `force` 只覆盖闸②', () => {
     expect(step.manual).toBe(true)
     expect(step.why).toBeTruthy()
   })
+
+  it('闸②的 remedy **可兑现**（B3）：不许让模型「等那些跑完」——它观察不到阻塞者何时结束', async () => {
+    const home = await tempDshHome()
+    const busy: Observed<readonly BusySource[]> = {
+      known: true,
+      value: [{ kind: 'job', jobId: 'job-1', ownerSession: 'session-other' }],
+    }
+    const h = harnessFor(home, { policy: 'never', busy })
+    const result = await run(h.tool, ARGS, execFor())
+    const data = expectOk(result)
+    expect(data.key['code']).toBe('busy')
+    const why = String((result.nextStep as { why?: string } | undefined)?.why)
+    // 判据一：把「等」交给**人**（本插件 8 个工具里没有一个是作业/回合/定时提醒的观察面）。
+    expect(why).toContain('ask the user')
+    // 判据二：可兑现的那半必须留着 —— force 真的会打断它们。
+    expect(why).toContain('force: true')
+    expect(why).toContain('interrupts them')
+    // 判据三（根因）：旧话术必须消失 —— 模型照着「等」做只能盲重试，且分不清撞的是哪道闸。
+    expect(why, 'remedy 让模型去「等」一个它观察不到的量').not.toContain('wait for those to finish')
+    // 阻塞者的**类别**要说出来（job / turn / schedule 是它看得见的三类标签）。
+    expect(why).toContain('background jobs')
+    expect(why).toContain('schedules')
+  })
+
+  it('闸②取不到忙闲时的 remedy 同样可兑现（同族第二处）：不许「等服务可读」', async () => {
+    const home = await tempDshHome()
+    const h = harnessFor(home, {
+      policy: 'never',
+      busy: { known: false, reason: 'services missing' },
+    })
+    const result = await run(h.tool, ARGS, execFor())
+    const data = expectOk(result)
+    expect(data.key['code']).toBe('busy')
+    const why = String((result.nextStep as { why?: string } | undefined)?.why)
+    expect(why).toContain('ask the user')
+    expect(why, '「服务可读了没有」不是模型能观察的量 —— 它只能盲重试').not.toContain(
+      'retry once the agent and job services are readable',
+    )
+  })
+
+  it('拉起失败：verdict 与 why 不许打架（S3：宿主还在跑，不是「去把它起回来」）', async () => {
+    const home = await tempDshHome()
+    const h = harnessFor(home, {
+      policy: 'never',
+      relaunch: { ok: false, reason: 'schtasks exited with code 1' },
+    })
+    const failure = expectFail(await run(h.tool, ARGS, execFor()))
+    expect(failure.kind).toBe('command-failed')
+    expect(failure.data.verdict, 'L1 没说清宿主还在跑').toContain('this host keeps running')
+    const why = String((failure.nextStep as { why?: string } | undefined)?.why)
+    // ⚠️ 根因：宿主**还在跑** ⇒ 下一步不是「把它起回来」（那与 L1 打架，模型会转述成
+    // 「宿主已经没在跑了」），而是「什么时候方便再起」。
+    expect(why, 'why 与 L1 打架').toContain('it is still running')
+    expect(why).not.toContain('start the host again yourself')
+  })
 })
 
 // ── 7. 沙箱被拒要可诊断 ────────────────────────────────────────────────────
@@ -568,6 +706,29 @@ describe('dsh_restart · 文件沙箱拒绝要可诊断', () => {
     // 沙箱拒了 ⇒ 绝不许拉起（否则就是「没有 marker 的重启」）。
     expect(h.launchCalls).toHaveLength(0)
     expect(h.exitCalls).toHaveLength(0)
+  })
+
+  it('非沙箱的写失败 ⇒ 因果是「写 marker 失败」，不是「闸门检查出错」（S6）', async () => {
+    const home = await tempDshHome()
+    const fs = makeFs({
+      failWriteWith: { code: 'FS_IO_ERROR', message: 'FS_IO_ERROR: the disk went away' },
+    })
+    const h = harnessFor(home, { policy: 'never', fs })
+    const failure = expectFail(await run(h.tool, ARGS, execFor()))
+    expect(failure.kind).toBe('internal')
+    // ⚠️ 根因：四道闸**全过**了（走到写那一步才炸）⇒ 不许说「闸门检查出错」。
+    expect(failure.data.verdict, '写失败被归因到闸门检查上了').not.toContain('gate check')
+    expect(failure.data.verdict).toContain('marker write failed')
+    // ⚠️ 也不许断言「什么都没写」：端口契约只要求「失败要抛」，**没有原子性承诺**
+    // ⇒ 部分落盘是可能的。能确定的是「没有拉起」。
+    expect(failure.data.verdict, '写失败却断言「什么都没写」—— 那是端口没承诺的事').not.toContain(
+      'nothing was written',
+    )
+    expect(failure.data.verdict).toContain('nothing was relaunched')
+    // 根因事实：写失败 ⇒ 零拉起、零退出。
+    expect(h.launchCalls).toHaveLength(0)
+    expect(h.exitCalls).toHaveLength(0)
+    expect(h.fs.writes).toHaveLength(0)
   })
 })
 
@@ -717,6 +878,9 @@ describe('dsh_restart · 接线断言（坑 42）', () => {
     expect(fs.writes).toHaveLength(1)
     // 顺序是判据：拉起与退出**被调用时**，marker 已经写完（各 1 次）。
     expect(h.writesAtLaunch).toEqual([1])
+    expect(h.exitCalls, '退出排在结论之前 ⇒ 真机上 verdict 不会落盘').toEqual([])
+    // 结论已到（`execute` resolve）而退出还没发生 ⇒ 退出必然排在下一 tick。
+    await flushDeferredExit()
     expect(h.writesAtExit).toEqual([1])
     expect(h.exitCalls).toEqual([0])
     // 落盘的那份 marker 真的是一份能被读回来的 marker（不是「看着写了」）。
@@ -1153,9 +1317,28 @@ describe('dsh_restart · 描述与 L2', () => {
     expect(text.length).toBeLessThanOrEqual(DESCRIPTION_MAX_CHARS)
     // 三件必须说清的事（判据是「模型看不到会不会做错决定」）。
     expect(text).toContain('cannot reach another instance')
-    expect(text).toContain('ask prompts, never does not')
+    expect(text).toContain('ask prompts, never auto-runs')
     expect(text).toContain('file sandbox')
     expect(RESTART_DESCRIPTION.cost, '行动类工具必须写代价段').toBeTruthy()
+  })
+
+  it('描述必须点明「只在 Windows 上可用」（防模型在非 Windows 上白白调用一次）', () => {
+    const text = composeDescription(RESTART_DESCRIPTION)
+    // ⚠️ 这条事实的**唯一**机器判据 —— 变异实测：把它从描述里去掉，别处**一条都不红**。
+    // 它防的是**白白调用一次**：本工具只有 Windows 计划任务这一条已实测的拉起路线，
+    // `launchCommandFrom` 与 `relaunchViaTaskScheduler` 两处在非 win32 上都会拒绝
+    // （reason 原话 `no relaunch route has been verified on ${process.platform}`）。
+    // 模型该在**调用之前**就知道这件事（坑 7：描述写不好 = 插件不存在），
+    // 而不是撞一次拒绝再回头 —— 那正是「描述层少了路由信号」的代价。
+    expect(text, '描述没说「只在 Windows 上可用」—— 模型会在别的平台上白调一次').toContain(
+      'Windows only',
+    )
+    // 反空转：它必须在 **boundary 段**里（那是「执行前必须知道、且调用结果里学不到」的段），
+    // 不许被挪到别处 —— 只断合成后的 `text` 对「四段随便写哪都行」也绿。
+    expect(RESTART_DESCRIPTION.boundary).toContain('Windows only')
+    // 同一段里的另外两件事实还在（不自动跑 / 写动作还要过文件沙箱）。
+    expect(RESTART_DESCRIPTION.boundary).toContain('ask prompts, never auto-runs')
+    expect(RESTART_DESCRIPTION.boundary).toContain('file sandbox')
   })
 
   it('`keyText` 能喂空对象（守卫合成的兜底就是 `{}`），且不给默认值', () => {
@@ -1207,6 +1390,8 @@ describe('dsh_restart · appExit 缺失：动手之前就拒绝', () => {
     expectOk(await run(h.tool, ARGS, execFor()))
     expect(h.fs.writes).toHaveLength(1)
     expect(h.launchCalls).toHaveLength(1)
+    // 退出排在结论之后 ⇒ flush 之后再数，否则量到的是「还没轮到退出」。
+    await flushDeferredExit()
     expect(h.exitCalls).toEqual([0])
   })
 })
@@ -1321,15 +1506,68 @@ describe('dsh_restart · 命令行对 cmd 元字符加引号', () => {
 // ── 19. 兜底分支的 `key.stage` 按调用点报（低危 1） ────────────────────────
 
 describe('dsh_restart · 兜底分支的 stage 按调用点报', () => {
-  it('marker 写完之后炸 ⇒ stage 是 `relaunch`（不是恒定的 `gates`）', async () => {
+  it('marker 写完之后炸 ⇒ stage 是 `relaunch`，且 L1 说「已开始」而不是「没开始」（B2）', async () => {
     const home = await tempDshHome()
     const h = harnessFor(home, { policy: 'never', relaunchThrows: true })
-    const failure = expectFail(await run(h.tool, ARGS, execFor()))
+    const result = await run(h.tool, ARGS, execFor())
+    const failure = expectFail(result)
     expect(failure.kind).toBe('internal')
     // 顺序是判据：抛之前 marker 已经写完（拉起替身被调用过，且在写之后）。
     expect(h.fs.writes).toHaveLength(1)
     expect(h.launchCalls).toHaveLength(1)
     expect(failure.data.key['stage'], '兜底把「marker 已写完」报成了「还没动手」').toBe('relaunch')
+    // ⚠️ **B2 的根因判据**：这一刻 marker 已在盘上、拉起请求已发出 ⇒ L1 **不许**再说
+    // 「the restart was not started」（那是 stage-blind 的假话）。把兜底那句改回恒定文案，
+    // 下面两条各自判红。
+    expect(failure.data.verdict).not.toContain('the restart was not started')
+    expect(failure.data.verdict).toContain('the restart was started')
+    expect(failure.data.verdict, 'L1 没说清 marker 在盘上').toContain('marker is on disk')
+    // L2 也不许跟着失明：`key` 必须带 marker 已落盘这一格，而且**模型真正读的那一层**
+    // （渲染出来的 L2）里也要看得见 —— 只断原始 `key` 就漏掉了渲染层。
+    expect(failure.data.key['markerWritten'], 'key 里没有 marker 事实 —— L1/L2 一起失明').toBe(true)
+    expect(renderText(h.tool, ARGS, result), 'L2 里看不见 marker 已落盘').toContain(
+      'markerWritten: true',
+    )
+  })
+
+  it('退出通道抛异常 ⇒ **结论照样交付**，而异常**不吞**（同一族的第二格，已按新语义改写）', async () => {
+    const home = await tempDshHome()
+    // 退出通道自己抛。旧语义下这会被 `execute` 的 catch 收敛成结构化 `internal`；
+    // 新语义下结论必须先交付（否则真机上 verdict 落不了盘），所以**结构化失败这条路已经不存在**。
+    const h = harnessFor(home, {
+      policy: 'never',
+      exitChannel: () => {
+        throw new Error('the exit channel exploded')
+      },
+    })
+    // 挂一个临时的未捕获异常监听：退出排进 `setImmediate` 之后，这个抛不再有任何
+    // 收口点（`execute` 已返回），**必须让它响** —— 吞掉就是「宿主退出失败却一声不吭」。
+    const escaped: unknown[] = []
+    const onUncaught = (error: unknown): void => {
+      escaped.push(error)
+    }
+    process.on('uncaughtException', onUncaught)
+    try {
+      const result = await run(h.tool, ARGS, execFor())
+      // ① 结论照样是成功的那句（marker 已写、拉起已排 —— 这三件确实发生了）。
+      const data = expectOk(result)
+      expect(data.key['stage']).toBe('exit')
+      expect(data.key['markerWritten']).toBe(true)
+      expect(data.verdict, '结论必须说清重启已启动').toContain('the restart is under way')
+      // ② 退出确实被调用过（顺序仍在结论之后）。
+      expect(h.exitCalls, '退出排在结论之前').toEqual([])
+      await flushDeferredExit()
+      // ③ 异常浮出来了，且是宿主退出失败那一条 —— 不是被静默吞掉。
+      expect(escaped.length, '退出通道的异常被吞了 ⇒ 宿主会不退出而没人知道').toBeGreaterThan(0)
+      expect(String(escaped[0])).toContain('the exit channel exploded')
+      // ④ 宿主退不掉时的**恢复路径**在设计上已经存在：marker 仍是 armed，
+      //    下次启动会读到它并如实报「这次重启没走完」（`decideRecovery` 那条）。
+      //    这条不断言在内部（那是 task-58 的范围），这里只钉住「marker 还在」。
+      const written = h.fs.content() ?? ''
+      expect(written, '退出失败时 marker 必须留在盘上供下次启动发现').toContain('"state": "armed"')
+    } finally {
+      process.off('uncaughtException', onUncaught)
+    }
   })
 
   it('还没动手就炸 ⇒ stage 仍是 `gates`（同一个字段两格必须分得开）', async () => {
@@ -1339,6 +1577,12 @@ describe('dsh_restart · 兜底分支的 stage 按调用点报', () => {
     expect(failure.kind).toBe('internal')
     expect(failure.data.key['stage']).toBe('gates')
     expect(h.fs.writes).toHaveLength(0)
+    // 反空转：**动手之前**那一格**必须**说「没写」，且 `key` 里不许出现 marker 已落盘
+    // —— 否则上面两条对「所有 stage 都说已开始」也绿。
+    // （这一格走的是计划层的 `failed`，措辞是「the restart was not planned: … nothing was written」。）
+    expect(failure.data.verdict).toContain('nothing was written')
+    expect(failure.data.verdict, '还没动手就说「已开始」').not.toContain('the restart was started')
+    expect(failure.data.key['markerWritten']).toBeUndefined()
   })
 })
 

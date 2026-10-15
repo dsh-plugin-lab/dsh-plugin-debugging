@@ -7,7 +7,9 @@
  *    并进去会让一个**判定型**输出带上凭证 —— 它的 `audit` 会被 spill 落盘。
  * 2. **cookie 本体不进返回值**。契约要求 `data` 是可无损落 JSON 的值，而 `audit` 会被
  *    spill 写到磁盘；凭证进 `audit` = 凭证落盘。所以本工具只报**签发成功与否**、
- *    **绑在哪个 authority**、**cookie 叫什么名**，值由调用方自己持有。
+ *    **绑在哪个 authority**、**cookie 叫什么名** —— 值算完即弃，**只活在签名那一侧**。
+ *    因此模型**拿不到可用的 cookie 值**：谁要用它，谁就得直接调签名器（`lib/cookie-sign.ts`
+ *    导出的 `signCookie` / `cookieHeader`），这条通道读不回来。
  * 3. **只读**（B10）：读一个文件 + 在内存里算 HMAC，**不写**任何东西、不发任何请求。
  *    它不联网 —— 「签出来」与「用上去」是分开的动作，后者由人或浏览器做。
  *
@@ -146,7 +148,7 @@ export function createSignCookieTool(deps: ToolDeps): ToolDefinition {
       },
       maxAgeDays: {
         type: 'integer',
-        description: 'Cookie lifetime in days; omit for the host default of 30.',
+        description: 'Cookie lifetime in days; must be positive (omit for the host default of 30).',
       },
       dshHome: {
         type: 'string',
@@ -230,9 +232,13 @@ async function issueCookie(
   if (maxAgeDays === undefined) {
     return toOutput(
       fail(
-        { kind: 'internal', message: 'maxAgeDays must be a positive safe integer' },
+        // ⚠️ **不是 `internal`**：`internal` 的定义是「本插件自己的意外 / bug」
+        // （`src/lib/errors.ts`），而这里明明是**调用方给的输入无效** —— 用 `internal`
+        // 会让首行印成 `failed (internal)`、正文却说「输入不是正整数」，头行与正文自相矛盾。
+        // 与 `dsh_restart` 对「reason 缺失」的处置同一档（那是本仓既有的先例）。
+        { kind: 'not-configured', message: 'maxAgeDays must be a positive safe integer' },
         {
-          verdict: `no cookie was signed: the requested lifetime is not a positive whole number of days, so there is no valid expiry to bind`,
+          verdict: `no cookie was signed: maxAgeDays must be a positive whole number of days, and the value passed is not one, so there is no valid expiry to bind`,
           key: unsignedKey(resolved),
           audit: {},
         },
@@ -328,15 +334,19 @@ async function issueCookie(
   return toOutput(
     ok(
       {
-        verdict: `a cookie bound to ${authority} was signed with this host's own browser-session key, valid until ${new Date(signed.payload.expiresAt).toISOString()}; its value is deliberately not returned, so read it from the cookie the host already set or sign it yourself from the same key`,
+        verdict: `a cookie bound to ${authority} was signed with this host's own browser-session key, valid until ${new Date(signed.payload.expiresAt).toISOString()}; its value is deliberately not returned to this channel — a human or a local script must call the signer directly, because nothing here can read it back`,
         key,
         // ⚠️ 这里**必须**是空的：`audit` 会被 spill 写到磁盘，凭证进去 = 凭证落盘。
         audit: { file, maxAgeDays },
       },
       {
-        tool: CHECK_AUTH_TOOL,
-        args: { port: resolvedPort.port, host },
-        why: 'send this exact authority as the Cookie header value and re-run the auth check to confirm the signed cookie is accepted',
+        // ⚠️ 原话是「把这个 authority 当 Cookie 头值发出去、再跑 auth 检查确认签名 cookie 被接受」
+        // —— 三处都不成立：① authority（`host:port`）不是 cookie 值（cookie 头是 `name=value`）；
+        // ② `dsh_check_auth` 的探测**不发任何凭据**（`lib/http.ts`），它没有能力确认 cookie 被接受；
+        // ③ 本工具**不返回 cookie 值**，模型手上根本没有可发的东西。
+        // ⇒ 唯一真实的下一步是人的动作，所以这里是 `manual`。
+        manual: true,
+        why: 'the cookie value never leaves the signing side: a human or a local script must call the signer directly and use the Cookie header it produces — this credential-free auth probe cannot verify it',
       },
     ),
   )

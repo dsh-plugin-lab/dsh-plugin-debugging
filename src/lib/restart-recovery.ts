@@ -79,7 +79,9 @@ export const NOTICE_SUMMARY_MAX_CHARS = 120
 /**
  * 「要看现在怎么样」该调的那个工具。
  *
- * 与重启壳拒绝时指的 L3 是**同一个**（`src/tools/dsh_restart.ts` 的 `EFFECT_MODE_TOOL`）：
+ * ⚠️ 它**不再**与重启壳的 `nextStep` 同源：壳的演练支现在说的是「再调一次 `dsh_restart`、
+ * 去掉 `dryRun`」（原来那个指针指向本工具、还硬编码了 `change: 'config'`，已按 B1 改掉），
+ * 闸门拒绝支里只有闸③指 `dsh_dump_config`。这里的指针是**恢复半自己**的判断：
  * 重启的常见理由就是「改了宿主端代码」，起来之后该问的正是「现在生效了吗」。
  */
 export const STATE_TOOL = 'dsh_check_effect_mode'
@@ -210,10 +212,14 @@ export function buildRecoveryNotice(marker: RestartMarker, now: number): Recover
   const at = Date.parse(marker.at)
   const downSeconds = Number.isFinite(at) ? Math.max(0, Math.round((now - at) / 1000)) : undefined
   const facts = [
-    `the host was restarted at ${marker.at}`,
+    // ⚠️ 「请求重启的时刻」**不是**「已重启的时刻」（S5）：写 marker 在**拉起之前**，
+    // 新进程还要等 `delayMs`（默认 10s）才起来。原话 `the host was restarted at …` 把两者
+    // 混成一件，于是 `down for about Xs` 把「延迟窗口 + 存活时间 + 启动耗时」全算进停机
+    // ⇒ **系统性高估**（而且这份 marker 也可能是「写了、拉起失败」的那种）。
+    `a restart was requested at ${marker.at}`,
     downSeconds === undefined
-      ? 'the downtime could not be derived from that timestamp'
-      : `it was down for about ${String(downSeconds)}s before this notice`,
+      ? 'the time since that request could not be derived from that timestamp'
+      : `this notice arrived about ${String(downSeconds)}s after that request`,
     `the recorded reason was: ${marker.reason}`,
     // 覆盖过就说得出来（`decideRecovery` 的 `overridden` 正是为此保留的）。
     ...(marker.force === true
@@ -221,13 +227,19 @@ export function buildRecoveryNotice(marker: RestartMarker, now: number): Recover
       : []),
     // ⚠️ **条件句，不是既成事实**（C31）：这一刻还不知道这次恢复能不能消费掉它。
     'the restart marker is consumed only if every listed session can be woken, as the last step of this recovery; otherwise it stays armed and the next startup tries again (either way it stays on disk as an audit record, it is not deleted)',
+    // 重复投递**如实说出来**（O5）：部分会话唤醒失败时整份 marker 保留（那是硬要求，
+    // 见文件头「代价」一节），于是下次启动会把 notice 再投一次给上次已成功的会话。
+    'this notice can be delivered more than once: if a later startup finds the marker still armed, it is sent again to every listed session',
   ]
-  const text = `[${NOTICE_SOURCE_KIND}] restart recovery: ${facts.join('; ')}. to see the current state, call ${STATE_TOOL}.`
+  // ⚠️ 指针要写清那个工具的**必填参数**（O4）：`dsh_check_effect_mode` 的 `change` 是 required
+  // （四选一），只印工具名会让模型带着空参数去调。
+  const text = `[${NOTICE_SOURCE_KIND}] restart recovery: ${facts.join('; ')}. to see the current state, call ${STATE_TOOL} with the kind of change you made.`
   return {
     text,
     // ⚠️ **不许写 `- marker consumed`**（C31）：投出去的这一刻消费还没发生，
     // 而 marker 保留（pending）时那句话就是假的。
-    summary: boundNoticeSummary(`host restarted at ${marker.at} - restart recovery`),
+    // 同样地，**不许**写「已重启」——那只是「请求重启的时刻」（S5）。
+    summary: boundNoticeSummary(`restart requested at ${marker.at} - restart recovery`),
   }
 }
 
@@ -349,6 +361,12 @@ export async function recoverRestart(
   request: RecoveryRequest,
   ports: RecoveryPorts,
 ): Promise<RecoveryOutcome> {
+  // ⚠️ **marker 写回到哪一步了**：兜底分支的结论要靠这个**事实**分岔，不许恒说
+  // 「marker was not touched」——那个 catch 也盖住 `consumeRestartMarker` 抛异常那一格，
+  // 而写已经发出去了、部分落盘是可能的（`RestartFsPort.write` 只承诺「失败要抛」，
+  // 没有原子性承诺）。这与 `dsh_restart` 兜底那句 stage-blind 的「没开始」是**同一族**
+  // 漏改落点（本卡同族自查的第三处）。
+  let markerWrite: 'none' | 'attempted' | 'done' = 'none'
   try {
     if (request.dshHome.trim() === '') {
       return failed(
@@ -422,7 +440,9 @@ export async function recoverRestart(
           }
         }
 
+        markerWrite = 'attempted'
         const consumed = await consumeRestartMarker(ports.fs, request.dshHome, marker, ports.now())
+        markerWrite = 'done'
         ports.log(
           `restart recovery delivered the notice to ${String(woken.length)} session(s) and marked the marker consumed (${request.dshHome})`,
         )
@@ -438,11 +458,28 @@ export async function recoverRestart(
       }
     }
   } catch (error) {
-    return failed(
-      `the restart recovery stopped on an unexpected error (${messageOf(error)}); the marker was not touched, so the next startup will try again`,
-      messageOf(error),
-      ports,
-    )
+    return failed(markerWriteVerdict(markerWrite, messageOf(error)), messageOf(error), ports)
+  }
+}
+
+/**
+ * 恢复半兜底分支的那句结论 —— **按 marker 写回的状态分岔**。
+ *
+ * 原话恒写 `the marker was not touched`，但那个 catch 也盖住写回失败那一格：写已经发出去了，
+ * 只承诺「失败要抛」而没有原子性承诺 ⇒ 部分落盘是可能的。三态各说各的，不许拿「没动过」
+ * 盖住「写失败了」。
+ *
+ * @param state `none` = 还没轮到写；`attempted` = 写了但没成功返回；`done` = 写成功了。
+ * @param detail 原始异常的一句话描述。
+ */
+function markerWriteVerdict(state: 'none' | 'attempted' | 'done', detail: string): string {
+  switch (state) {
+    case 'done':
+      return `the restart recovery marked the marker consumed and then stopped on an unexpected error (${detail}); the next startup will find it consumed`
+    case 'attempted':
+      return `the restart recovery failed while writing the marker back (${detail}); the marker may be armed, consumed or incomplete on disk, so the next startup may or may not deliver the notice again`
+    case 'none':
+      return `the restart recovery stopped on an unexpected error (${detail}); the marker was not touched, so the next startup will try again`
   }
 }
 
