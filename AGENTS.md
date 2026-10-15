@@ -13,13 +13,49 @@
 - **「只读」纪律只覆盖诊断半边**：写侧改动必须先落决策 —— 见 [.agents/notes/2026-10-13-write-side-tool-boundaries.md](.agents/notes/2026-10-13-write-side-tool-boundaries.md)。**边界与唯一例外见下面「诊断半边保持只读」那一条**；判据才是真源（`test/redlines.test.ts` 的 B10 / B15）。
 - **输出契约 = `{ verdict, key, audit }`**（顶层恰好三键，成功失败同形）。冻结签名见 [docs/SHAPE.md](docs/SHAPE.md) §4.1；`hint` 已删、`evidence` 已并入 `data`；**`error.message` 不进模型文本**（它的角色与 `verdict` 不同，见 SHAPE §4.1 的字段角色表）
 
+## 索引
+
+**先看这里。三条链按「你现在要做什么」分；证据一律在 notes，本文件只留规则。**
+
+| 你现在要 | 去哪 |
+|---|---|
+| 改一处，不知道还要同步什么 | 下面「改动影响路由」 |
+| 遇到一个症状，找对应规则 | 下面「症状 → 条目」 |
+| 核某条规则**凭什么**成立 | [.agents/notes/](.agents/notes/README.md) —— 证据、实测、被否掉的方案都在那里 |
+
+### 改动影响路由
+
+| 你改了 | 同批必须改 |
+|---|---|
+| 工具的名字或数量 | [src/tools/index.ts](src/tools/index.ts) → [docs/SHAPE.md](docs/SHAPE.md) §2 → 红线 B9 |
+| 工具的模型可见文本 | 红线 B14（`src/**`）/ B14b（技能正文）/ B17（描述面） |
+| 技能正文的 frontmatter 或首尾 | [test/redlines.test.ts](test/redlines.test.ts) 的 B12 / B12b、[test/skills/register.test.ts](test/skills/register.test.ts) 的锚点 |
+| 配置字段 | [src/config.ts](src/config.ts) → [docs/SHAPE.md](docs/SHAPE.md) → 两份门面的配置表 |
+| 输出契约 | [src/contracts.ts](src/contracts.ts) → SHAPE §4.1 → 红线 B24 |
+| 依赖范围 | `peerDependencies` **与** devDependencies 同时改（坑 1：`engines.dsh` 没人读） |
+| 门面或 `locale/*.json` | 成对改（两份门面 / 两份 locale） |
+| 任何文档 | 跑 `python "..\scripts\check-links.py" . --fragments --refs`，**错误数必须保持 0** |
+
+### 症状 → 条目
+
+| 症状 | 看 |
+|---|---|
+| 改了配置没生效 | 全局规则「配置会被重读，但**触发者住在 hmr 里**」（坑 34） |
+| 装了插件却像没装 | 坑 1（peer 冲突**静默**）· 坑 12（裸包名解析不到） |
+| 判据全绿，但其实坏了 | 坑 18 · 坑 37 · 坑 40 —— **假绿三兄弟** |
+| 结论看着对，其实读错了对象 | 坑 19 · 坑 20 · 坑 21 · 坑 22 |
+| 本机绿 CI 红（或反过来） | 坑 24 · 坑 25 —— 先问「这条判据在哪个上下文跑」 |
+| 写 `.ps1` 出怪错 | 坑 29（撞自动变量）· 坑 32（BOM）· 坑 38（`edit` 剥 BOM） |
+| 提交时弄脏了别人的活 | 坑 31（`git add -A`）· 坑 36（`reset --hard`） |
+| 目录树里少文件、CI 却说缺 | 坑 23（裸 `lib/` 忽略任意深度） |
+
 ## 验证快照
 
-- **本机**：`npm run check` 全绿；`tsc` 两个配置各 **0 error**；`lint` / `format:check` / `check:release` 全过（2026-10-14 实跑）
-  —— **文件数 / 用例数 / `check:release` 的条数都是会漂的值，一律现查**（`npm run test` 的汇总行、`npm run check:release` 的输出）
+- **本机**：`pnpm run check` 全绿；`tsc` 两个配置各 **0 error**；`lint` / `format:check` / `check:release` 全过（2026-10-14 实跑）
+  —— **文件数 / 用例数 / `check:release` 的条数都是会漂的值，一律现查**（`pnpm run test` 的汇总行、`pnpm run check:release` 的输出）
 - **红线**：覆盖面**以 `test/redlines.test.ts` 里 `describe('B…')` 的闭集为准** —— **不要在这里手抄编号清单，也不要抄用例数**。
   理由（踩过）：抄一次就意味着**每次加红线都得同批改这里**，而漏改的那次就是一句**骗人的假话**（本仓据此把「红线只到 B22」写错过一次）。
-  要个数就去 `npm run test` 看那一行 —— **文件数是稳定的，用例数不是**（并发写者会让它在同一轮里就变）
+  要个数就去 `pnpm run test` 看那一行 —— **文件数是稳定的，用例数不是**（并发写者会让它在同一轮里就变）
 - **CI**：见 [.github/workflows/ci.yml](.github/workflows/ci.yml) 的 `CI Success`（唯一 required check）
 - 上面留的是**跑法 + 形状**；任何会漂的值（用例数、红线条数、行号、宿主版本号）一律现查
 
@@ -41,12 +77,15 @@
 - **改动连带同步点**：谁引用了你改过的路径 / 名字 / 规则，同批改。双语门面（[README.md](README.md)
   与 [README_zh.md](README_zh.md)）与两份 `locale/*.json` 是典型的成对件。
 - **不抄会漂的值**：宿主版本号、计数、行号一律现查；写「形状」，不写「值」。
+- **CI 与本地平台不同**：本机是 Windows，CI 是 ubuntu。**任何写死平台行为的断言都会在 CI 上红**
+  （首次推送就踩过：`probed === true` 那条）。新增平台相关判据时，用显式声明测哪条分支的写法
+  （见 [test/tools/AGENTS.md](test/tools/AGENTS.md)），别在用例里按真实平台分支。详见坑 25。
 - **代码注释写中文；可能到达模型/用户眼里的字符串写英文**（工具 `data` 文本字段、`message` /
   `nextStep.why` / render 文本）。只被实现内部 catch、进不了返回值的字符串不受此限
   （例如测试替身自己的中文 Error）。**这条由 `test/redlines.test.ts` 的 B14 守着。**
 - **改动走 PR，不直推 `main`**（维护者 2026-10-13 指定）。ruleset 里那条 `RepositoryRole` bypass 让直推
   **技术上能过** —— 但那是逃生门，不是常规路径。流程：开分支 → 推 → `gh pr create` → 等 `CI Success` → 合并。
-  本地门禁（`npm run check` / `lint` / `format:check` / `check:release` / 链接校验）照旧在开 PR 前跑完。
+  本地门禁（`pnpm run check` / `lint` / `format:check` / `check:release` / 链接校验）照旧在开 PR 前跑完。
 - **门面的语言切换行与工作区其他插件仓写法一致**（放在居中 div 里的 HTML `<a href>`）。**这曾经是有意的分歧**：
   本仓原先用 Markdown 链接行（`English | 中文` 那种写法）以换取链接校验 **0 警告**，代价是那一行不居中；
   维护者 2026-10-13 要求门面与工作区其他插件仓视觉一致，于是改回 HTML 形。**代价如实记下**：链接校验会把
@@ -60,10 +99,10 @@
 ## 常用命令
 
 ```shell
-npm run check          # typecheck + build + test
-npm run check:release  # 发布态不变量（scripts/check-release.mjs）
-npm run lint           # ESLint
-npm run format:check   # 格式
+pnpm run check          # typecheck + build + test
+pnpm run check:release  # 发布态不变量（scripts/check-release.mjs）
+pnpm run lint           # ESLint
+pnpm run format:check   # 格式
 ```
 
 ```shell
@@ -108,93 +147,23 @@ git diff --check
 
 ## 待办
 
-- [x] **`dsh_restart`：那条缝已补上（2026-10-15）** —— 「工具壳写出的 `armed` marker 被恢复半真消费」**已在真宿主上发生**。
-      形态（四道闸 / 审批门 / marker / 恢复）见 [docs/SHAPE.md](docs/SHAPE.md) §6.1；宿主侧的拉起 / 恢复 / 退出契约见
-      [docs/HOST-CONTRACTS.md](docs/HOST-CONTRACTS.md) §2。
-      **证据（回执 `$DSH_HOME/dsh-plugin-debugging/restart/last-attempt.json`，逐字）**：
-      `outcome: recovered` · `markerStateAtRead: armed` · `markerConsumed: true` ·
-      `detail: the restart notice was delivered to 1 session(s) and the marker was marked consumed`；
-      盘上 `marker.json` 随即变 `consumed`。那份 marker 由**工具壳**写（四道闸 → 审批门 → 写 marker →
-      拉起 → `appExit`，2026-10-14 23:50），**不是探针手工复现** —— 原先欠的正是这一句。
-      ✅ **「同一次运行里串起来」已验**（2026-10-15 真机）：请求 `10:38:05Z` → 新进程 **+11s**（与 `ping -n 11`
-      的 10s 宽限吻合）→ 恢复 `10:39:46–51` → notice `10:39:54` 落进**发起者**会话；回执 `outcome: recovered` ·
-      `markerStateAtRead: armed` · `markerConsumed: true` · `delivered to 1 session(s)`。
-      **时序从 `49401s`（13.7 小时）修成 `103s`** —— 上一版把「恢复很慢」当成了机制，实际那 90 秒在
-      **宿主启动 → 本插件 `apply`** 之间（`apply` 里只等一个 1 秒定时器，我们自己的延时上界 ≤5s）⇒ **不是我们的延时**；
-      但那 90 秒的归因**仍未定**（那次启动没留档）。
-      ⚠️ **仍未被触发的**：回执里 `markerReadAttempts: 1` ⇒ 服务一次就绪，**「服务晚到则轮询」那条路这次又被绕开**
-      （apply 晚了 90 秒，早过了那个「宿主刚起 1–2 秒」的窗口）。
-- [x] **`dsh_restart` 成功路径的 verdict 曾从未落盘 —— 已在真机复验（2026-10-15）**：`exit(0)` 曾排在 `return`
-      之前 ⇒ 模型对一次不可逆动作拿到 `outcome unknown`。已改为把退出排到下一个宏任务（记录走微任务链，先排空），
-      台架判红/变异已验（挪回去 ⇒ 4 红）。**真机判据已过**：逐帧解会话日志，同一个 `callId` 的 `tool/call` 后面跟着
-      **配对的真 `tool/result`**（含那句 verdict）—— **不是** `interrupted-tool-result-*`；对照之下 2026-10-14 那次
-      真重启的同一位置**正是** `interrupted-tool-result-*`（旧缺陷的形状）。⇒ 一条命令、一台宿主，只差代码版本的 A/B。
-      ⚠️ 该修复有一个**刻意的语义后果**：退出通道抛异常时结果已交付，**结构化 `internal` 失败这条路不存在了**；
-      新的落点改成「结论照样到 + 异常不吞 + marker 留在 `armed` 供下次启动报未完成」。
-- [x] **客户端半边（`dsh.client` + `keyed tool.call.toolview`）~~→ 维护者 2026-10-14 拍板：不做~~**
-      → **维护者 2026-10-15 拍板反转：做。**（10-14 那条决策及其理由**保留在此**，记的是「当时为什么」；
-      下文只写反转后的形态与新增代价。）
-      **反转的起因**：要给 `dsh_restart` 做一个配置开关（默认关 + 结构化拒绝，见下方待办），
-      而「配置改动能丝滑生效、不要求重启」需要客户端面来承载那个开关。
-      ⚠️ **10-14 记的三项代价因此全部落地**，实现时逐条对照：
-      ① 新构建产物**要进 `files`** 并过 `check:release`（发布态不变量）；
-      ② keyed 条目要在 call / result **两侧可重放**；
-      ③ **加 `dsh.client` 要重启宿主一次** —— 这是**装上客户端半边**那一次；
-      ⚠️ **但「开关值改动」本身不需要重启**（靠 schema 的 `.volatile()`，宿主侧机制见活跃坑那一族）
-      —— 这两件事**别混**：前者是一次性的安装代价，后者是日常操作的性质。
-      [docs/SHAPE.md](docs/SHAPE.md) §8.5 / §9.2 的「已评估、不做」记录**已随本次反转作废**。
-- [ ] **技能压过用户级同名技能**：已实现（**动态 scope 注入**：技能同时注册进全局层与每个活跃 agent
-      的 preset 作用域，与 `skill-filesystem` 同层 → rank 250 才真正赢）。静态写进 preset 组合的方案
-      **已实测否决**（坏包会让默认 standard 会话建不起来）。决策见
-      [.agents/notes/2026-10-13-skill-registers-twice-dynamic-scope.md](.agents/notes/2026-10-13-skill-registers-twice-dynamic-scope.md)。
-      个人副本**已撤**（2026-10-13，`~/.agents/skills/dsh-plugin-debugging/` 从磁盘删除；维护者指定不碰那个仓库，
-      故未提交未推送）。代价已写进 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §3 ——
-      技能此后**只在装了本插件的 profile 里**可见。
-- [ ] **`SkillReport.scoped` 真机不可观测**（`state.skill` 没有对外暴露面，pluginInventory 也不含插件内部状态）
-      → v1.1 可考虑让本仓自己的某个工具报出「技能半边注册成了没有、几个 agent」，
-      这样「注册了但没生效」这类问题不必靠 winner 反推。
-- [ ] **`SKILL.md` 已解冻**（维护者 2026-10-13 拍板）：技能**跟着插件一起演化**，不再逐字冻结在 v2.1.4。
-      ① **「干预」一节已落地**（纳入写侧 `hot_reload`、派生 `sign_cookie` 与行动 `restart`）；
-      ② **已完成**（2026-10-14）：`SKILL.md` §3.8 首句与 §3.6 提问清单第 2 条、以及
-      [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) 的工具表都改成了「Fiber 状态**能查、但不在 `Config.listConfigs` 里`**
-      —— 插件侧走 `ctx.get('loader')` + `entry.fiber.state`（见活跃坑 19）。
-      **同批改这三处是必须的**：原先「没有查询入口」这句假话有三处落点，只改一处就是「一处一事实」被破。
-      **红线 B12b 已补**（断言「干预」一节存在且非空）—— 之前不补的话「解冻了却没写」是静默的
-      （现有 B12 **不比对 v2.1.4 原件**，只查 frontmatter 合规与正文长度 → 解冻不会让它变红）。
-- [x] **非 Windows 的端口识别** —— **已落地**（Windows / Linux / macOS 三平台；Linux 走 `ss` 两档、
-      macOS 走 `lsof` → `netstat`；方案表在 `src/lib/ports.ts` 的 `portLookupPlan`，别在文档里抄命令名）。
-      **这层能被 CI 真验**（CI 在 ubuntu 上），与「只能本机红线」的项不同。
-      ⚠️ 三值互不重叠：`probed:false`（查不了）/ `listening:false`（没人听）/ `listening:true + unidentified`
-      （有人在听但读不到 pid）。压成两值就是**反向结论**。
-- [ ] **CI 与本地平台不同**：本机是 Windows，CI 是 ubuntu。**任何写死平台行为的断言都会在 CI 上红**
-      （首次推送就踩过：`probed === true` 那一条）。新增与平台相关的判据时，
-      要么按平台分支断言，要么让两种平台的行为都被钉住。
-- [x] **红线批 2b：`B17 / B20a / B20b / B18a / B21 / B24`** —— **六条已全部落地**（2026-10-13 核；
-      真源是 `test/redlines.test.ts` 里 `describe('B…')` 的闭集，规则与逐条判据见 [docs/SHAPE.md](docs/SHAPE.md) §10）。
-      其中 **`B24`** 是 SHAPE §4 说的「契约的承载条件」（`execute` 全路径不抛）。
-      **B17 的取值面是** L1/L2 ∪ 目标工具自己的描述；**空转口清单**见 [docs/SHAPE.md](docs/SHAPE.md) §10.0（不在这里抄条数）。
-- [x] **技术债：收敛重复的测试助手** —— **已收敛**（2026-10-13）。`renderText` / `splitRender` /
-      `sharedSubstrings` 三条各从 5/5/3 份合成 1 份，`test/tools/helpers.ts` 只增不改既有导出。
-      实测净减 **183 行**（此前估的 350–500 与更早的 800–1000 都偏高：这三条助手本体只有 3–18 行，
-      大头是各自的注释，而接收方要一次性付掉定义成本）。**用例数前后未变**，即没有丢断言。
-      ⚠️ **尚余一处**：`test/redlines.test.ts` 里的 `withPlatformRedline` 与 [test/tools/helpers.ts](test/tools/helpers.ts) 的
-      `withPlatform` **语义同构、但不是逐字同构**（2026-10-14 实测三处差异：`fn` 的类型一个是 `() => Promise<T>`、
-      另一个是 `() => Promise<T> | T`；拿不到属性描述符时的错误文案一个英文一个中文；一个 `export` 一个不导出）。
-      收敛时**按「语义同构」判**，别按逐字比对 —— 逐字比对会得出「要改」，而改哪一份都得先定这三处的取舍。
-      且该文件文末「已知限度」第 29 条写着「收敛那笔债时连它一起收」—— 债还了要把那条**删掉**，不是留着。
-      —— **收尾中（2026-10-15 派单）**：连同 `test/tools/timeout-budgets.test.ts` 里那份同源的 `stripComments`
-      （其文件头自述「抄自 redlines 那份」）一并收敛到 [test/tools/helpers.ts](test/tools/helpers.ts)。
-      ⚠️ **两份 `stripComments` 的注释各自记着不同的坑**（一份是「整段删块注释导致后面行号整体前移」、
-      一份是「漏了 `-o` 会假红 / URL 里的 `//` 会吞掉同一行后面的真违规」）—— **合并时两边的实测证据都要留住**，
-      压成一句空话等于把两个教训并成一个。
-      —— **已还（2026-10-15）**：两条 `stripComments` 与 `withPlatformRedline` 全部收敛到 [test/tools/helpers.ts](test/tools/helpers.ts)，
-      用例数收敛前后**未变**（没丢断言）；上面那条「尚余一处」与文末「已知限度」第 29 条**均已删除**。
-      口径与分工见 [test/tools/AGENTS.md](test/tools/AGENTS.md)。
-      ⚠️ 唯一仍内联的是 `test/redlines.test.ts` 里那份 `stripComments` 的**判据语料**（红线要连注释一起剥）——
-      **有意保留的例外**，不是漏网的债。
-- [x] **两条独立复验留下的残余**（都不影响模型决策，方向安全，故未阻塞发布）：
-      ① `resolvedDir` 对 `link:` 包报 realpath，偏离宿主的 `packageDirFromAnchor`（只进 `audit`，不进 `key`）；
-      ② 凭据存在性扫描对 `records` 段内**更深层**的同名键会判 true（需 `grant` + 同名键同时出现才触发）。
+**已完成条目的完整证据已搬去** [.agents/notes/2026-10-15-completed-items-evidence.md](.agents/notes/2026-10-15-completed-items-evidence.md)
+（7 条：marker 恢复闭环、重启 verdict 落盘、客户端半边、非 Windows 端口识别、红线批 2b、测试助手收敛、两条复验残余）。
+**为什么搬**：那 7 条记的是「当时为什么」，而本文件**每个会话都注入** —— 规则层放叙事，等于每次会话都交一遍历史的上下文税。
+
+**还开着的：**
+
+- [ ] **技能压过用户级同名技能 —— 机制已实现，代价仍在**：动态 scope 注入让 rank 250 真正赢；
+      成本是技能此后**只在装了本插件的 profile 里**可见（见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §3）。
+      决策与「静态写进 preset 为何被否决」→ [.agents/notes/2026-10-13-skill-registers-twice-dynamic-scope.md](.agents/notes/2026-10-13-skill-registers-twice-dynamic-scope.md)。
+- [ ] **`SkillReport.scoped` 真机不可观测** —— `state.skill` 没有对外暴露面，pluginInventory 也不含插件内部状态。
+      v1.1 可考虑让本仓某个工具报出「技能半边注册成了没有、几个 agent」，这样「注册了但没生效」不必靠 winner 反推。
+- [x] **`SKILL.md` 冻结**（维护者 2026-10-15 拍板）：技能正文**冻在 0.4.0 那一版**，不再跟着插件演化。
+      理由是收益判断：一轮无背景冷读显示，「问题」里**大部分其实是技能与工具的设计分工**，再改误伤多于修好。
+      冻结声明写在那次提交的提交信息里；正文见 [skills/dsh-plugin-debugging/SKILL.md](skills/dsh-plugin-debugging/SKILL.md)。
+      ⚠️ **本条取代了 2026-10-13 的「解冻」决定**：那条的**推理链**（插件在演化，冻结会让正文说谎）没被推翻，
+      被推翻的是**边际收益** —— 解冻之后的改动已经低于误伤成本。中文初版存档在
+      [skills/dsh-plugin-debugging/archive/2026-10-12-pure-text.md](skills/dsh-plugin-debugging/archive/2026-10-12-pure-text.md)。
 
 ## 活跃坑
 
@@ -325,9 +294,9 @@ git diff --check
     传进去的哈希表会被当成参数数组绑定 —— 报错方向还很偏，看起来像调用方传错了。
     （验证者在本仓连踩三次同族坑：`$args` 撞名、`$PROFILE`、以及请求不带 token 的 `/` 得到 401 ——
     最后那条**不是错**，宿主对无 cookie 的 `/` 返回 401 是**有意的鉴权行为**。）
-30. **`prettier` 对 `.ps1` 的「假红」与坑 18 方向相反**：`npx prettier --check "test/integration/**"`
+30. **`prettier` 对 `.ps1` 的「假红」与坑 18 方向相反**：`pnpm exec prettier --check "test/integration/**"`
     会报 `No parser could be inferred for .ps1`、退出码 2；但本仓自己的门禁**是绿的**
-    （`npm run format:check` 即 `prettier --check .` 对 `.ps1` **跳过**）。
+    （`pnpm run format:check` 即 `prettier --check .` 对 `.ps1` **跳过**）。
     **显式传文件路径**才会踩到，`--check .` 不会。判据要跑**本仓自己的门禁命令**，
     不要自造一条更严格的调用再把它当判据 —— 那会造出「已提交且 CI 一直绿的文件被判红」的假红。
 31. **提交时不许 `git add -A`**（Lead 自己踩的）：本轮验证者正在写
