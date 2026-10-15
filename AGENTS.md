@@ -100,11 +100,13 @@ git diff --check
 
 ## 待办
 
-- [ ] **`dsh_restart`：工具已落地并注册（2026-10-14），剩「真机闭环」+ 一条可达性实测**。
+- [ ] **`dsh_restart`：工具已落地并注册（2026-10-14）；剩下的只有一条缝** —— 「真工具触发 → 重启 → 恢复」没在**同一次**真机运行里串起来跑。
       形态（四道闸 / 审批门 / marker / 恢复）见 [docs/SHAPE.md](docs/SHAPE.md) §6.1；宿主侧的拉起 / 恢复 / 退出契约见
       [docs/HOST-CONTRACTS.md](docs/HOST-CONTRACTS.md) §2。
-      ⚠️ **仍欠两件，都只能在隔离实例上做**：① **`ctx.get('appExit')` 在本插件这一层的可达性未实测**（台账 §2.6 的 E10 仍标 `[无法判定]`）—— 它是退出那一步的前提，**真机闭环前必须钉死**；② 「重启 → 会话被唤醒 → notice 到达发起者」那条闭环没跑。
+      **已经实测过的（别再当成欠账，两边独立）**：① `ctx.get('appExit')` 在本插件这一层的可达性 **`[已实测]`**（台账 §2.6 的 E10，隔离实例 4 次运行 × 6 个采样点）；② 调它真能干净退出、码 0、端口释放（E11）；③ 计划任务那一路逃出宿主 job（§2.2.2 的 [A]，`inHostJob=0`）；④ **恢复半的输入状态**（新进程 + 旧会话日志 + 一份 `armed` marker）⇒ notice 真落进发起者会话的日志（§2.4.1 的 C28–C32）。
+      ⇒ **缺口精确到这一句**：上面 ④ 里那份 marker 是**探针手工复现**的（用本仓自己的 `buildRestartMarker` / `serializeMarker` 落盘），**没有**经过工具壳的「四道闸 → 审批门 → 写 marker → 拉起 → `appExit`」那一段。所以欠的是**那条缝**，不是「整条链没开始」。
       ⇒ **验证方式已定：隔离实例上验，不进 CI**（理由同 [test/integration/README.md](test/integration/README.md) §0：要真起服务、要空闲端口、要 junction）；那条真机闭环**只能是本机红线**。
+      ⚠️ **顺序**：跑它之前必须让 `src/lib/restart*.ts` 与 `src/tools/dsh_restart.ts` 静止 —— 被测物中途被改，那次实测就作废。
 - [x] **客户端半边（`dsh.client` + keyed `tool.call.toolview`）→ 维护者 2026-10-14 拍板：不做**。
       它只影响**人**通道、不影响模型；而代价不小（新构建产物要进 `files` 并过 `check:release`、
       keyed 条目要在 call/result 两侧可重放、加 `dsh.client` **要重启宿主一次**）。
@@ -172,6 +174,11 @@ git diff --check
 5. **5 个身份件不要动**：`.gitattributes`、`.node-version`、`.github/workflows/release-drafter.yml`、
    `.pre-commit-config.yaml`、`.prettierignore`。它们是 `scaffold check` 的比对对象，
    给 `.prettierignore` 加一行都会报 `DIFF`。要加就是**有意的分歧**，得在此处记一句。
+   —— **已记的分歧（迁 pnpm，两个文件）**：`.pre-commit-config.yaml` 把钩子从 `npx --no-install`
+   换成 `pnpm exec`（并加 `--config.verify-deps-before-run=false` —— 不加的话 pnpm 每次跑钩子都会
+   先隐式校验依赖树、等于偷偷装一次东西）；`.prettierignore` 与它的钩子 `exclude` 从
+   `package-lock.json` 换成 `pnpm-lock.yaml`。⇒ **`scaffold check` 会在这两个文件上报 `DIFF`，
+   这是预期的**；另有意的分歧要照这里追加一句，别让 `DIFF` 变成「说不清哪来的」。
 6. **rank 是升序、数值小者胜**；runtime 注册恒为 250 且**无旋钮**。250 压得住 custom(300) 与
    user(400/500)，**压不住** project-dsh(100) / project-agents(200)。且 rank 只在**同一层内**
    比较 —— 最近层的同名条目直接胜出。**被 shadow 是完全静默的**，没有 API 能列出被遮蔽者。
@@ -294,10 +301,13 @@ git diff --check
     注意这与第 16/30 条那类「工具默认行为」的坑不同：**prettier 会跳过 `.ps1`，CI 也不会解析它**
     —— 所以这条**本机与 CI 全绿也照不出来**，只有真拿 5.1 跑一次才现形。
 33. **本仓被以 `link:` 装进 profile 后，宿主会就地跑 pnpm，往仓里写一份 `pnpm-lock.yaml`** ——
-    而本仓的锁文件是 npm 的 `package-lock.json`（单一锁文件原则）。实测：改动 `package.json` 之后
-    那份 pnpm 锁被**重新生成**（时间戳紧跟在编辑之后），所以删掉它会再长出来。
-    处置：`.gitignore` 里忽略 `/pnpm-lock.yaml`（安装方式的副产物，不是本仓的包管理器选择）。
-    **别把它提交进历史** —— 两个锁文件会让人以为本仓用 pnpm，而 CI 走的是 `npm ci`。
+    实测：改动 `package.json` 后那份锁会被重新生成，删掉它会再长出来。**这条的处置方向随包管理器翻转，
+    而文件名不变**：本仓用 npm 时它是**安装方式的副产物**（`.gitignore` 忽略 `/pnpm-lock.yaml` 才对，
+    两个锁文件会让人以为本仓用 pnpm）；**本仓自己改用 pnpm 之后，同一份文件就是唯一的锁文件**，
+    必须进版本控制、由 CI 以 `--frozen-lockfile` 消费。
+    ⇒ 换包管理器时 `.gitignore`、两个 workflow、`.prettierignore`、`.pre-commit-config.yaml`、
+    `scripts/release-guard.mjs` 的非产物清单**必须同批翻**。**漏掉 `.gitignore` 最凶**：锁文件被本地忽略、
+    本机全绿，CI 克隆下来却没有它（同族于第 23 条，用 `git status --ignored --porcelain` 照）。
 34. **「配置会被重读」是真的，但触发者住在 hmr 里** —— 这是本仓最容易被误解的一条机制。
     实测（2026-10-13，**无 hmr** 的隔离实例）：把插件行的 `config.profile` 从 `bench-nohmr` 改成 `bench`，
     **同一进程跨改文件时刻连续 21 个采样点 / 70 秒**，`resolved.profile` **一直是旧值**，且**实例 stderr 全程为空**
