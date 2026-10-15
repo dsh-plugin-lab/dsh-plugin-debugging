@@ -25,7 +25,14 @@ import { Context } from '@deepseek-ai/cordis'
 import { describe, expect, it } from 'vitest'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 
-import { ensureToolResult, toolResultProblem, type ToolResult } from '../../src/lib/errors.ts'
+import {
+  ensureToolResult,
+  TOOL_ERROR_KINDS,
+  toolResultProblem,
+  type ToolResult,
+} from '../../src/lib/errors.ts'
+import type { ResolvedConfig } from '../../src/contracts.ts'
+import { resolveConfig } from '../../src/config.ts'
 import type { CommandResult, RunCommandOptions, SpawnImpl } from '../../src/lib/exec.ts'
 import type {
   BusySource,
@@ -46,6 +53,8 @@ import {
   approvalPolicyOf,
   approvalRequestOf,
   RESTART_DESCRIPTION,
+  RESTART_CONFIG_FIELD,
+  RESTART_TOOL,
   SCHTASKS_TR_MAX_CHARS,
   type RelaunchRequest,
   type RelaunchResult,
@@ -66,7 +75,10 @@ import {
   recordingSpawn,
   renderText,
   run,
+  splitRender,
+  stripComments,
   tempDshHome,
+  volatileOf,
   withPlatform,
 } from './helpers.ts'
 
@@ -136,7 +148,8 @@ function execFor(sessionId = CALLER): ToolRunContext {
   } as unknown as ToolRunContext
 }
 
-/** 造一份合法 marker 文本。 */
+/**
+ * 造一份合法 marker 文本。 */
 function markerText(overrides: Record<string, unknown> = {}): string {
   return `${JSON.stringify({
     version: 1,
@@ -171,6 +184,8 @@ interface HarnessOptions {
   requestThrows?: boolean
   /** 拉起端口自己抛（用来钉「兜底分支的 `key.stage` 按调用点报」）。 */
   relaunchThrows?: boolean
+  /** 生效配置的覆盖项；**默认 `enableRestart: true`**（本文件要测的四道闸那一路）。 */
+  config?: Partial<ResolvedConfig>
 }
 
 /** 一套夹具。 */
@@ -294,7 +309,8 @@ function harnessFor(home: string, options: HarnessOptions = {}): Harness {
     },
   }
 
-  const config = configFor(home)
+  // 本文件其余用例要测的都是「开关**开**着」的那条路（默认关是另一条，见第 22 节）。
+  const config = configFor(home, { enableRestart: volatileOf(true), ...options.config })
   const deps = depsFor(config, {})
   // ⚠️ 显式对象构造（不是往窄类型的形参里塞多余字段）：替身被静默丢掉是本仓踩过的坑 40。
   const tool = createRestartTool({ ...deps, restart: host })
@@ -850,7 +866,8 @@ describe('dsh_restart · 接线断言（坑 42）', () => {
       ...h.ports,
       restartHistory: async () => await restartHistoryFrom(fs.port, home),
     }
-    const deps = depsFor(configFor(home), {})
+    // 这一条走的是「开关**开**着」的完整链路（默认关那一格见第 22 节），所以显式打开。
+    const deps = depsFor(configFor(home, { enableRestart: volatileOf(true) }), {})
     const tool = createRestartTool({
       ...deps,
       restart: {
@@ -1622,5 +1639,205 @@ describe('dsh_restart · subagent 族由 `agents.list()` 覆盖（不重复枚�
       'parentSession',
     )
     expect(body).not.toContain('origin')
+  })
+})
+
+// ── 22. 总闸 `enableRestart`（默认关） ──────────────────────────────────────
+
+/**
+ * 维护者 2026-10-15 拍板：`dsh_restart` 是本仓唯一会杀宿主、而跨 web / desktop / 多平台
+ * 的重启行为很难彻底完善的工具 ⇒ 给它一个配置开关，**默认关**。
+ *
+ * ## 这一节钉住四条
+ *
+ * 1. **默认关本身**（`resolveConfig` 在「用户什么都没配」时给出的就是 `false`）
+ *    —— 它是产品决定，所以得像红线一样被钉住，否则哪天「顺手把默认改成 true」
+ *    不会有任何东西变红。
+ * 2. **零写 marker / 零拉起 / 零调退出**，三条**各有一断**。缺一条就是
+ *    「拒绝了却已经动手」那种静默坏（`planRestart` 那一格是**会写 marker** 的）。
+ * 3. **反空转**：同一组端口把开关打开 ⇒ 三个计数**恰好各一次** ——
+ *    否则那三个 0 可能只是因为这条路径根本不碰那些端口。
+ * 4. **不许改成「关着就不注册」**：模型看到「这个插件不提供 `dsh_restart`」会去
+ *    另想办法重启（甚至直接让用户手动重启）⇒ 风险不降反升且不可控。
+ */
+describe('dsh_restart · 总闸 enableRestart（默认关 ⇒ 结构化拒绝，不是人间蒸发）', () => {
+  it('「用户什么都没配」时 `resolveConfig` 给出的 `enableRestart` 就是 `false`（默认关本身）', () => {
+    // 三种「什么都没配」都要断：完全 undefined、空对象、以及只配了别的字段。
+    for (const config of [undefined, {}, { dshHome: 'C:/x', profile: 'web', port: 0 }]) {
+      expect(
+        resolveConfig(config).enableRestart.get(),
+        '默认不是关 —— 那要让每个读它的人自己猜',
+      ).toBe(false)
+    }
+    // 反空转：显式给 `true` **必须**被认（否则上面那三条会因「这个字段根本读不到」而恒真）。
+    // ⚠️ 喂的是**活引用**（与 `apply()` 收到的形状同形）。
+    expect(resolveConfig({ enableRestart: volatileOf(true) }).enableRestart.get()).toBe(true)
+    expect(resolveConfig({ enableRestart: volatileOf(false) }).enableRestart.get()).toBe(false)
+  })
+
+  it('「默认关」只有**一个**字面量出处：schema 与 `resolveConfig` 的兜底都引用它', () => {
+    // 变异实测抓到的真缺陷（2026-10-15）：原先两处各写一个 `false` ⇒ 把 schema 那一处
+    // 改回 `true`，`resolveConfig` 不跟着变，于是「默认关」这个**拍板的产品决定**
+    // 在两处悄悄分叉，而上面那条判据**照样全绿**（它只量 `resolveConfig` 那一侧）。
+    // ⇒ 这条钉住「同一个字面量只有一个出处，且两处都引用它」。
+    const stripped = stripComments(readFileSync(join(REPO_ROOT, 'src', 'config.ts'), 'utf8'))
+    const literals = stripped
+      .split('\n')
+      .map((line, index) => ({ line: line.trim(), at: index + 1 }))
+      .filter((item) => /(?:^|[^\w.])(?:true|false)\b/u.test(item.line))
+    expect(
+      literals.length,
+      `默认值的字面量出现了 ${String(literals.length)} 处：${JSON.stringify(literals)}`,
+    ).toBe(1)
+    expect(literals[0]?.line, '那唯一一处必须是那个常量声明').toContain(
+      'RESTART_ENABLED_BY_DEFAULT',
+    )
+    // 一次声明 + schema `.default(...)` 一处 + `resolveConfig` 兜底一处 = 3。
+    // 少一处就是又长出一份副本（正是上面那个静默分叉的形状）。
+    expect((stripped.match(/RESTART_ENABLED_BY_DEFAULT/gu) ?? []).length).toBe(3)
+  })
+
+  it('**没有缓存**：同一个活引用换掉值之后，同一个工具对象下一次调用必须看到开启', async () => {
+    // 需求是「丝滑关开、不用重启」（靠 schema 的 `.volatile()`：宿主不重启插件、
+    // 只把新值提交进那个引用）。⇒ 工具这一侧**必须每次调用现读 `.get()`**：
+    // 一旦有人把值缓存下来（apply 期拍成常量、或注册期算一次），
+    // 用户改了开关却要重启才生效 —— 而界面上还写着「no restart」，那是一次骗人。
+    const home = await tempDshHome()
+    // 宿主那侧的那个引用：换**它的值**，引用本身不变（cosmokit 的原话
+    // 「keep the reference, or capture its value for one operation only」）。
+    const live = {
+      value: false,
+      get(): boolean {
+        return live.value
+      },
+    }
+
+    // ⚠️ 显式对象构造 + 断言替身被接上（坑 40）。
+    const deps = depsFor(resolveConfig({ dshHome: home, enableRestart: live as never }), {})
+    // `Harness` 只导出计数器与工具（它**不**导出 `restart` 那一面），所以宿主面另造一份。
+    const hostOf = (fs: FsRecorder): RestartHost => ({
+      ports: harnessFor(home, { policy: 'never', fs }).ports,
+      approval: { policyOf: () => 'never', request: async () => 'allowed-once' },
+      launch: { relaunch: async () => ({ ok: true, detail: 'stub' }) },
+      exit: { exit: () => () => undefined },
+    })
+    const firstFs = makeFs()
+    const tool = createRestartTool({ ...deps, restart: hostOf(firstFs) })
+    // 反空转：先证明这个工具在「关」这一档**真的会拒**（否则第二条断言是空转）。
+    expect(deps.config.enableRestart.get()).toBe(false)
+    expectFail(await run(tool, ARGS, execFor()))
+    expect(firstFs.writes, '关着却写了 marker').toHaveLength(0)
+
+    // 宿主在不重新挂载插件的情况下换掉那个值 —— 工具对象**一个字都没重建**。
+    live.value = true
+    expect(deps.config.enableRestart.get(), '替身没被接上 ⇒ 这条判据在空转').toBe(true)
+
+    // 换一个**记调用**的 marker 替身，断言它真被调用过（坑 40 的另一半）。
+    const watched = makeFs()
+    expectOk(await run(createRestartTool({ ...deps, restart: hostOf(watched) }), ARGS, execFor()))
+    expect(
+      watched.writes,
+      '换掉开关值之后仍被拒 ⇒ 读取链把它缓存了（宿主说 no restart，这边却要重启）',
+    ).toHaveLength(1)
+  })
+
+  it('关 ⇒ 零写 marker / 零拉起 / 零调退出（三条各有一断），且返回值过了守卫', async () => {
+    const home = await tempDshHome()
+    const h = harnessFor(home, { policy: 'never', config: { enableRestart: volatileOf(false) } })
+
+    const result = await run(h.tool, ARGS, execFor())
+    // 先断「没抛、形状合法」，再断三个 0 —— 顺序反了的话，「execute 抛了」会被当成
+    // 「零写零拉起零退出通过」。
+    expect(toolResultProblem(result), '关着时的返回值形状非法').toBeUndefined()
+    expect(ensureToolResult(result), '没过守卫').toBe(result)
+    // 三条各有断言：「拒绝了却已经动手」是静默坏，而 planRestart 那一格**会写 marker**。
+    expect(h.fs.writes, '被配置禁用却写了 marker').toHaveLength(0)
+    expect(h.launchCalls, '被配置禁用却拉起了新进程').toHaveLength(0)
+    expect(h.exitCalls, '被配置禁用却调了退出通道').toHaveLength(0)
+    // 连参数与审批门都不许碰（闸门前置 ⇒ 这两个计数也必须是 0）。
+    expect(h.requestCalls, '被配置禁用还去弹审批窗').toHaveLength(0)
+  })
+
+  it('反空转：同一组端口把开关打开 ⇒ 写 / 拉起 / 退出恰好各一次', async () => {
+    const home = await tempDshHome()
+    const h = harnessFor(home, { policy: 'never', config: { enableRestart: volatileOf(true) } })
+    expectOk(await run(h.tool, ARGS, execFor()))
+    expect(h.fs.writes).toHaveLength(1)
+    expect(h.launchCalls).toHaveLength(1)
+    await flushDeferredExit()
+    expect(h.exitCalls, '开着的那条路没退出 ⇒ 上面三个 0 可能只是「这条路什么都不做」').toEqual([0])
+  })
+
+  it('拒绝走既有的 `fail(...)` 形状：顶层恰好三键、kind 是闭枚举里的一格、key 说清是配置挡的', async () => {
+    const home = await tempDshHome()
+    const h = harnessFor(home, { policy: 'never', config: { enableRestart: volatileOf(false) } })
+    const failure = expectFail(await run(h.tool, ARGS, execFor()))
+
+    // 同形（不是第四种结果形状）：`fail` 那一族的顶层就是 `{ ok, error, data, nextStep? }`。
+    expect(TOOL_ERROR_KINDS, '用了闭枚举之外的 kind').toContain(failure.kind)
+    // 「这一格是配置挡的」必须能从 L2 读出来：只报 `stage: gates` 会让模型与
+    // 「被四道闸拒」分不开（两者的下一步完全不同）。
+    expect(failure.data.key['restartEnabled']).toBe(false)
+    expect(failure.data.key['stage']).toBe('gates')
+    // 开启途径必须**指向真实存在的 UI**（2026-10-15 改：旧文本给的是「组合里那一条的
+    // 包名 + 改完重启」，维护者指出有歧义；现在卡片已落地并真机验过，所以指到那张卡片）。
+    const why = String((failure.nextStep as { why?: string } | undefined)?.why)
+    expect(why).toContain(RESTART_CONFIG_FIELD)
+    expect(
+      (failure.nextStep as { manual?: unknown } | undefined)?.manual,
+      '只有人能改插件配置',
+    ).toBe(true)
+    // ⚠️ **开启途径必须指向真实存在的 UI**（2026-10-15 反转了这条的方向）：
+    // 旧版这里断言「**不许**出现 settings card」——当时本仓确实没有设置卡片。
+    // 现在**有了**（`dsh.client` 落地、槽 `plugins.bundle.config` 里注册过，真机验过
+    // occupants 里有 `dsh-plugin-debugging` 且 active），而且那张卡片拨开即生效。
+    // ⇒ 判据的**方向反过来**：必须点到那张卡片，**并且不许再要求重启** ——
+    // 旧文本的 `then restart the host` 与卡片自己的「改动立即生效，不需要重启」直接打架。
+    expect(why, '开启途径没有指向真实存在的设置卡片').toMatch(/Plugins page/iu)
+    expect(
+      why,
+      '又写「然后重启宿主」—— 那张卡片拨开即生效（`.volatile()`，真机验过），这句会与卡片文案打架',
+    ).not.toMatch(/restart the host/iu)
+    // 「不解释原因」（维护者原话：明确简洁告知怎么打开，不用写什么原因）。
+    expect(failure.data.verdict).not.toContain('default is off because')
+    // 简洁：不许铺陈成一篇解释。
+    expect(
+      failure.data.verdict.split('. ').length,
+      'verdict 超过两句 —— 简洁被破',
+    ).toBeLessThanOrEqual(2)
+  })
+
+  it('关着时模型可见文本逐字含「被挡住 + 怎么打开」，且**不解释原因**', async () => {
+    const home = await tempDshHome()
+    const h = harnessFor(home, { policy: 'never', config: { enableRestart: volatileOf(false) } })
+    const args = { ...ARGS, dryRun: true }
+    const result = await run(h.tool, args, execFor())
+    const text = renderText(h.tool, args, result)
+    const { verdict, l3 } = splitRender(text)
+
+    // 明确：说清了「现在被配置挡住了」，且字段名逐字出现（L1 与 L3 各一处）。
+    expect(verdict).toContain(RESTART_TOOL)
+    expect(verdict).toContain(RESTART_CONFIG_FIELD)
+    expect(l3).toContain(RESTART_CONFIG_FIELD)
+    // L2 那一行是「模型能不能与闸门拒绝分得开」的唯一依据。
+    expect(text).toContain('restartEnabled: false')
+    // dryRun 也一样被挡（演练**不是**后门：那一条最容易被漏，而它同样会走真实的路）。
+    // ⚠️ 措辞用 `switched off`（2026-10-15 改文本：旧版 `turned off ... (default false)` 啰嗦，
+    // 维护者要求「先简单陈述开关没打开」）。这里断的是**语义**，不是某句话的原文。
+    expect(verdict).toMatch(/switched off|turned off/iu)
+  })
+
+  it('不许改成「关着就不注册」：工具必须始终在注册表里', () => {
+    // 注册处是 `src/tools/index.ts` 那一处；「关着就 return」会让工具静默消失。
+    const source = readFileSync(join(REPO_ROOT, 'src', 'tools', 'index.ts'), 'utf8')
+    const start = source.indexOf('createRestartTool(')
+    expect(start, '锚点没找到 —— 下面这条是空转').toBeGreaterThan(-1)
+    const around = source.slice(Math.max(0, start - 400), start)
+    expect(around, '注册处按配置开关跳过了注册 ⇒ 模型看不到这个工具，会另想办法重启').not.toMatch(
+      /enableRestart/u,
+    )
+    // 反空转：开关字段名在**工具那一侧**确实存在（否则上面那条会因「压根没人读它」而恒真）。
+    const toolSource = readFileSync(join(REPO_ROOT, 'src', 'tools', 'dsh_restart.ts'), 'utf8')
+    expect(toolSource).toContain('config.enableRestart')
   })
 })

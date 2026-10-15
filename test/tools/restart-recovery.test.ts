@@ -84,6 +84,9 @@ function markerFixture(overrides: Partial<RestartMarker> = {}): RestartMarker {
     reason: 'the plugin code changed',
     at: AT,
     sessions: ['session-a'],
+    // 默认**发起者就是名单里那一个**：于是「发起者拿到 reason 原文」这条走默认值，
+    // 而「不是发起者」那几条用例显式改掉它，两条路都真跑到。
+    initiator: 'session-a',
     state: 'armed',
     trace: ['restart-loop=pass'],
     ...overrides,
@@ -403,7 +406,7 @@ describe('lib/restart-recovery · 唤醒失败 ⇒ 保留 marker，下次再试'
 
 describe('lib/restart-recovery · notice 只放事实 + 指针', () => {
   it('含四件事实与一个指针；**不含**任何「请继续」话术', () => {
-    const notice = buildRecoveryNotice(markerFixture(), NOW)
+    const notice = buildRecoveryNotice(markerFixture(), NOW, 'session-a')
 
     expect(notice.text).toContain(AT) // 什么时候**请求**的重启
     expect(notice.text).toContain('about 12s after that request') // 距那次请求多久
@@ -433,7 +436,7 @@ describe('lib/restart-recovery · notice 只放事实 + 指针', () => {
   })
 
   it('不塞状态快照：正文里没有任何「字段=值」式的现状读数', () => {
-    const notice = buildRecoveryNotice(markerFixture(), NOW)
+    const notice = buildRecoveryNotice(markerFixture(), NOW, 'session-a')
     const snapshot = /\b(agents|plugins|bundles|sessions|hmr|mode|profile|loaded)\s*=/iu
     expect(notice.text).not.toMatch(snapshot)
     // 自证：这种读数真的会被认出来。
@@ -441,8 +444,8 @@ describe('lib/restart-recovery · notice 只放事实 + 指针', () => {
   })
 
   it('覆盖过就说出来（marker 里的 force 留痕不许在恢复时消失）', () => {
-    const plain = buildRecoveryNotice(markerFixture(), NOW)
-    const forced = buildRecoveryNotice(markerFixture({ force: true }), NOW)
+    const plain = buildRecoveryNotice(markerFixture(), NOW, 'session-a')
+    const forced = buildRecoveryNotice(markerFixture({ force: true }), NOW, 'session-a')
     expect(forced.text).toContain('forced')
     expect(forced.text).not.toBe(plain.text)
     // 反空转：没覆盖过的那份**不许**背这句。
@@ -450,7 +453,7 @@ describe('lib/restart-recovery · notice 只放事实 + 指针', () => {
   })
 
   it('`at` 解析不出来 ⇒ **不编**停机时长，而是把「推不出来」写成事实并原样带出时间戳', () => {
-    const notice = buildRecoveryNotice(markerFixture({ at: 'not-a-timestamp' }), NOW)
+    const notice = buildRecoveryNotice(markerFixture({ at: 'not-a-timestamp' }), NOW, 'session-a')
     expect(notice.text).toContain('could not be derived')
     expect(notice.text).not.toContain('after that request')
     // 原样带出去，人才查得到（不许吞掉那个看不懂的值）。
@@ -461,7 +464,7 @@ describe('lib/restart-recovery · notice 只放事实 + 指针', () => {
     // 真机实测过的那一格：marker 留在 `armed`，而投出去的 `summary` 写着
     // `host restarted at <at> - marker consumed` ⇒ 通知与盘上状态不符。
     // `summary` 是客户端折叠行上唯一能被人看见的那一句，所以它**不许**下这个断言。
-    const notice = buildRecoveryNotice(markerFixture(), NOW)
+    const notice = buildRecoveryNotice(markerFixture(), NOW, 'session-a')
     expect(notice.summary, 'summary 断言了「已消费」').not.toMatch(/\bconsumed\b/iu)
     expect(notice.summary).toContain('restart recovery')
     // S5：`summary` 里也不许写「已重启」（它只是「请求重启的时刻」）。
@@ -493,7 +496,7 @@ describe('lib/restart-recovery · notice 只放事实 + 指针', () => {
   })
 
   it('`summary` 非空、单行、≤120（C22：否则人看不见它是一行 notice）', () => {
-    const notice = buildRecoveryNotice(markerFixture(), NOW)
+    const notice = buildRecoveryNotice(markerFixture(), NOW, 'session-a')
     expect(notice.summary.trim().length).toBeGreaterThan(0)
     expect(notice.summary).not.toContain('\n')
     expect(notice.summary.length).toBeLessThanOrEqual(NOTICE_SUMMARY_MAX_CHARS)
@@ -503,7 +506,7 @@ describe('lib/restart-recovery · notice 只放事实 + 指针', () => {
   })
 
   it('超长 `at` ⇒ summary 被截到 ≤120 而不是溢出（宿主会把它放折叠行上）', () => {
-    const long = buildRecoveryNotice(markerFixture({ at: 'x'.repeat(500) }), NOW)
+    const long = buildRecoveryNotice(markerFixture({ at: 'x'.repeat(500) }), NOW, 'session-a')
     expect(long.summary.trim().length).toBeGreaterThan(0)
     expect(long.summary.length).toBeLessThanOrEqual(NOTICE_SUMMARY_MAX_CHARS)
     expect(long.summary.endsWith('...')).toBe(true)
@@ -533,6 +536,68 @@ describe('lib/restart-recovery · notice 只放事实 + 指针', () => {
   })
 })
 
+describe('lib/restart-recovery · notice 的收件人（`reason` 只发给发起者）', () => {
+  const REASON = 'the plugin code changed'
+
+  it('发起者拿到 `reason` 原文', () => {
+    const notice = buildRecoveryNotice(markerFixture({ initiator: 'session-a' }), NOW, 'session-a')
+    expect(notice.text).toContain(`the recorded reason was: ${REASON}`)
+  })
+
+  it('别人发起的 ⇒ 该会话**拿不到** `reason`，但知道「不是我发起的」', () => {
+    const notice = buildRecoveryNotice(markerFixture({ initiator: 'session-a' }), NOW, 'session-b')
+    expect(notice.text, '串话：reason 发给了不是发起者的会话').not.toContain(REASON)
+    expect(notice.text).toContain('another session requested this restart')
+  })
+
+  it('marker 没记发起者（老 marker）⇒ **谁都不发**，且说明是「没记」而非「别人发起」', () => {
+    const legacy = markerFixture()
+    delete legacy.initiator
+    const notice = buildRecoveryNotice(legacy, NOW, 'session-a')
+    // ⚠️ 缺席**不许**退化成「那就发给所有人」—— 那正是要消除的串话。
+    expect(notice.text, '串话：老 marker 把 reason 广播了').not.toContain(REASON)
+    expect(notice.text).toContain('this marker does not record which session requested the restart')
+    // 三值不许压成两值：「没记」与「别人发起」必须是**两句不同的话**。
+    expect(notice.text).not.toContain('another session requested this restart')
+  })
+
+  it('三个分支的正文**互不相同**（防空转：不能三条渲染成同一句）', () => {
+    const toInitiator = buildRecoveryNotice(markerFixture(), NOW, 'session-a')
+    const toOther = buildRecoveryNotice(markerFixture(), NOW, 'session-b')
+    const legacy = markerFixture()
+    delete legacy.initiator
+    const toUnknown = buildRecoveryNotice(legacy, NOW, 'session-a')
+
+    const texts = [toInitiator.text, toOther.text, toUnknown.text]
+    expect(new Set(texts).size, '两个分支渲染成了同一句 —— 判据在空转').toBe(3)
+    // 共有的事实**一个都不许少**：改的是 reason 那一格，不是把别的删掉。
+    for (const text of texts) {
+      expect(text).toContain(AT)
+      expect(text).toContain('about 12s after that request')
+      expect(text).toContain(STATE_TOOL)
+      expect(text).toContain('delivered more than once')
+    }
+  })
+
+  it('投递层面：两个被中断的会话收到**不同**的 notice（一个含 reason、一个不含）', async () => {
+    const host = harness({
+      marker: {
+        text: serializeMarker(
+          markerFixture({ sessions: ['session-a', 'session-b'], initiator: 'session-a' }),
+        ),
+      },
+    })
+    const outcome = mustRecover(await recoverRestart({ dshHome: HOME }, host.ports))
+
+    expect(outcome.kind).toBe('recovered')
+    expect(host.notices, '没给两个会话各投一条').toHaveLength(2)
+    expect(host.notices[0]?.text, '发起者没拿到 reason').toContain(REASON)
+    expect(host.notices[1]?.text, '串话：reason 发给了别人').not.toContain(REASON)
+    // 记录也要如实：每人一条，不是一个单数槽描述其中一个。
+    expect(outcome.notices.map((entry) => entry.sessionId)).toEqual(['session-a', 'session-b'])
+  })
+})
+
 describe('lib/restart-recovery · 顺序与消费', () => {
   it('全部唤醒并投递成功之后才写回 `consumed`（事件序列里 consume 在最后）', async () => {
     const host = harness({
@@ -547,8 +612,12 @@ describe('lib/restart-recovery · 顺序与消费', () => {
     expect(outcome.markerConsumed).toBe(true)
     expect(host.fs.markerWrites()).toHaveLength(1)
     expect(host.fs.markerWrites()[0]?.path).toBe(restartMarkerPath(HOME))
-    // 投出去的就是那条 notice（不是另造一份）。
-    expect(outcome.notice).toEqual(host.notices[0])
+    // 投出去的就是那份 notice（不是另造一份），且**每个会话各一条**。
+    // ⚠️ 这条原来断的是单数 `outcome.notice`。`reason` 改成「只发给发起者」之后，
+    // notice 变成「每人一条」，单数槽只能描述其中一个收件人 —— 那是**说谎的形状**。
+    expect(outcome.notices.map((entry) => entry.sessionId)).toEqual(['session-a', 'session-b'])
+    expect(outcome.notices[0]?.notice).toEqual(host.notices[0])
+    expect(outcome.notices[1]?.notice).toEqual(host.notices[1])
 
     // 盘上那份真的成了 `consumed`，且 `at` **原样**（审计事实不是文件修改时间）。
     const onDisk = parseMarker(host.fs.stored() ?? '')

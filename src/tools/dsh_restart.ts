@@ -90,6 +90,14 @@ import {
 export const RESTART_TOOL = 'dsh_restart'
 
 /**
+ * 总闸那个配置字段名（**逐字**取自 `src/config.ts` 的那个 `Config` 字段）。
+ *
+ * 它的字面量**只有这一处** —— 它要逐字进模型可见文本，而抄第二遍就意味着
+ * 「改了字段名、模型还在教用户改一个不存在的东西」（本仓「一处一事实」那一族）。
+ */
+export const RESTART_CONFIG_FIELD = 'enableRestart'
+
+/**
  * 本工具的工作量档：**快档**。
  *
  * 它读两个小文件（profile 清单 + marker）、问一次宿主服务、跑两条 `schtasks` ——
@@ -302,6 +310,14 @@ export interface RestartKey {
   forced?: true
   /** 写 marker 用的文件沙箱档位。 */
   sandbox?: string
+  /**
+   * 这次调用看到的总闸档位（**只在被拒的那一格出现**）。
+   *
+   * 为什么必须单列而不是并进 `stage`：被配置禁用与被四道闸拒**都**是
+   * `stage: 'gates'`，而两者的下一步完全不同（一个要改配置、一个等冷却）。
+   * 只报 `stage` 就是让模型从「不知道」里猜 —— 而 L2 是它唯一能读的那一层。
+   */
+  restartEnabled?: boolean
   /** 这次调用实际用的是哪份配置。 */
   resolved?: EffectiveConfigBlock
 }
@@ -330,6 +346,18 @@ export function createRestartTool(deps: RestartToolDeps): ToolDefinition {
       let stage: RestartStage = 'gates'
       try {
         const config = deps.config
+
+        // ── ⓪ 总闸（插件配置 `enableRestart`，**默认关**）──────────────────────
+        // 刻意放在**一切之前**，连参数解析与四道闸都不碰：这一格要能说清
+        // 「零写 marker、零拉起、零调退出」，而那三个计数**只可能**由
+        // 「一行都没往下走」保证 —— 任何「先做一点再拒绝」都会让其中之一非零。
+        //
+        // ⚠️ **不许改成「关着就不注册」**（维护者 2026-10-15 拍板）：模型看到
+        // 「这个插件不提供 `dsh_restart`」会去另想办法重启、甚至直接让用户手动重启
+        // ⇒ 风险不降反升且不可控；而「工具静默消失」正是本仓
+        // 「别把不知道印成结论」那一族。所以它**必须明说自己被挡住了**。
+        if (deps.config.enableRestart.get() !== true) return toOutput(disabledByConfig(config))
+
         const emptyHome = assertResolvedDshHome(config)
         if (emptyHome !== undefined) return toOutput(emptyHome)
 
@@ -760,6 +788,59 @@ function approvalRemedy(outcome: Exclude<RestartApprovalOutcome, 'allowed-once'>
     case 'rejected':
       return { manual: true, why: 'ask the user to approve the restart, then call again' }
   }
+}
+
+// ── 总闸（配置开关） ───────────────────────────────────────────────────────
+
+/**
+ * 被配置禁用时的结构化拒绝（维护者 2026-10-15 拍板的默认关那一支）。
+ *
+ * ## 为什么走 `fail(...)` 而不是 `ok(...)`
+ *
+ * SHAPE §6.1 写「**闸门拒绝不是失败**」，而这一格**不是闸门**：
+ * 闸门是「这套规则下这次不该做」，而这一格是「这个动作现在根本不由本工具提供」——
+ * 模型该做的是**改配置**，不是把坏消息转述给用户。所以用既有的 `fail` 那一族，
+ * `kind: 'not-configured'`（闭枚举里已有的：配置不足以执行 ⇒ 先补配置）。
+ * ⇒ **不是第四种结果形状**：`{ verdict, key, audit }` 顶层仍恰好三键，与既有失败路径同形。
+ *
+ * ## 文本的三条纪律
+ *
+ * 1. **明确**：说清「现在被配置挡住了」，并把字段名**逐字**带出去（用户照着改得动）；
+ * 2. **简洁**：两句，不铺陈；
+ * 3. **不解释原因**（维护者原话：「明确简洁告知怎么打开，不用写什么原因」）——
+ *    所以 L1 与 `nextStep.why` 都**不写**为什么默认关。
+ *
+ * ⚠️ **不许出现「配置页 / settings card」**：本仓**没有**设置卡片（README 两语的门面
+ * 都写着「这几个字段属于插件在 profile 组合里的配置」）。指向一个不存在的 UI
+ * 就是本仓最重的那一类缺陷（说了但不可兑现）。
+ *
+ * @param config 生效配置（已解析；`enableRestart` 必填，默认关）。
+ */
+function disabledByConfig(config: ResolvedConfig): ToolFail<RestartKey> {
+  return fail(
+    {
+      kind: 'not-configured',
+      message: `dsh_restart is disabled by the plugin config field ${RESTART_CONFIG_FIELD}`,
+    },
+    {
+      verdict: `nothing was restarted: ${RESTART_TOOL} is switched off (${RESTART_CONFIG_FIELD}), and it stays registered so it can say so`,
+      key: { stage: 'gates', restartEnabled: false, resolved: effectiveConfig(config) },
+      audit: { configField: RESTART_CONFIG_FIELD, default: false },
+    },
+    {
+      // `manual` 支：**只有人**能改插件配置（模型改不动 —— 与 `timeoutMs` 那一族同一条
+      // 纪律，`dsh_check_effect_mode.ts` 里已有先例），所以这一格必须走人动作。
+      //
+      // ⚠️ 措辞要求（维护者 2026-10-15 指出旧版有歧义后改写）：
+      // - **指到真实存在的地方**：本插件在 Plugins 页有一张设置卡片（`dsh.client` 已落地，
+      //   槽 `plugins.bundle.config` 里注册过、真机验过），所以「去那张卡片打开」是**可兑现**的；
+      // - **不许再写「then restart the host」**：那张卡片写下去立刻生效（字段是 `.volatile()`，
+      //   **真机验过**：拨开之后同一个工具立刻从拒绝变成四道闸全过、没有重启）。旧版这句
+      //   与卡片自己的「改动立即生效，不需要重启」直接打架 —— 两处事实互相矛盾。
+      manual: true,
+      why: `ask the user to turn on ${RESTART_CONFIG_FIELD} for this plugin on the Plugins page, then call this tool again`,
+    },
+  )
 }
 
 // ── 结果映射 ───────────────────────────────────────────────────────────────
@@ -1691,6 +1772,10 @@ export function keyText(key: RestartKey): string[] {
   if (key?.markerWritten === true) lines.push('markerWritten: true')
   if (typeof key?.relaunch === 'string' && key.relaunch !== '') {
     lines.push(`relaunch: ${key.relaunch}`)
+  }
+  // 总闸档位**只在为假时印**（开着是默认路径、没有信息量；关着才是模型必须看见的那一格）。
+  if (key?.restartEnabled === false) {
+    lines.push(`restartEnabled: false (${RESTART_CONFIG_FIELD})`)
   }
   const resolved = key?.resolved
   if (resolved !== undefined && resolved !== null) {

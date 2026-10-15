@@ -108,6 +108,22 @@ export interface RestartMarker {
    */
   sessions: string[]
   /**
+   * **发起**这次重启的那个会话（`sessions` 里的某一个）。
+   *
+   * 为什么必须单独存一个字段，而不是「`sessions[0]`」：{@link buildRestartMarker} 会把
+   * `sessions` **排序**（`.sort()`），发起者与其他会话的先后关系在那里就被抹掉了 ——
+   * 排序本身是有意的（定序不许随遍历顺序漂，坑 22），所以「谁是发起者」只能显式记。
+   *
+   * **`reason` 只回发给发起者**（维护者 2026-10-15 拍板）：`reason` 是**用户给自己留的便条**，
+   * 不是公告 —— 广播给被顺手打断的其它会话就是**串话**。恢复半据此决定投哪一版 notice。
+   *
+   * **可选**（与 {@link RestartMarker.state} / `force` 同一套兼容理由）：本字段之前的 marker
+   * 没有它。⚠️ **缺席的语义是「不知道谁发起的」，而不是「谁都可以」** —— 恢复半对缺席的 marker
+   * **不给任何人**发 `reason`（见 `restart-recovery.ts` 的三值分支）。方向是保守的：这个字段
+   * 守的是「不串话」，所以取不到时宁可少说，不可多说。
+   */
+  initiator?: string
+  /**
    * 消费状态；**缺席 = `armed`**（见 {@link markerState}）。
    *
    * 「缺席」为什么等价于 `armed` 而不是「未知」：`state` 是 `task-32` 新增的字段，
@@ -188,6 +204,7 @@ export function serializeMarker(marker: RestartMarker): string {
     reason: marker.reason,
     at: marker.at,
     sessions: [...marker.sessions],
+    ...(marker.initiator === undefined ? {} : { initiator: marker.initiator }),
     ...(marker.state === undefined ? {} : { state: marker.state }),
     ...(marker.force === true ? { force: true } : {}),
     trace: [...marker.trace],
@@ -248,6 +265,15 @@ export function parseMarker(text: string): MarkerParse {
   if (force !== undefined && force !== true) {
     return { status: 'malformed', reason: '"force", when present, must be true' }
   }
+  // 空串**不算合法**：`initiator` 的缺席有明确语义（「不知道谁发起的」），
+  // 而 `""` 会变成第三种「有值但谁都不是」的形态 —— 那正是三值纪律不许出现的压扁。
+  const initiator = record['initiator']
+  if (initiator !== undefined && (typeof initiator !== 'string' || initiator === '')) {
+    return {
+      status: 'malformed',
+      reason: '"initiator", when present, must be a non-empty string',
+    }
+  }
   return {
     status: 'ok',
     marker: {
@@ -255,6 +281,7 @@ export function parseMarker(text: string): MarkerParse {
       reason,
       at,
       sessions: sessions.filter(isString),
+      ...(initiator === undefined ? {} : { initiator }),
       ...(state === undefined ? {} : { state }),
       ...(force === true ? { force: true as const } : {}),
       trace: trace.filter(isString),
@@ -832,6 +859,8 @@ export async function planRestart(request: RestartRequest, ports: RestartPorts):
       reason: request.reason,
       now,
       sessions,
+      // 发起者**单独传**，不从 `sessions` 里推：那个数组已经排序，位置不再有意义。
+      initiator: normalizeSessionId(request.callingSession),
       gates: [
         'restart-loop=pass',
         'busy-session=pass',
@@ -899,6 +928,14 @@ export function buildRestartMarker(input: {
   reason: string
   now: number
   sessions: readonly string[]
+  /**
+   * 发起这次重启的会话（已 `normalizeSessionId`）。**必填**：类型上强制每个建 marker 的地方
+   * 都说清「是谁要重启」，否则 `reason` 回发给谁就成了猜的。
+   *
+   * 传空串 = 发起者未知 ⇒ **该键不写出**（`initiator` 缺席的语义正是「不知道是谁」，
+   * 见 {@link RestartMarker.initiator}）—— 于是恢复半不会把 `reason` 发给任何人。
+   */
+  initiator: string
   /** 四道闸的轨迹。 */
   gates: readonly string[]
   /** 闸②被真覆盖时的留痕（只在真覆盖时传）。 */
@@ -914,6 +951,8 @@ export function buildRestartMarker(input: {
     reason: input.reason,
     at: new Date(input.now).toISOString(),
     sessions: [...new Set(input.sessions)].sort(),
+    // ⚠️ **必须在 `.sort()` 之外单独记**：排序（定序不许漂，坑 22）会把「谁是发起者」抹掉。
+    ...(input.initiator === '' ? {} : { initiator: input.initiator }),
     // 写出去的一律是 `armed`（显式写出，不靠「缺席 = armed」那个兼容默认）——
     // 默认是给**老 marker** 用的读侧规则，不是省一个字段的理由。
     state: 'armed' as const,

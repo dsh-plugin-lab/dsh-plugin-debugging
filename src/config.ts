@@ -8,6 +8,7 @@
  * （已回宿主源码核过）。真正的约束是
  * `.volatile()` 只能落在固定对象路径上 —— 本 schema 全部是顶层标量，不受影响。
  */
+import type { Volatile } from '@deepseek-ai/cordis'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -15,6 +16,16 @@ import z from '@deepseek-ai/schemastery'
 
 import type { ResolvedConfig } from './contracts.js'
 import { WORKLOAD_DEFAULT_BUDGET_MS } from './lib/timeouts.js'
+
+/**
+ * 总闸的默认值 —— **这个字面量的唯一出处**（维护者 2026-10-15 拍板：**默认关**）。
+ *
+ * 它同时喂两处：schema 的 `.default(...)` 与 {@link frozenVolatile} 的兜底值。
+ * ⚠️ **两处各写一个 `false` 就是「一处一事实」被破** —— 而且是**静默**地破：
+ * 2026-10-15 变异实测抓到过（把 schema 那一处改回 `true`，判据**照样全绿**，
+ * 因为 `resolveConfig` 走的是另一个字面量）。改这里一处即可，两处同时变。
+ */
+export const RESTART_ENABLED_BY_DEFAULT = false
 
 /** 用户在配置卡片里能改的东西。 */
 export interface Config {
@@ -28,6 +39,26 @@ export interface Config {
   timeoutMs?: number
   /** **慢档**工具的预算（毫秒）：会跑 `--dump-config-schema` 的那些。 */
   schemaDumpTimeoutMs?: number
+  /**
+   * `dsh_restart` 的总闸；**默认关**（维护者 2026-10-15 拍板）。
+   *
+   * 关着时那个工具**仍然注册**，每次调用返回一句「现在被配置挡住了、怎么打开」——
+   * **不注册是错的**：模型看到「这个插件不提供 `dsh_restart`」就会去另想办法重启
+   * （甚至直接让用户手动重启）⇒ 风险不降反升，而且不可控；「工具静默消失」
+   * 正是本仓「别把不知道印成结论」那一族。
+   *
+   * ## 为什么带 `.volatile()`（**与其余字段相反**，维护者 2026-10-15 追加要求）
+   *
+   * 需求是「丝滑关开、不用重启」：宿主 `dsh/lib/index.js` 在比较两份 config 时，
+   * 只有当这次变更**全部落在 volatile 字段上**时，才不把它当成一次「需要重启的变更」。
+   * ⇒ 不带 `.volatile()` 的话，用户改一下开关就被要求重启宿主，而界面上还写着
+   * 「no restart」—— 那是一次骗人。
+   *
+   * `Volatile` 是**活引用**（`.get()` 现读当前值），所以本仓的读取链必须
+   * **每次调用现读**，绝不在 `apply` 期把它拍成一个常量（判据见
+   * `test/tools/restart-tool.test.ts` 的「没有缓存」那一条）。
+   */
+  enableRestart?: Volatile<boolean>
 }
 
 export const Config = z.object({
@@ -48,6 +79,16 @@ export const Config = z.object({
   //   要不要在配置面上强加它是维护者的决定。
   timeoutMs: z.number().default(WORKLOAD_DEFAULT_BUDGET_MS.timeoutMs),
   schemaDumpTimeoutMs: z.number().default(WORKLOAD_DEFAULT_BUDGET_MS.schemaDumpTimeoutMs),
+  /**
+   * 总闸**默认关**。这是维护者的产品决定，所以 `resolveConfig` 显式兜底成 `false`
+   * —— 不靠「字段可能缺席」那点隐含缺席。
+   *
+   * ⚠️ `.default()` **必须在** `.volatile()` 之前：前者先定 mode，后者才产出
+   * `Volatile<boolean>`（而不是 `Volatile<boolean | undefined>`）；反过来写，
+   * `enableRestart.get()` 就带上 `undefined`，与下面 `?? false` 的读法打架
+   * （`dsh-zhihu-search/src/index.ts` 的注释记着同一个坑）。
+   */
+  enableRestart: z.boolean().default(RESTART_ENABLED_BY_DEFAULT).volatile(),
 })
 
 /** 默认 profile 名：`ctx.cmdlineArgs` **不含** `--profile`（启动器自己吃掉了），只能读 env。 */
@@ -96,5 +137,24 @@ export function resolveConfig(
     timeoutMs: config?.timeoutMs ?? WORKLOAD_DEFAULT_BUDGET_MS.timeoutMs,
     schemaDumpTimeoutMs:
       config?.schemaDumpTimeoutMs ?? WORKLOAD_DEFAULT_BUDGET_MS.schemaDumpTimeoutMs,
+    // 显式兜底成「一个恒为 false 的活引用」（**不是** `?? undefined`）：默认关是拍板的
+    // 产品决定，判据 `restart-tool.test.ts` 钉它。⚠️ 这里**不读 `.get()`** ——
+    // 读一次就把值冻结了，而本仓恰恰要求「改开关不用重启」：值必须由工具
+    // 每次调用现读（`Volatile<T>` 就是 `{ get(): T }`）。
+    enableRestart: config?.enableRestart ?? frozenVolatile(RESTART_ENABLED_BY_DEFAULT),
   }
+}
+
+/**
+ * 一个**恒定**的活引用（宿主不在场、或用户没配这个字段时的兜底）。
+ *
+ * 为什么需要它：`ResolvedConfig` 的 `enableRestart` 是必填（不留第二种形状），
+ * 而 `undefined` 那一格仍然要有个能 `.get()` 的东西。恒为 `false` 与 schema 的
+ * `default(false)` 同值，所以「缺席」与「显式关」在读出来之后**不可分** ——
+ * 而这两者本来就该不可分。
+ *
+ * @param value 恒定值。
+ */
+function frozenVolatile(value: boolean): Volatile<boolean> {
+  return { get: () => value }
 }

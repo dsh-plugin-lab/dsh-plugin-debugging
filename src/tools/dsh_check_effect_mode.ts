@@ -133,6 +133,20 @@ interface EffectModeKey {
   /** hmr 可用性的**结论**（不是探测原文 —— 原文在 `audit`）。 */
   hmr?: HmrAvailability
   /**
+   * `dsh_restart` 总闸的当前档位（配置字段 `enableRestart`，**默认关**）。
+   *
+   * ## 为什么报在这个工具上
+   *
+   * 「一处一事实」：模型不必靠「调它、被拒了」去反推这个开关是关的 ——
+   * 而**靠拒绝去猜**恰恰不可行：拒绝是那个工具**明说自己被挡住**的设计前提
+   * （见 `dsh_restart.ts` 的 {@link RESTART_CONFIG_FIELD} 注释）。
+   *
+   * ⚠️ **只作独立字段报出，绝不参与 `change` 的分类判定**（`decideEffectMode`）：
+   * 「这个改动归哪一档」与「重启工具开没开」是两件事。混进 `mode` 会让 `config`
+   * 改动在开关关着时凭空变成另一种结论 —— 那是一个**不存在**的因果。
+   */
+  restartEnabled: boolean
+  /**
    * 这次用的是哪份配置（含 `DSH_HOME` 的来源）。
    *
    * 整份判定都建立在「我在看哪个 profile 目录」之上，且下一步要用的 `profile`
@@ -256,6 +270,8 @@ async function classify(
     downgraded: decision.downgraded,
     // 探测本来就在做（否则做不了降级判定）—— 这里只是把它从内部状态提升成契约字段。
     hmr,
+    // 总闸档位与 `change` 的分类**互不相干**（两条独立事实，见 EffectModeKey 的注释）。
+    restartEnabled: deps.config.enableRestart.get() === true,
     resolved,
   }
   const audit = asAudit({
@@ -457,7 +473,14 @@ function failureFor(
   const resolved = effectiveConfig(config)
   const data = {
     verdict: input.verdict,
-    key: { stage: input.stage, resolved, profileDir: input.dir } satisfies EffectModeKey,
+    key: {
+      stage: input.stage,
+      // 失败分支也带（成功与失败**同形**是本工具的既有纪律，见 EffectModeStage）：
+      // 探测失败不该让「重启工具开没开」这一格也一并失明。
+      restartEnabled: config.enableRestart.get() === true,
+      resolved,
+      profileDir: input.dir,
+    } satisfies EffectModeKey,
     audit: asAudit({
       profileDir: input.dir,
       resolved,
@@ -483,7 +506,11 @@ function unexpectedFailure(error: unknown, config: ResolvedConfig): ToolFail {
     { kind: 'internal', message: `dsh_check_effect_mode failed unexpectedly: ${message}` },
     {
       verdict: `no verdict: this check itself failed unexpectedly (${message}), so nothing about the effect mode is known — this is a bug in this plugin, not a finding about the change`,
-      key: { stage: 'unexpected', resolved: effectiveConfig(config) },
+      key: {
+        stage: 'unexpected',
+        restartEnabled: config.enableRestart.get() === true,
+        resolved: effectiveConfig(config),
+      },
       audit: asAudit({ error: message }),
     },
   )
@@ -609,6 +636,16 @@ function keyText(key: EffectModeKey): string[] {
         ? 'hmr: present (conditionally disabled: its disabled flag is a runtime expression)'
         : `hmr: ${key.hmr}`,
     )
+  }
+  // 总闸档位：两档**都印**（开与关同样是「现在是什么」，而本仓最重的就是
+  // 「靠失败去猜」）。字段缺失（守卫合成的兜底 `key` 就是 `{}`）时不印。
+  //
+  // ⚠️ **刻意短**：这一行在同一个环境下恒定，而本仓的 B16 判「两份输入不同的
+  // fixture 之间不许有 ≥40 字符的共有行」（恒定块 = 模型每次都白读一遍）。
+  // 所以这里只给档位，**字段名留给 `dsh_restart` 那句拒绝**（一处一事实）：
+  // 「怎么打开」由那一格权威地说，模型不必靠这里的重复推断。
+  if (typeof key.restartEnabled === 'boolean') {
+    lines.push(`restart: ${key.restartEnabled ? 'enabled' : 'disabled'}`)
   }
   lines.push(resolvedLine(key.resolved, key.profileDir))
   return lines
