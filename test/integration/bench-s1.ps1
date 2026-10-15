@@ -3,7 +3,7 @@
 # 定位：**本机红线，不是 CI 作业。**
 #   它要求本机装了 dsh（在 PATH 上）、能建目录 junction、有**空闲端口**，并且会**真起一个 web 服务**。
 #   CI 是单 ubuntu + 共享 runner，起服务会直接引入 flake；这些依赖在 CI 里属于「要额外搭一套」。
-#   CI 的门禁由 scripts/check-release.mjs 与 npm test（含红线）承担；本脚本是发布前在本机手动跑的那一道。
+#   CI 的门禁由 scripts/check-release.mjs 与 pnpm test（含红线）承担；本脚本是发布前在本机手动跑的那一道。
 #
 # 判据与配方的一处事实来源：test/integration/README.md（排错表、失败特征、为什么需要 junction）
 # 原始证据（本轮验证报告）留在工作区本机，**不随本仓发布** —— 本脚本自身即是可复跑的判据。

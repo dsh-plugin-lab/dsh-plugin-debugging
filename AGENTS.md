@@ -15,11 +15,11 @@
 
 ## 验证快照
 
-- **本机**：`npm run check` 全绿；`tsc` 两个配置各 **0 error**；`lint` / `format:check` / `check:release` 全过（2026-10-14 实跑）
-  —— **文件数 / 用例数 / `check:release` 的条数都是会漂的值，一律现查**（`npm run test` 的汇总行、`npm run check:release` 的输出）
+- **本机**：`pnpm run check` 全绿；`tsc` 两个配置各 **0 error**；`lint` / `format:check` / `check:release` 全过（2026-10-14 实跑）
+  —— **文件数 / 用例数 / `check:release` 的条数都是会漂的值，一律现查**（`pnpm run test` 的汇总行、`pnpm run check:release` 的输出）
 - **红线**：覆盖面**以 `test/redlines.test.ts` 里 `describe('B…')` 的闭集为准** —— **不要在这里手抄编号清单，也不要抄用例数**。
   理由（踩过）：抄一次就意味着**每次加红线都得同批改这里**，而漏改的那次就是一句**骗人的假话**（本仓据此把「红线只到 B22」写错过一次）。
-  要个数就去 `npm run test` 看那一行 —— **文件数是稳定的，用例数不是**（并发写者会让它在同一轮里就变）
+  要个数就去 `pnpm run test` 看那一行 —— **文件数是稳定的，用例数不是**（并发写者会让它在同一轮里就变）
 - **CI**：见 [.github/workflows/ci.yml](.github/workflows/ci.yml) 的 `CI Success`（唯一 required check）
 - 上面留的是**跑法 + 形状**；任何会漂的值（用例数、红线条数、行号、宿主版本号）一律现查
 
@@ -46,7 +46,7 @@
   （例如测试替身自己的中文 Error）。**这条由 `test/redlines.test.ts` 的 B14 守着。**
 - **改动走 PR，不直推 `main`**（维护者 2026-10-13 指定）。ruleset 里那条 `RepositoryRole` bypass 让直推
   **技术上能过** —— 但那是逃生门，不是常规路径。流程：开分支 → 推 → `gh pr create` → 等 `CI Success` → 合并。
-  本地门禁（`npm run check` / `lint` / `format:check` / `check:release` / 链接校验）照旧在开 PR 前跑完。
+  本地门禁（`pnpm run check` / `lint` / `format:check` / `check:release` / 链接校验）照旧在开 PR 前跑完。
 - **门面的语言切换行与工作区其他插件仓写法一致**（放在居中 div 里的 HTML `<a href>`）。**这曾经是有意的分歧**：
   本仓原先用 Markdown 链接行（`English | 中文` 那种写法）以换取链接校验 **0 警告**，代价是那一行不居中；
   维护者 2026-10-13 要求门面与工作区其他插件仓视觉一致，于是改回 HTML 形。**代价如实记下**：链接校验会把
@@ -60,10 +60,10 @@
 ## 常用命令
 
 ```shell
-npm run check          # typecheck + build + test
-npm run check:release  # 发布态不变量（scripts/check-release.mjs）
-npm run lint           # ESLint
-npm run format:check   # 格式
+pnpm run check          # typecheck + build + test
+pnpm run check:release  # 发布态不变量（scripts/check-release.mjs）
+pnpm run lint           # ESLint
+pnpm run format:check   # 格式
 ```
 
 ```shell
@@ -325,9 +325,9 @@ git diff --check
     传进去的哈希表会被当成参数数组绑定 —— 报错方向还很偏，看起来像调用方传错了。
     （验证者在本仓连踩三次同族坑：`$args` 撞名、`$PROFILE`、以及请求不带 token 的 `/` 得到 401 ——
     最后那条**不是错**，宿主对无 cookie 的 `/` 返回 401 是**有意的鉴权行为**。）
-30. **`prettier` 对 `.ps1` 的「假红」与坑 18 方向相反**：`npx prettier --check "test/integration/**"`
+30. **`prettier` 对 `.ps1` 的「假红」与坑 18 方向相反**：`pnpm exec prettier --check "test/integration/**"`
     会报 `No parser could be inferred for .ps1`、退出码 2；但本仓自己的门禁**是绿的**
-    （`npm run format:check` 即 `prettier --check .` 对 `.ps1` **跳过**）。
+    （`pnpm run format:check` 即 `prettier --check .` 对 `.ps1` **跳过**）。
     **显式传文件路径**才会踩到，`--check .` 不会。判据要跑**本仓自己的门禁命令**，
     不要自造一条更严格的调用再把它当判据 —— 那会造出「已提交且 CI 一直绿的文件被判红」的假红。
 31. **提交时不许 `git add -A`**（Lead 自己踩的）：本轮验证者正在写

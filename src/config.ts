@@ -97,8 +97,8 @@ export const DEFAULT_PROFILE = 'web'
 /**
  * 默认 DSH_HOME：`<homedir>/.dsh`。
  *
- * **这不是我们发明的兜底**，而是宿主自己的默认值：本机实测 `DSH_HOME` 未设时宿主的 home 就是
- * `C:\Users\speak\.dsh`（`~/.dsh`），与官方 `@deepseek-ai/dsh-home-paths` 的解析一致。
+ * **这不是我们发明的兜底**，而是宿主自己的默认值：实测 `DSH_HOME` 未设时宿主的 home 就是
+ * `~/.dsh`（Windows 上是 `%USERPROFILE%\.dsh`），与官方 `@deepseek-ai/dsh-home-paths` 的解析一致。
  * 因此「读默认值」与「读宿主实际在用的值」在正常机器上指向同一处。
  */
 export function defaultDshHome(): string {
