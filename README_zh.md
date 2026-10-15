@@ -49,7 +49,7 @@
 |---|---|---|---|
 | `dsh_check_effect_mode` | `change`：`config` / `bundle-added` / `host-code` / `client-code` | `alreadyInDependencies`、`dshHome` | 判断一个改动是实时生效、需要重启，还是热重载。在正在运行的 `profile` 上实际探测。 |
 | `dsh_diagnose_plugin_load` | — | `package`、`port`、`dshHome` | 查一个插件到底加载没有：`bundle` 归属、挂载形态、`loader` 树，并区分实测证据和推断证据。 |
-| `dsh_list_instances` | — | `port` | 列出本机正在运行的 DSH 宿主。只有未认证的 `GET /` 返回完全相同的响应体时，才认定为 DSH。“探不到”和“不是 DSH”分开报告。 |
+| `dsh_list_instances` | — | `port` | 列出本机正在运行的 DSH 宿主。只有未认证的 `GET /` 返回完全相同的 DSH 响应体时，才认定为 DSH。“探不到”和“不是 DSH”分开报告。 |
 | `dsh_check_auth` | — | `host`、`port` | 区分“没在运行”和“没通过认证”。 |
 | `dsh_dump_config` | — | `profile`、`dshHome` | 展示一个 `profile` 最终解析成什么：组合树，以及解释它的诊断信息。 |
 | `dsh_hot_reload` | `entryId` / `module` / `serverName` 三者取一 | `dryRun` | 把一个已挂载的 `entry` 替换成磁盘上的最新代码，不重启；失败自动回滚。 |
