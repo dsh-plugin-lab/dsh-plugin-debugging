@@ -147,7 +147,7 @@
 ## 2. 描述层：四段骨架
 
 现状：**每个工具**的 description 都在系统提示里占一段固定开销，其中相当一部分是**输出结构的复述**（每次调用都能看见的东西）。
-⚠️ **不在这里抄字符数** —— 它是**实测值、会漂**（加一个工具就变），照 §9.3 那条纪律办。**要现测**：跑 `npm test`，`test/redlines.test.ts` 的 B20a 用例会把每个工具的实际字符数逐个打出来（上限常量在 `src/tools/describe.ts`，检索串 `DESCRIPTION_MAX_CHARS`）；工具**个数**的真源是注册处 `src/tools/index.ts`。
+⚠️ **不在这里抄字符数** —— 它是**实测值、会漂**（加一个工具就变），照 §9.3 那条纪律办。**现测取法见下面「硬约束」那张表的字符数那一行**（⚠️ B20a 只在判红时带出数字，**通过时它一个字符都不打** —— 别指望「跑一遍看清单」）；上限常量在 `src/tools/describe.ts`，检索串 `DESCRIPTION_MAX_CHARS`。工具**个数**的真源是注册处 `src/tools/index.ts`。
 
 固定骨架，**顺序不许换**：
 
@@ -197,7 +197,7 @@ function composeDescription(d: ToolDescription): string
 |---|---|---|
 | `what` / `useWhen` | 非空 | 缺任一段 = 模型不知道「这是什么」或「何时用」 |
 | 合成后**行数** | ≤4 | 骨架就是四段 |
-| 单工具 description 字符数 | **≤240**（`DESCRIPTION_MAX_CHARS`，`src/tools/describe.ts`） | 上界是**判据**，不是现状快照。⚠️ **现状值不写在这里**：它随工具个数与文字漂（§9.3 的纪律），要现测就跑 `npm test` 的 B20a 用例——它逐个打印每个工具的实际字符数 |
+| 单工具 description 字符数 | **≤240**（`DESCRIPTION_MAX_CHARS`，`src/tools/describe.ts`） | 上界是**判据**，不是现状快照。⚠️ **现状值不写在这里**：它随工具个数与文字漂（§9.3 的纪律）。**现测取法**：跑 `pnpm run test` 的 B20a 用例 —— 它**只在判红时**把越界那一项的实际字符数带进失败消息（`offenders` 列表），**通过时不打印任何数字**。所以「跑一遍看清单」这条路不存在：全量当前值要自己按那个上限常量去量 |
 | **每个参数描述** | **非空，且合计 > 0** | 这是**唯一**的机械守卫（两条**下界**）；**上界已删**，见下 |
 | 禁止出现 | 输出结构复述（`exit code` 这类） | 见 §10 B20b（只抓逐字，同义改写归评审） |
 
@@ -504,7 +504,7 @@ data
 | ③ bundle 表解析不了 | profile 的 `bundles` / patch 解析失败 → 拒绝 | `bad-composition` + 指路 `dsh_dump_config` |
 | ④ 拿不到启动命令 | 无法确定「怎么把宿主重新拉起来」→ 拒绝（**不猜**） | `no-launch-command` |
 
-闸②的判据已可落地（`agents.list` 的 `status` / `inbox`、`jobs.list`、`workspace/session-activity`），契约与一条 **fail-closed 要求**见 [HOST-CONTRACTS.md](HOST-CONTRACTS.md) §2.2。
+闸②的判据已可落地（`agents.list` 的 `status` / `inbox`、`jobs.list`、`workspace/session-activity`），契约与一条 **fail-closed 要求**见 [HOST-CONTRACTS.md](HOST-CONTRACTS.md) §2.3（忙判定与唤醒通道）。
 
 **流程（顺序是判据）**：闸门检查 → **审批门** → **写 marker（落盘，必须在拉起之前）** → 拉起新进程 → **本进程退出** →（新进程）读 marker → 恢复会话 → 注入 notice → **把 marker 标为「已消费」**（**不是删除**：宿主 `fs` 缝上没有任何删除方法 —— 状态迁移替代删除的裁决见 §10.3 与 [HOST-CONTRACTS.md](HOST-CONTRACTS.md) §2.5）。
 
@@ -516,7 +516,7 @@ data
 - **审批门的位置本身是判据**：**四道确定性闸门全过之后**才轮到它 —— 反过来会出现「先弹窗让用户同意、再告诉用户闸③不过」。⚠️ 实现要**两段式**：先用 `dryRun` 探一遍闸门（**不落盘**），过了才走审批，再真正落盘 —— 因为 `planRestart` 把「四道闸」与「写 marker」收在**同一个入口**里，**不许**为了插审批而把那道顺序拆坏。
 - **审批语义（2026-10-14 改正一处写反的）**：**不声明静态审批** —— 工具自己在动作前**先读档位、再决定问不问**。`ask` ⇒ 调 `request()`（只有 `allowed-once` 算允许；`rejected`/`cancelled`/`unavailable` 一律当拒绝）；**`never`（= `danger-full-access`）⇒ 不问、直接执行**（并在 `key` / `audit` 记 `policy=never, not required`）；读不出来 ⇒ fail-closed。⚠️ **`never` 是「提示已关闭」，不是「拒绝一切」** —— 在那一档主动去问**必然被拒**，那会把「你什么都授权了」变成「什么都不许做」。机制真源见 `dsh-user-approval`（`decide()` 的 `never` 分支 + `effectivePolicy()`），档位接线见 profile 的 `cordis.yml`（`danger-full-access` ⇔ `sandbox: danger-full-access` + `approval: never`）、`[已核]`。
 - **拉起** = 首选外部管理器 / 计划任务（见下面那张降级路径表）。
-- **恢复** = 新进程读 marker → `resolveAgent` 唤醒 → `followup` 投 notice（**信息性，不是「请继续」**；notice 只放事实 + 指针）→ 标记已消费。通道实测与分级见 [HOST-CONTRACTS.md](HOST-CONTRACTS.md) §2.4.1 的 C15–C27。
+- **恢复** = 新进程读 marker → `resolveAgent` 唤醒 → `followup` 投 notice（**信息性，不是「请继续」**；notice 只放事实 + 指针）→ 标记已消费。通道实测与分级见 [HOST-CONTRACTS.md](HOST-CONTRACTS.md) §2.4.1（含 C28 那条闭环与末尾「工具壳写的 marker 已被恢复半真消费」那条）。
 
 - **拉起优先交给外部管理器**（supervisor / Windows 服务 / systemd）；插件只做「查闸门 → 落盘 marker → 退出」。**自建 helper 是降级路径**，而它的落地方式**已被本机实测改写**（见下条）。
 - **降级路径：`{detached: true}` 已实测不可用，改用「由一个不在宿主 job 里的进程代起」**（`[已实测]`，证据在 [HOST-CONTRACTS.md](HOST-CONTRACTS.md) §2）：
@@ -541,7 +541,7 @@ data
   ⚠️ **「谁来写」在库半边是注入面**（`RestartFsPort`：`read` / `write` / `remove`，其中 `read` 是**三值**：有内容 / 不存在 / 读失败）——真实适配器单独一层。这样判定逻辑可单测、换实现不动判定。
   **本半实现不了、但被有意保留的一条**：库半边的 verdict 明说「marker 已在任何拉起之前写好；本半不启动进程，因此尚无新 pid」—— **宁可这么写，也不许凑一个 pid。**
 
-**恢复逻辑**：注入的是**信息性 notice**，不是强制「继续」；唤醒走官方通道、按会话原有预设；**唤醒失败保留 marker**，下次启动继续重试。
+**恢复逻辑**：注入的是**信息性 notice**，不是强制「继续」；唤醒走官方通道、按会话原有预设；**唤醒失败保留 marker**，下次启动继续重试。**`reason` 只发给发起者**（靠 marker 的 `initiator` 字段认人）：它是用户给自己留的便条，广播给被顺手打断的其它会话就是**串话**；那些会话收到**同样的事实但不含 `reason`**。⚠️ `initiator` **缺席**（本字段之前写的 marker）的语义是「不知道谁发起的」，此时**谁都不发** —— 不许退化成「那就发给所有人」。
 
 **工具参数**：`{ reason, delayMs（默认 10s，留给回执落盘）, dryRun, force }` —— `dryRun` 是本仓特有的（四道闸必须能单独演练）；`force` **只对闸②有效**，且命中时**必须留痕**（见本节末）。
 **返回形状**（逐字真源在 `src/lib/restart.ts` 与 `src/tools/dsh_restart.ts`，**不在此抄**）：库半边报 `gates=4/4 passed` + marker 路径 + 「marker 已在任何拉起之前写好」；工具壳报闸门 / 审批 / marker / 拉起 / 退出这几件事。`nextStep` **无**（本进程即将退出）；被闸门拒绝时按 §3 的三层输出，`L3` 给 `dsh_check_effect_mode`。

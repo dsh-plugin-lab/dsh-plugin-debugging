@@ -162,7 +162,7 @@ src/
 
 | 工具 | 关键语义（判定都依赖它们，写错就静默给错结论） |
 |---|---|
-| `dsh_check_effect_mode` | 「热生效」的前提是 profile 里真的挂了 `hmr`，且这件事作为**契约字段**直接给出（**三值** `present` / `present-conditional` / `absent`，类型见 `src/tools/dsh_check_effect_mode.ts` 的 `HmrAvailability`），不让模型从 `why` 反推。`present-conditional` = profile 里 `hmr` 那行的 `disabled:` 是**运行时表达式** ⇒ 静态看**既不能当确定可用、也不能当确定不可用**：工具按**可用**处理，但**把条件本身印进 L1 与 L2**（只印记号，模型读不出条件）。⚠️ 这一档**没有真机实测**（`present` / `absent` 那两条实测不覆盖它），不要拿它当结论用。**机制**：loader 重读配置的能力一直都在，**缺的是触发者** —— watch patch 文件的正是 hmr；无 hmr 时改 config 文件**没有任何东西去重读它**。所以一切「热生效」都降级成 `restart-required`。⚠️ **别拿 `ctx.get('hmr')` 当探针**：挂着 hmr 的实例里它同样是 `undefined`；判断 hmr 可用性只有两条真源（profile 文件与 `--dump-config`），本工具走的正是这两条。正反两证见 [AGENTS.md](../AGENTS.md) 活跃坑（检索串 `触发者住在 hmr 里`）—— **台账尚未收录这条**，故在此写明结论与出处 |
+| `dsh_check_effect_mode` | 「热生效」的前提是 profile 里真的挂了 `hmr`，且这件事作为**契约字段**直接给出（**三值** `present` / `present-conditional` / `absent`，类型见 `src/tools/dsh_check_effect_mode.ts` 的 `HmrAvailability`），不让模型从 `why` 反推。`present-conditional` = profile 里 `hmr` 那行的 `disabled:` 是**运行时表达式** ⇒ 静态看**既不能当确定可用、也不能当确定不可用**：工具按**可用**处理，但**把条件本身印进 L1 与 L2**（只印记号，模型读不出条件）。⚠️ 这一档**没有真机实测**（`present` / `absent` 那两条实测不覆盖它），不要拿它当结论用。**机制**：loader 重读配置的能力一直都在，**缺的是触发者** —— watch patch 文件的正是 hmr；无 hmr 时改 config 文件**没有任何东西去重读它**。所以一切「热生效」都降级成 `restart-required`。⚠️ **别拿 `ctx.get('hmr')` 当探针**：挂着 hmr 的实例里它同样是 `undefined`；判断 hmr 可用性只有两条真源（profile 文件与 `--dump-config`），本工具走的正是这两条。正反两证见 [AGENTS.md](../AGENTS.md) 活跃坑（检索串 `触发者住在 hmr 里`）—— **结论已进台账**，故此处只留引用，不重述证据 |
 | `dsh_diagnose_plugin_load` | 三处外部证据（`bundles` / 安装形态 / 进程）**只证前置条件，不证加载成功**。**Fiber 相位能查，但不在 `Config.listConfigs` 里** —— 走插件侧投影（`ctx.get('loader')` → `loader.entries()` → `entry.fiber.state`）；**import 期就失败的 entry `fiber` 是 `undefined`**，只看 `state===3` 会漏掉它（最凶的一种）。`Config.listConfigs` 的 `inactive` 混合「禁用 / 未导入 / 已销毁」三义、**从不报 FAILED**。启动失败的硬证据只在 `$DSH_HOME/logs/startup-*.log` 且**只在启动失败时生成** —— 但**它未必属于当前进程**：那种日志会**留在磁盘上跨重启**，所以工具把「最新那份的 mtime」与**当前进程的启动时间**（与产物新鲜度用**同一个参照**）比一次，结论是三值 `freshness`：`current` / `stale`（**历史遗留**，L1 必须说明它早于当前进程）/ `undated`（拿不到参照时间 ⇒ **不许**读成「当前进程加载失败」）。日志内容本身照常投影（旧失败也是事实），被补上的只是它的**时间限定**。投影实现：`src/lib/fiber.ts` + `src/lib/loader.ts` |
 | `dsh_check_auth` | `401` = 服务活着、认证没过；连接被拒 = 没启动。两者**必须在 `kind` 上分开**，不能让模型从一句 message 里猜。⚠️ **但 401 本身不蕴含「authority 变了」**：本工具**发送不了凭据**（v1 不读值、不自签 cookie）⇒ 它拿到的是**匿名 401**，因此它**答不了**「你存的凭据是否有效」—— 判定函数在类型上就收不到凭据，从结构上不给这条错推论留缝。能区分「会话过期」与「authority 变了」的只有**带 cookie 的浏览器页面**。cookie 绑定 authority（`host:port`，`localhost` 与 `127.0.0.1` **不通用**），**签名密钥落盘、launch token 不落盘** —— 所以「同端口重启旧标签页照常可用、换端口才 401」 |
 | `dsh_dump_config` | `--dump-config` 退出码**恒 0**，不能当门禁；`--dump-config-schema` 退出码 **1 = 有 error**；`preset-*` 行的 `unrecognized Loader tree carrier` 是已知误报，判定看 error 的 `path` 是否指向**你改过的行**。**「跑了什么」与「读到了什么」必须分开**：`key.notScreened` 记下「工具打算读、但这次没读到」的来源，渲染据此出三值 —— 读到且为空 = `actionable: none` / 读到且有 = 逐条列出 / **没读到 = 绝不许印 `none`**（那会把「不知道」说成「没有」）。`actionable` 里的字段是**宿主按需带的**（实测两种形状：有的条目只有 `path`，有的 `entryId` 与 `path` 都有）—— 工具**原样透传、不自己造** |
@@ -208,8 +208,8 @@ profile 名只能从 env `DSH_PROFILE` / `DSH_PROFILE_DIR` 读：**`--profile` �
 | S3 工具端到端 | 工具真的被注册、返回值可读（永不 throw / 结构合法 / 每个工具成功与预期内失败各一条 / `nextStep` 合规）；**「观测」与「推断」不许混** | 不依赖产物路径解析，先打通注册通路 | `test/integration/s3-harness.mjs` |
 | S4 产物 | `npm pack` 后 tarball 里含技能正文、解包目录里的 `lib/` 可 import 且**无副作用**、装进隔离实例后 catalog 出现本插件描述 | 「源码跑得通」**推不出**「发布产物里路径对」—— 缺 root 不会让插件启动失败 | `test/integration/s4-import-check.mjs` |
 | S5 HMR 前置门 | 有 hmr 与无 hmr 两种 profile 各验一次 | 它是热重载工具能否安全存在的前提 | **无脚本**；本机以手工隔离实例验过两种情形（见 [AGENTS.md](../AGENTS.md) 活跃坑里那条讲「触发者住在 hmr 里」的） |
-| S6 会话标记闭环 | 写 → 重启 → 读回 | 失败退路依赖工具通路 | **依赖 `dsh_restart` 的恢复半**（工具与 marker 已实现；真机闭环仍未跑） |
-| S7 副作用工具 | dry-run → 真跑 | 它会杀掉宿主；搞坏一次，S1–S6 的环境全部重来 | `dsh_restart` 的 `dryRun` 已实现；**真跑仍未在隔离实例上做过** |
+| S6 会话标记闭环 | 写 → 重启 → 读回 | 失败退路依赖工具通路 | **依赖 `dsh_restart` 的恢复半**；marker 由工具壳写、由恢复半消费这条**已在真宿主验过**（见 §9 那条的证据分级） |
+| S7 副作用工具 | dry-run → 真跑 | 它会杀掉宿主；搞坏一次，S1–S6 的环境全部重来 | `dsh_restart` 的 `dryRun` 已实现；**真跑已在活宿主上做过**（四道闸全过、marker 落盘、宿主退出、新宿主起来） |
 
 ⚠️ **本文件不记这些脚本的执行结果**（那会立刻过期）：S1–S4 的判据脚本**已在仓里**，而**本仓内没有它们的执行记录** ⇒ 「过没过」是**无法判定**，要现跑。
 
@@ -218,5 +218,6 @@ profile 名只能从 env `DSH_PROFILE` / `DSH_PROFILE_DIR` 读：**`--profile` �
 **宿主侧「核过 / 还没核」的清单在 [HOST-CONTRACTS.md](HOST-CONTRACTS.md) §5**（那是同一种事实，只住一处）。本文件只留**不是宿主事实、而是产品 / 产物层面**的待验项：
 
 - **S3 / S4 的执行**：脚本已入库（见 §8），**结果无记录** —— 下次发布前现跑。
-- **`dsh_restart` 的真机闭环**（重启 → 会话被唤醒 → notice 到达发起者）：**只能是本机红线**（要真起服务、要空闲端口，理由见 [test/integration/README.md](../test/integration/README.md) §0）。**工具与 marker 已实现并有注入端口下的判据，但这条闭环尚未在隔离实例上跑过** —— 在那之前，「重启之后会话真的回得来」是**未验**，不是已成立。
+- **`dsh_restart` 的闭环分两段，等级与判据在 [AGENTS.md](../AGENTS.md) 的待办里**（要真起服务、要空闲端口，理由见 [test/integration/README.md](../test/integration/README.md) §0）。
+  边界只记一句：**「marker 被真消费」`[已实测]`，「重启后立刻恢复」那个时序 `[无法判定]`** —— 在后者成立之前，**不许把它写成「闭环全部跑通」**（含本文件上表那两行）。
 - **`SkillReport.scoped` 的真机可观测性**：见 §3.1 末尾那条。

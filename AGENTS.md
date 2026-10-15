@@ -5,8 +5,8 @@
 ## 状态
 
 - 版本以 [package.json](package.json) 的 `version` 为准
-- **已发布到 npm**（当前版本见 [package.json](package.json)；`latest` 与 dist-tags 以 registry 为准）。**`0.2.0` 是第一个由 `release.yml` 发出的版本**（带 provenance）；`0.1.0` 是手动发的、**没有** provenance。SLSA 徽章的真实性判据写在 [README.md](README.md) 的徽章注释里（对**具体版本**查 attestations 端点）。版本线与判例见 [docs/PUBLISHING.md](docs/PUBLISHING.md)
-- **能力面 = 1 个技能 + 8 个工具**：5 个只读（`dsh_check_effect_mode` / `dsh_diagnose_plugin_load` / `dsh_check_auth` / `dsh_dump_config` / **`dsh_list_instances`** —— 最后一个是 D′ 的**发现**工具：列本机活着的 DSH，**只给 authority（`host:port`）、给不出 `DSH_HOME`**）、**1 个写侧** `dsh_hot_reload`（已实现、已真机验证；算法与关键语义见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §5）、**1 个派生** `dsh_sign_cookie`（唯一会经手秘密的工具，**cookie 值刻意不进返回值**）、**1 个行动** `dsh_restart`（四道闸 → 审批门 → 真拉起 → 退出宿主；**已实现，真机闭环未跑**，见下方待办）。**目标形态与后续工具的归属见 [docs/SHAPE.md](docs/SHAPE.md)**
+- **已发布到 npm**（当前版本见 [package.json](package.json)；`latest` 与 dist-tags 以 registry 为准）。**`0.2.0` 是第一个由 `release.yml` 发出的版本**（带 provenance）；`0.1.0` 是手动发的、**没有** provenance。SLSA 徽章的真实性判据是 [docs/PUBLISHING.md](docs/PUBLISHING.md) 的「provenance 要对具体版本查」那一条 —— 两份门面的徽章注释只留指针，不重述规则（一处一事实）。版本线与判例见 [docs/PUBLISHING.md](docs/PUBLISHING.md)
+- **能力面 = 1 个技能 + 8 个工具**：5 个只读（`dsh_check_effect_mode` / `dsh_diagnose_plugin_load` / `dsh_check_auth` / `dsh_dump_config` / **`dsh_list_instances`** —— 最后一个是 D′ 的**发现**工具：列本机活着的 DSH，**只给 authority（`host:port`）、给不出 `DSH_HOME`**）、**1 个写侧** `dsh_hot_reload`（已实现、已真机验证；算法与关键语义见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §5）、**1 个派生** `dsh_sign_cookie`（唯一会经手秘密的工具，**cookie 值刻意不进返回值**）、**1 个行动** `dsh_restart`（四道闸 → 审批门 → 真拉起 → 退出宿主；**已实现**，且真机闭环已验两次：「工具壳写的 marker 被恢复半真消费」+ **「重启后立刻恢复」的时序**（2026-10-15，`103s`，见待办）。默认**关**：配置字段 `enableRestart`（`.volatile()` ⇒ 拨开即生效、不用重启），关着时**结构化拒绝**而**不是**不注册）。**目标形态与后续工具的归属见 [docs/SHAPE.md](docs/SHAPE.md)**
   —— 工具清单以 [src/tools/index.ts](src/tools/index.ts) 的注册处为真源，红线 B9 钉住名字闭集。
 - **本仓是两个半边**：工具半边（`src/tools/`，都是代码）与技能半边（正文 + [src/skills/](src/skills/README.md) 的注册代码）。
   技能正文在 [skills/](skills/README.md)，它**是运行时载荷而不是文档** —— 同一目录下那两份双件才是文档，区别见那条目录的说明。
@@ -30,6 +30,14 @@
 - **能落成校验的就不写散文**：不变量做成 `test/` 下的红线或 `scripts/` 下的检查，这里只留指针。
 - **诊断半边保持只读**：不改 profile、不写 `$DSH_HOME`、不杀进程。**写侧只做「不杀进程」的那一种**（就地换模块，失败放回旧版本）。**会杀掉宿主的重启类动作不并入写侧** —— 它是**独立的行动类**，靠四道闸 + 审批门 + marker 恢复（形态见 [docs/SHAPE.md](docs/SHAPE.md) §6.1）。任何越界的「顺手修一下」先落决策。**这条规则本身由机器判据守着**（`test/redlines.test.ts` 的 B10：杀进程 / fs 写入 / **写宿主数据路径** / 安装面四类，作用域是整个 `src/**`）；写侧的窄作用域与更严的记号判据是 B15。**唯一的例外**（维护者 2026-10-14 拍板，**精确命名空间 / 形态 A**）：`$DSH_HOME/<包名>/` 这一层可以写 —— **只有紧跟 home 的第一段逐字等于包名**才放过，其余顶层项照旧禁止。清单与四条边界用例见 [docs/SHAPE.md](docs/SHAPE.md) §10.3。
 - **一处一事实，别处只留指针**：一个事实有两个落点时，删掉一个。
+- **指针要能解析，且分层要能被查**：链路由浅到深是 **门面 → 根 [AGENTS.md](AGENTS.md) 仪表盘 → 子树 [README.md](src/README.md) / [AGENTS.md](src/AGENTS.md) 双件 → [docs/](docs/README.md) 活文档 → 判据**。
+  「改一处能查到要同步哪」是这条链的**工程结果**，不是风格偏好。
+  - **断链比没有更坏** —— 读者以为查得到 ⇒ 每次文档同步后跑链接校验（错误数必须保持 **0**）。
+  - **别把「更新文档」当默认动作**：维护者 2026-10-15 明确「不必增加文档压力」——
+    文档更新的成本随文档量上涨、且难及时同步，**逐条追着改会追不上**。
+    ⇒ **默认动作是「改机器判据」**：能落成红线/校验的事实就落成判据（它会自己红、不会骗人），
+    文档只留**形状 + 指针**，不抄会漂的值（见下条）。
+  - **活文档说「现在是什么」（过时即改）；非活文档（[.agents/notes/](.agents/notes/README.md)）说「当时为什么」（不追改，只按状态行标注生效/被取代/已归档）。把非活文档改成「正确的」会毁掉它存在的价值。**
 - **改动连带同步点**：谁引用了你改过的路径 / 名字 / 规则，同批改。双语门面（[README.md](README.md)
   与 [README_zh.md](README_zh.md)）与两份 `locale/*.json` 是典型的成对件。
 - **不抄会漂的值**：宿主版本号、计数、行号一律现查；写「形状」，不写「值」。
@@ -100,17 +108,41 @@ git diff --check
 
 ## 待办
 
-- [ ] **`dsh_restart`：工具已落地并注册（2026-10-14）；剩下的只有一条缝** —— 「真工具触发 → 重启 → 恢复」没在**同一次**真机运行里串起来跑。
+- [x] **`dsh_restart`：那条缝已补上（2026-10-15）** —— 「工具壳写出的 `armed` marker 被恢复半真消费」**已在真宿主上发生**。
       形态（四道闸 / 审批门 / marker / 恢复）见 [docs/SHAPE.md](docs/SHAPE.md) §6.1；宿主侧的拉起 / 恢复 / 退出契约见
       [docs/HOST-CONTRACTS.md](docs/HOST-CONTRACTS.md) §2。
-      **已经实测过的（别再当成欠账，两边独立）**：① `ctx.get('appExit')` 在本插件这一层的可达性 **`[已实测]`**（台账 §2.6 的 E10，隔离实例 4 次运行 × 6 个采样点）；② 调它真能干净退出、码 0、端口释放（E11）；③ 计划任务那一路逃出宿主 job（§2.2.2 的 [A]，`inHostJob=0`）；④ **恢复半的输入状态**（新进程 + 旧会话日志 + 一份 `armed` marker）⇒ notice 真落进发起者会话的日志（§2.4.1 的 C28–C32）。
-      ⇒ **缺口精确到这一句**：上面 ④ 里那份 marker 是**探针手工复现**的（用本仓自己的 `buildRestartMarker` / `serializeMarker` 落盘），**没有**经过工具壳的「四道闸 → 审批门 → 写 marker → 拉起 → `appExit`」那一段。所以欠的是**那条缝**，不是「整条链没开始」。
-      ⇒ **验证方式已定：隔离实例上验，不进 CI**（理由同 [test/integration/README.md](test/integration/README.md) §0：要真起服务、要空闲端口、要 junction）；那条真机闭环**只能是本机红线**。
-      ⚠️ **顺序**：跑它之前必须让 `src/lib/restart*.ts` 与 `src/tools/dsh_restart.ts` 静止 —— 被测物中途被改，那次实测就作废。
-- [x] **客户端半边（`dsh.client` + keyed `tool.call.toolview`）→ 维护者 2026-10-14 拍板：不做**。
-      它只影响**人**通道、不影响模型；而代价不小（新构建产物要进 `files` 并过 `check:release`、
-      keyed 条目要在 call/result 两侧可重放、加 `dsh.client` **要重启宿主一次**）。
-      [docs/SHAPE.md](docs/SHAPE.md) §8.5 / §9.2 的记录保留为「已评估、不做」，**不要再排进队列**。
+      **证据（回执 `$DSH_HOME/dsh-plugin-debugging/restart/last-attempt.json`，逐字）**：
+      `outcome: recovered` · `markerStateAtRead: armed` · `markerConsumed: true` ·
+      `detail: the restart notice was delivered to 1 session(s) and the marker was marked consumed`；
+      盘上 `marker.json` 随即变 `consumed`。那份 marker 由**工具壳**写（四道闸 → 审批门 → 写 marker →
+      拉起 → `appExit`，2026-10-14 23:50），**不是探针手工复现** —— 原先欠的正是这一句。
+      ✅ **「同一次运行里串起来」已验**（2026-10-15 真机）：请求 `10:38:05Z` → 新进程 **+11s**（与 `ping -n 11`
+      的 10s 宽限吻合）→ 恢复 `10:39:46–51` → notice `10:39:54` 落进**发起者**会话；回执 `outcome: recovered` ·
+      `markerStateAtRead: armed` · `markerConsumed: true` · `delivered to 1 session(s)`。
+      **时序从 `49401s`（13.7 小时）修成 `103s`** —— 上一版把「恢复很慢」当成了机制，实际那 90 秒在
+      **宿主启动 → 本插件 `apply`** 之间（`apply` 里只等一个 1 秒定时器，我们自己的延时上界 ≤5s）⇒ **不是我们的延时**；
+      但那 90 秒的归因**仍未定**（那次启动没留档）。
+      ⚠️ **仍未被触发的**：回执里 `markerReadAttempts: 1` ⇒ 服务一次就绪，**「服务晚到则轮询」那条路这次又被绕开**
+      （apply 晚了 90 秒，早过了那个「宿主刚起 1–2 秒」的窗口）。
+- [x] **`dsh_restart` 成功路径的 verdict 曾从未落盘 —— 已在真机复验（2026-10-15）**：`exit(0)` 曾排在 `return`
+      之前 ⇒ 模型对一次不可逆动作拿到 `outcome unknown`。已改为把退出排到下一个宏任务（记录走微任务链，先排空），
+      台架判红/变异已验（挪回去 ⇒ 4 红）。**真机判据已过**：逐帧解会话日志，同一个 `callId` 的 `tool/call` 后面跟着
+      **配对的真 `tool/result`**（含那句 verdict）—— **不是** `interrupted-tool-result-*`；对照之下 2026-10-14 那次
+      真重启的同一位置**正是** `interrupted-tool-result-*`（旧缺陷的形状）。⇒ 一条命令、一台宿主，只差代码版本的 A/B。
+      ⚠️ 该修复有一个**刻意的语义后果**：退出通道抛异常时结果已交付，**结构化 `internal` 失败这条路不存在了**；
+      新的落点改成「结论照样到 + 异常不吞 + marker 留在 `armed` 供下次启动报未完成」。
+- [x] **客户端半边（`dsh.client` + `keyed tool.call.toolview`）~~→ 维护者 2026-10-14 拍板：不做~~**
+      → **维护者 2026-10-15 拍板反转：做。**（10-14 那条决策及其理由**保留在此**，记的是「当时为什么」；
+      下文只写反转后的形态与新增代价。）
+      **反转的起因**：要给 `dsh_restart` 做一个配置开关（默认关 + 结构化拒绝，见下方待办），
+      而「配置改动能丝滑生效、不要求重启」需要客户端面来承载那个开关。
+      ⚠️ **10-14 记的三项代价因此全部落地**，实现时逐条对照：
+      ① 新构建产物**要进 `files`** 并过 `check:release`（发布态不变量）；
+      ② keyed 条目要在 call / result **两侧可重放**；
+      ③ **加 `dsh.client` 要重启宿主一次** —— 这是**装上客户端半边**那一次；
+      ⚠️ **但「开关值改动」本身不需要重启**（靠 schema 的 `.volatile()`，宿主侧机制见活跃坑那一族）
+      —— 这两件事**别混**：前者是一次性的安装代价，后者是日常操作的性质。
+      [docs/SHAPE.md](docs/SHAPE.md) §8.5 / §9.2 的「已评估、不做」记录**已随本次反转作废**。
 - [ ] **技能压过用户级同名技能**：已实现（**动态 scope 注入**：技能同时注册进全局层与每个活跃 agent
       的 preset 作用域，与 `skill-filesystem` 同层 → rank 250 才真正赢）。静态写进 preset 组合的方案
       **已实测否决**（坏包会让默认 standard 会话建不起来）。决策见
@@ -150,7 +182,17 @@ git diff --check
       另一个是 `() => Promise<T> | T`；拿不到属性描述符时的错误文案一个英文一个中文；一个 `export` 一个不导出）。
       收敛时**按「语义同构」判**，别按逐字比对 —— 逐字比对会得出「要改」，而改哪一份都得先定这三处的取舍。
       且该文件文末「已知限度」第 29 条写着「收敛那笔债时连它一起收」—— 债还了要把那条**删掉**，不是留着。
-- [ ] **两条独立复验留下的残余**（都不影响模型决策，方向安全，故未阻塞发布）：
+      —— **收尾中（2026-10-15 派单）**：连同 `test/tools/timeout-budgets.test.ts` 里那份同源的 `stripComments`
+      （其文件头自述「抄自 redlines 那份」）一并收敛到 [test/tools/helpers.ts](test/tools/helpers.ts)。
+      ⚠️ **两份 `stripComments` 的注释各自记着不同的坑**（一份是「整段删块注释导致后面行号整体前移」、
+      一份是「漏了 `-o` 会假红 / URL 里的 `//` 会吞掉同一行后面的真违规」）—— **合并时两边的实测证据都要留住**，
+      压成一句空话等于把两个教训并成一个。
+      —— **已还（2026-10-15）**：两条 `stripComments` 与 `withPlatformRedline` 全部收敛到 [test/tools/helpers.ts](test/tools/helpers.ts)，
+      用例数收敛前后**未变**（没丢断言）；上面那条「尚余一处」与文末「已知限度」第 29 条**均已删除**。
+      口径与分工见 [test/tools/AGENTS.md](test/tools/AGENTS.md)。
+      ⚠️ 唯一仍内联的是 `test/redlines.test.ts` 里那份 `stripComments` 的**判据语料**（红线要连注释一起剥）——
+      **有意保留的例外**，不是漏网的债。
+- [x] **两条独立复验留下的残余**（都不影响模型决策，方向安全，故未阻塞发布）：
       ① `resolvedDir` 对 `link:` 包报 realpath，偏离宿主的 `packageDirFromAnchor`（只进 `audit`，不进 `key`）；
       ② 凭据存在性扫描对 `records` 段内**更深层**的同名键会判 true（需 `grant` + 同名键同时出现才触发）。
 
