@@ -1,188 +1,171 @@
 ---
 name: dsh-plugin-debugging
 description: Debugging a DSH plugin against a running DSH instance. Use when a change did not take effect, when unsure whether to reload/restart, when the page returns 401, or when setting up an isolated instance.
-version: 2.1.4
-author: Zayn
+author: zlZayn
+metadata:
+  source:
+    repo: https://github.com/dsh-plugin-lab/dsh-plugin-debugging
+    path: skills/dsh-plugin-debugging
 ---
 
-# DSH 插件排障
+# DSH plugin troubleshooting
 
-定位：**排障**。本技能管「改完没生效、要不要重启、401、隔离、拿凭证」；**写插件本身不在范围内**。
+Scope: **troubleshooting**. This skill covers "my change did not take effect", "do I need a restart", 401, isolation, and credentials. **Writing a plugin is out of scope.**
 
-贯穿原理：**产物在不同时机被读取，读取时机决定改动后的动作。** 判断不清时先问：这份产物是什么时候被读的？
+The one principle: **an artifact is read at a particular moment, and that moment decides what you must do after changing it.** When a verdict is unclear, first ask: when is this artifact read?
 
-## 一、核心模型：生效机制三档
+**Tool availability, arguments and output belong to each tool's own description.** This skill states only *when* a capability is the right one. Never infer from this text whether a tool is currently enabled — if a tool refuses, its own output says why.
 
-| 改了什么 | 生效方式 | 为什么 |
+## When each artifact is read
+
+| What you changed | Takes effect | Why |
 | --- | --- | --- |
-| 配置 / patch / 启用状态 / 卸载 | **热生效** | loader 每次变更都重读，按行比较，只重建变化的行 |
-| 新装 bundle | **热生效**；但该包已在 `dependencies` 里时 → **重启** | 全新装走 `reload()`；已在依赖中只改选择则报 `restart-required` |
-| 已装插件宿主端代码 / 改插件依赖 | **必须重启** | 进程启动只装载一次模块；依赖变化改模块图 |
-| 客户端代码 / 界面 | HMR 自动换入；未挂则构建 + 刷新 | 浏览器侧独立加载，与宿主模块缓存无关 |
+| Config / patch / enabled state / uninstall | **live** | the loader re-reads on every change and rebuilds only the rows that differ |
+| A newly installed bundle | **live**; but **restart** once the package is already in `dependencies` | a brand-new install goes through `reload()`; an existing dependency only changing selection reports `restart-required` |
+| A plugin's host-side code, or its dependencies | **restart required** | a process loads modules once at startup; dependency changes alter the module graph |
+| Client code / UI | swapped by HMR; otherwise build and refresh | the browser side loads independently of the host's module cache |
 
-**"热生效"的前提是 HMR 已挂**：`reload()` 在没有 `hmr` 服务时是空操作，此时任何变更都退化成 `restart-required`。判断前先确认 profile 里有 `hmr`（`Config.listConfigs` 查 `include:hmr`）。
+**"Live" presumes HMR is mounted.** `reload()` is a no-op without the `hmr` service, and every change then degrades to `restart-required`. Confirm `hmr` is in the profile before judging. **It has exactly two sources of truth: the profile file and the composed tree that `dsh_dump_config` prints.** What you must **not** use is a plugin-status listing: whatever the session exposes, it can only tell you whether the row is there, never that the row is disabled — and the rows whose enablement depends on context are exactly the ones that matter. **Never read HMR off a listing.**
 
-差别不在「谁更麻烦」，而在**谁在读那份产物**：loader 每次重读配置，进程只在启动时装载代码，浏览器按资源指纹自行换入。
+The difference is not "which is more trouble" but **who reads that artifact**: the loader re-reads config every time, a process loads code once at startup, and the browser swaps assets by fingerprint.
 
-**推论**：凡「改代码没反应」，默认答案是重启；凡「改配置没反应」，默认答案是配置写错或落在被更高层整行覆盖的位置——配置本就该热生效。
+**Corollary.** For "a code change had no effect" the default answer is a restart. For "a config change had no effect" the default answer is that the config is wrong, or that it sits where a higher layer replaced the whole row — config is supposed to be live.
 
-## 二、判断流程
+## The decision procedure
 
-**先定模式**：工具列表里有 `cordis_inspect_list` → 有自检能力，§3.7 / §3.8 可用；没有 → 跳过那两节，只走下面的外部查法。
+**Establish the mode first.** If your tool list contains `cordis_inspect_list`, you have self-inspection and can use *Reading the load state*. If it does not, skip that section and use only the external checks below.
 
-按序问，命中即停：
+Ask in order, and stop at the first hit:
 
-1. **改完没生效？** 分类：客户端 / 宿主端 / 配置，对照 §一。**别先重装**——重装只改安装形态，不改生效时机。配置存疑 → §3.8。
-2. **插件加载了吗？** 有 `cordis_inspect_list` 就自检（`Config.listConfigs` 看 entry 在不在）；没有就外部查三处：`bundles`、形态（link/copy 见 §3.2）、进程。**三处都只证前置条件，不证加载成功**——Loader 树上的 fiber 状态可由**插件侧自己投影**（§3.8），但 `cordis_inspect_list` 那套看不到；启动失败看 `$DSH_HOME/logs/startup-*.log`（§3.8）。
-3. **401？** 先分「连接被拒」（没启动）与「401」（服务在、认证没过）。401 再分「带 cookie 的浏览器页面」与「不带凭据的探测」——只有前者能用「端口变没变」解释，见 §3.3。
-4. **重装 / 重启 / 隔离？** 依次看 §3.2（重装）／§一（重启）／§3.6（隔离）。判断完之后要动手，见 §3.9。
-5. **需要访问网页但没有 token / cookie？** → §3.4。（与 401 不同：可能还没访问过。）
+1. **Change had no effect?** Classify it against *When each artifact is read*: client, host-side, config, or a **newly installed bundle** — the one row with two outcomes. That row turns on *is the package already in the profile's `dependencies`?*, which is what `dsh_check_effect_mode`'s `alreadyInDependencies` answers; the profile's `package.json` is where it shows. **Do not reinstall first** — reinstalling changes only the install form, never when the artifact is read.
+2. **Did the plugin load?** With an inspection tool, self-inspect. Otherwise check three things externally: the bundle list, the install form, and the process. **All three prove preconditions only, never that loading succeeded.** A failed startup writes full diagnostics to `$DSH_HOME/logs/startup-*.log` — and that file survives across restarts, so compare it against the current process's start time before treating it as evidence.
+3. **401?** Separate "connection refused" (not started) from "401" (running, not authenticated). Then separate "a browser page carrying a cookie" from "a probe carrying no credentials" — only the first can be explained by a port change.
+4. **Reinstall, restart, or isolate?** See *Install form*, *When each artifact is read*, and *Isolated instance*. To act on the verdict, see *Acting on the verdict*.
+5. **Need to reach the page but have no token or cookie?** See *Credentials*. This is not the same as 401 — you may simply never have visited it.
 
-## 三、事实库与理由
+## Facts
 
-### 3.1 组合模型 —— 解释「装了却没启用」
+### Composition
 
-- bundle 是**带 `dsh.bundle` 声明的 npm 包**，贡献一个 patch 层，不是插件本身。
-- profile 的 `dsh.profile.bundles` 有序；加载序：各 bundle patch（按列表序）→ profile patch → home patch → `--patch`。
-- **后层按行胜出，patch 替换整行 config，不深合并。**
-- 于是「装了没生效」有两类原因：**没进 bundles**（层没激活），或 **config 被后层整行替换**。第三类（包没声明 `dsh.bundle`）见 §3.2。
-- 为什么整行替换：每层结果可预测、可回滚；代价是覆盖一个字段要重写整行。
+- A bundle is an **npm package that declares `dsh.bundle`**. It contributes a patch layer; it is not the plugin itself.
+- A profile's bundle list is ordered. Load order is: each bundle patch in list order, then the profile patch, then the home patch, then any command-line patch.
+- **A later layer wins row by row, and a patch replaces the whole config row — it does not deep-merge.**
+- So "installed but not active" has two causes here: **the package never entered the bundle list** (the layer never activated), or **its config row was replaced wholesale by a later layer**. A third cause is in *Install form*.
+- Why whole-row replacement: it keeps every layer's result predictable and revertible. The cost is that overriding one field means rewriting the row.
 
-### 3.2 安装形态 —— 解释「要不要重装」
+### Install form
 
-- `dsh plugin add ./<本地目录>` → **link**：改仓库即时生效，不用重装。
-- `dsh plugin add <registry 包>` → **拷贝快照**：改源码不影响已装副本，需重装。
-- 两种形态混存**正常**，由来源决定。
-- `add` = pnpm 装依赖 + 包名追加进 `dsh.profile.bundles`。
-- link 免重装的原理：link 只是指向仓库的入口，仓库产物就是被读产物，中间没有拷贝层。
+- `dsh plugin add ./<local dir>` gives a **link**: edits to the repository take effect immediately, with no reinstall.
+- `dsh plugin add <registry package>` gives a **copied snapshot**: editing the source does not touch the installed copy, so it needs a reinstall.
+- The two forms coexisting is **normal**. The source decides which one you have.
+- An add step installs dependencies and appends the package name to the profile's bundle list.
+- Why a link needs no reinstall: a link is only an entry pointing at the repository, so the repository's artifacts are the artifacts being read. There is no copy in between.
 
-**第三类原因：包有没有声明 `dsh.bundle`。** §3.1 的两类（没进 bundles / config 被覆盖）之外：
+**The third cause: does the package declare `dsh.bundle`?**
 
-- **判据是 `dsh.bundle` 声明，与 link/copy 无关**：声明了 → 贡献 patch 层、**自动应用**（link 也一样）；没声明 → 只是普通依赖，**不贡献层**，`add` 会警告 `declares no dsh.bundle`，装它需要自己写条目。
-- **`link`/`copy` 只决定"改源码要不要重装"**，不决定 patch 应不应用。别把两件事混成一件。
-- profile patch 的条目往往**不是挂载**（行来自 bundle 层），而是**只覆盖 config**——`--dump-config` 的 `patched by <file>` 标注即此意。
-- **官方约束**：不要手写 profile 的 `package.json` 依赖/bundles 列表（由 `add` 管理），不要在 `$DSH_HOME` 下建包，不要在 profile 目录跑 pnpm。
+- **The criterion is the declaration, and it is independent of link versus copy.** Declared: the package contributes a patch layer and is **applied automatically**, links included. Not declared: it is an ordinary dependency that **contributes no layer**, the add step warns that it declares no bundle, and you must write the entry yourself.
+- **Link versus copy decides only whether editing the source needs a reinstall**, never whether the patch applies. Do not merge the two questions.
+- A profile patch's rows are often **not mounts** — the row comes from the bundle layer — but **config-only overrides**. That is what the composition dump's "patched by" annotation marks.
+- **Upstream constraints**: do not hand-write a profile's dependency or bundle lists (the add step manages them), do not create packages under `$DSH_HOME`, and do not run a package manager inside a profile directory.
 
-### 3.3 认证机制
+### Authentication
 
-- 有效 token 交换是 **303 + Set-Cookie → 200**，不是直接 200；拿 303 是成功。
-- cookie 由 `.credentials.yaml` 的**持久签名密钥**签发，**30 天**，**绑定 authority（host:port）**。
-- **30 天是死的，不滑动刷新**：全流程只有交换那一次 `set-cookie`，已认证请求只验签、不发新 cookie。所以「同端口重启照常可用」的边界就是这 30 天。
-- 因此**带有效 cookie 的旧标签页**在同端口重启后照常可用；**换端口**才让它 401。旧 launch token 重启后失效 → 401；连接被拒 = 没启动。
-- ⚠️ **401 本身不等于「端口变了」**：不带 cookie 的请求**一律** 401。`dsh_check_auth` 就是这种探测（不读值、**不自签也不发送 cookie**），所以它报 401 只证「服务在、要鉴权」，**答不了**「登录态还有效吗 / authority 对不对」—— 那要**在浏览器里打开同一个 authority** 才区分得开。
-- 「token 不落盘」**不准确**：准确说是 **launch token 不落盘，签名密钥落盘**。这个区别是 §3.4 的全部理由。
+- A valid token exchange is **303 plus Set-Cookie, then 200** — not a direct 200. **A 303 is success.**
+- The cookie is signed by the **persistent signing key** in the credentials file, and is **bound to an authority**, host and port together.
+- **Its lifetime is fixed and does not slide.** The exchange is the only place a cookie is ever set; authenticated requests only verify a signature. So "the same port survives a restart" is bounded by that lifetime, and never refreshed by use.
+- Therefore an **old tab holding a valid cookie keeps working after a restart on the same port**. **Changing the port** is what makes it 401. A stale launch token fails after a restart, also 401. Connection refused means not started.
+- ⚠️ **401 on its own does not mean the port changed.** A request carrying no cookie gets 401 **always**. An auth probe is exactly that kind of request — it reads no value and signs no cookie — so its 401 proves only that the service is up and wants authentication. It **cannot** answer "is my session still valid" or "is this the right authority". Only **opening that authority in a browser** separates those two.
+- "The token is never on disk" is **imprecise**. Precisely: the **launch token is not on disk; the signing key is**. That distinction is the entire reason *Credentials* works.
 
-### 3.4 凭证获取 —— 怎么拿（为什么通常不用问人）
+### Credentials
 
-**首选**读 `$DSH_HOME/.credentials.yaml` 中 `client-connection/browser-session` 的 secret，自签 cookie（名 `dsh-auth-<base64url(sha256(authority))>`）直接访问，不依赖日志或终端；**兜底**才让用户从终端或地址栏复制。
+**First choice**: read the browser-session secret out of `$DSH_HOME/.credentials.yaml` — the `client-connection/browser-session` record — and sign the cookie yourself. No logs, no terminal. **Fall back** to having the user copy a value out of the terminal or the address bar.
 
-**别扫进程内存**：对**主实例基本不可用**——主进程内存就装着当前会话记录（含历史 token），必然污染判定；只对隔离实例干净。
+The cookie is `dsh-auth-<base64url(sha256("<host>:<port>"))>` whose value is `v1.<base64url(body)>.<base64url(HMAC-SHA256(secret, body))>`, with `body` the JSON `{"version":1,"authority":"<host>:<port>","issuedAt":ms,"expiresAt":ms}`. Sign the **body string itself**, not a re-serialized JSON, and keep the authority byte-identical to the real `Host` header — `localhost` and `127.0.0.1` are not interchangeable. Anything that signs for you will not hand the value back, so this is what you give a human or a local script.
 
-**别再试的两条**：读进程环境变量（token 是进程内对象，env 里只有**不含 token** 的 `DSH_WEB_URL`）；读启动终端（ConPTY 无传统控制台缓冲区，UI Automation 只有可视区）。
+**Do not scan process memory.** For **the main instance it is essentially useless**: the main process holds the current session record, historical tokens included, which pollutes the verdict. It is clean only for an isolated instance.
 
-**首选成立的原理**：cookie 验证只依赖签名密钥与 authority，与 launch token 无关——token 只是首次进入的敲门砖，不是长期凭证。**边界**：独立 `DSH_HOME` = 独立 credentials = 独立 cookie secret。
+**Two dead ends — do not retry them.** Reading process environment variables: the token is an in-process object, and the environment holds only a URL that does **not** contain it. Reading the launching terminal: a pseudoconsole has no traditional console buffer, and UI automation sees only the visible region.
 
-### 3.5 进程识别
+**Why the first choice works**: cookie verification depends only on the signing key and the authority, never on the launch token. The token is the way in the first time, not a long-lived credential. **Boundary**: a separate home means separate credentials, and therefore a separate cookie secret.
 
-按端口：`Get-NetTCPConnection -LocalPort <port> -State Listen`，唯一准确。不要用命令行子串（如 `*bin.js*`）过滤，会误匹配派生的 shell 子进程。
+### Process and port
 
-### 3.6 隔离实例
+Identify by port. That is the only accurate way. Do not filter by a command-line substring such as a script file name: it also matches derived shell subprocesses.
 
-必须带 `--from-default-profile <template>`，否则新 `DSH_HOME` 下没有 profile 可启动而报错。独立 `DSH_HOME` 才真正隔离：数据、credentials、cookie secret 全独立。
+### Isolated instance
 
-`<template>` 常用 `web`；**合法值以报错枚举为准**（填错会打印 `unknown default profile …; expected one of …`），勿硬编码。
+The instance must be given a template profile, otherwise the new home has no profile to start and reports that the profile does not exist. Only a separate home truly isolates: data, credentials and cookie secret all become separate.
 
-### 3.7 client 查询失败：`Client failure` ≠ 没有页面
+The template is commonly the web profile. **The legal values are whatever the error enumerates** — a wrong one prints the list — so do not hardcode it.
 
-client 查询的三态措辞在工具描述里可见，不重复。**只记这个反直觉点**：`Client failure: <msg>` 看着像「没页面，重试吧」，实际是**页面在线**的证据——它只在 handler 抛错后出现，`<msg>` 才是真错因。「没有在线页面」是另一条措辞。据此把「没页面」与「页面在、插件代码炸了」分开，正是排插件要的区分。Host 查询不走这条路（本地直接返回）。
+### Reading the load state
 
-### 3.8 插件真的加载失败了吗
+**Fiber-level state is queryable; it is just not in the config listing.** Two counter-intuitive points decide the verdict:
 
-**Fiber 级状态能查，只是不在 `Config.listConfigs` 里**。插件侧可直接观测：`ctx.get('loader')` **无需声明 `inject`** 就可见、`loader.entries()` 可枚举，`entry.fiber.state` 实测 `2`=active / `3`=apply 失败（还能读到 `fiber._error`）/ `0`=pending；⚠️ **import 期就失败的 entry，其 `entry.fiber` 是 `undefined`**——只看 `state===3` 会漏掉它（宿主把它归为 `failed to import`）。而 `Config.listConfigs` 的 **Config 状态**（`schema` / `absent` / `unsupported` / `tree` / `inactive`）运行期也可查，但 `inactive` 混合了「禁用 / 未导入 / 已销毁」三义，**从不报 FAILED**——它答不了"崩没崩"。要确认得看：
+- ⚠️ **A client failure looks like "no page, retry", but it is evidence the page is online.** It appears only after a handler throws, and the message it carries is the real cause. "There is no online page" is a *different* message. Separating "there is no page" from "the page is there and the plugin's code threw" is exactly the distinction this work needs.
+- ⚠️ **An entry that fails at import time has no fiber at all.** The host files it as a failed import, so a check that only looks for an apply failure misses it entirely.
 
-- **启动期**有硬证据：必需插件没激活会让启动直接失败，并把完整诊断写到 `$DSH_HOME/logs/startup-<ISO>-<uuid>.log`（**只在启动失败时生成**，不是常驻日志），同时把路径打到终端。
-- **运行期**：查该插件应有的注册面（工具、slot、服务）是否缺失，并回看它在启动报告里是否已被点名。
-- **配置写错了**：`dsh --profile <p> --dump-config-schema`，看 `x-cordis.diagnostics`（也打到 stderr）。它同时覆盖**组合期错**（`patch: name mismatch` / `entry not found`，会被 `skipping` **整条丢弃**）与 **schema 层问题**；**退出码 1 = 有 error**。
-  - 但 **error 可能是误报**（如官方 `preset-*` 行的 `config.plugins` 会报 `unrecognized Loader tree carrier`）：先看 error 的 `path` 是否指向**你改过的行**，再当问题。
-- 只要配置树、不要三万多行 JSON：`--dump-config`——stderr 仍报组合期错，但**不做 schema 校验**，且**退出码恒 0，别拿它当门禁**。
+The config listing's own status is readable at runtime, but **its "inactive" value mixes three meanings — disabled, never imported, and disposed — and it never reports a failure**, so it cannot answer whether something crashed.
 
-### 3.9 干预 —— 判断之后的动作
+To actually settle it:
 
-**判断与行动是分开的**：§一 与 §3.1–3.8 只给结论，诊断类工具一律只读；真正改状态的动作只有两个工具，下面只答「什么时候用」与「代价」。
+- **At startup there is hard evidence.** A missing required plugin fails startup outright and writes full diagnostics to a startup log file under the home's logs directory — **written only when startup fails**, not a running log — and prints the path to the terminal. ⚠️ **That file stays on disk across restarts**, so it may not belong to the current process. Compare it against the current process's start time. The answer has three values: it belongs to this start; it predates this start, so it is a leftover and **not** evidence of a failure now; or the comparison cannot be made, in which case it is neither. **Only the first supports a conclusion about this start.**
+- **At runtime**, check whether the registration surface the plugin should have — its tools, slots and services — is missing, and look back at whether the startup report already named it.
+- **A config mistake**: call `dsh_dump_config` — it runs the schema check and reports the diagnostics it attaches. It covers both composition-time errors, which are dropped wholesale rather than partially applied, and schema-layer problems. **A non-zero exit code means there is an error.**
+- **Just the composed tree, without the huge JSON**: the plain composition dump does **no schema validation**, and **its exit code is always 0 — never use it as a gate**.
 
-**写侧 `dsh_hot_reload`：换插件自己的代码，不重启宿主。**
+## Acting on the verdict
 
-- **什么时候用**：刚改完插件**宿主端代码**，而 §一 判定这一档「必须重启」—— 它把重启提前到当下，进程不动。
-- **给目标的方式**：`entryId` / `module` / `serverName` **恰好给一个**（给零个或多个都会被拒，不猜）。
-- **第一次先预览**：带 `dryRun: true`，它只报告不换。
-- **失败会放回旧版本**：L2 里的 `rolledBack` 与 `oldFiberTouched` 说明运行中的树被碰过没有（已实测：import 期失败时旧 fiber 从未被碰）。
-- **它管不到的资源**：cordis 之外开的定时器、socket、`process.on`、文件句柄、worker 不被追踪，换完**静默泄漏** —— 这一句也是该工具描述的 `boundary` 段。
+**Judging and acting are separate.** The sections above only produce verdicts, and the diagnostic tools are read-only. Three tools change state or hand out a credential. For each, this section answers only *when* it is the right one and what it costs.
 
-**派生 `dsh_sign_cookie`：让脚本 / 命令行客户端带上凭证。**
+**`dsh_hot_reload` — swap a plugin's own code without restarting the host.**
 
-- **什么时候用**：`dsh_check_auth` 报 401 之后，且下一步要访问网页的不是浏览器标签页。
-- **它是本插件唯一读签名密钥的工具**；cookie **值刻意不进返回值** —— 报的是「签成了、绑在哪个 authority、cookie 叫什么名」。
-- **cookie 名不是秘密**，可以拿去用；authority 与 30 天寿命的机制、边界见 §3.3。
+- **When**: you just changed a plugin's **host-side code**, and the model above puts that tier at "restart required". This brings the restart forward without touching the process.
+- **Preview before you commit**: it accepts a dry run that reports without swapping anything.
+- **A failed swap is rolled back**, and it reports whether the running tree was touched at all.
+- **What it cannot manage**: anything the framework does not track — the tool's own boundary paragraph names the kinds — leaks silently when the entry is swapped, so a swapped entry can leave a live timer or socket behind.
 
-**行动 `dsh_restart`：重启宿主，并接回之前的会话。**
+**`dsh_sign_cookie` — give a script or CLI client credentials.**
 
-- **什么时候用**：`dsh_check_effect_mode` 判 `restart-required`（改 config 且没挂 hmr），或改的是宿主**启动期**才读的东西 —— 热重载换不掉的那些。
-- **它是本插件唯一会结束宿主进程的工具**：不可逆（对话在飞、端口在听，全断）。所以它**先过四道确定性闸门**（重启循环熔断 / 别的会话或作业在飞 / bundle 表读不到 / 拿不到启动命令），**再**过审批门；`force: true` **只**覆盖「有会话在飞」那一道，①③④ 不可绕。
-- **两道门都要过**：审批档（`ask` 弹窗，只有「允许一次」算同意；`never` 档**不问**直接执行）与文件沙箱档（写状态需要 `danger-full-access`，否则被拒并说明原因）。**先 `dryRun: true` 演练**是安全的 —— 它只跑闸门、不落盘。
-- **重启后会自动接回会话**：新宿主读回重启标记，逐个 `resolveAgent` 把会话拉起来并投一条 notice（**事实 + 指针**，不是「请继续」）。所以它会**真的跑一个 turn**。
-- **不能跨实例**：它换的是**本进程 / 本宿主**的生命周期。要操作另一个实例，先 `dsh_list_instances` 拿到 authority，再用带 `dshHome` 的只读工具。
-- ⚠️ **真拉起只在 Windows 上**（计划任务那条路线）：别的平台**在写任何东西之前就结构化拒绝**（闸④），所以它**不会**在非 Windows 上「试一下」—— 别把它的拒绝当成可以绕的报错。
-- 「该不该重启」的判断仍在 §一，凭证与 401 的分路在 §3.3。
+- **When**: an auth probe returned 401, and the next step is not a browser tab.
+- It is the only tool here that reads the signing key, and **the cookie value deliberately never enters its return value**. It reports that signing succeeded, which authority the cookie is bound to, and the cookie's name.
+- **The cookie name is not a secret** and can be used as it is. The authority and lifetime mechanics are in *Authentication*.
 
-## 四、命令参考
+**`dsh_restart` — restart the host and bring the previous sessions back.**
 
-占位符：`<port>`、`<profile>`、`<plugin-repo>`、`<DSH_HOME>`、`<包名>`。
+- **When**: a change is classified as restart-required, meaning a config change with no HMR mounted — or you changed something read only at host **startup**, which a hot swap cannot replace.
+- **It is the only tool here that ends the host process, and it is irreversible**: in-flight conversations, listening ports, all gone. It therefore passes four deterministic gates — restart-loop breaker, other sessions or jobs in flight, an unreadable bundle table, an undeterminable launch command — **before** the approval gate. Forcing the restart overrides only the "sessions in flight" gate; the other three cannot be bypassed.
+- **Two independent gates must both pass**: the approval policy, and the file sandbox. Writing the restart state needs full access and is refused with a reason otherwise. **A dry run is safe** — it runs the gates and writes nothing.
+- **Sessions are brought back automatically.** The new host reads the restart marker, wakes each listed session, and delivers one notice: facts plus a pointer, never "please continue". So it **really does run a turn**.
+- ⚠️ **The notice's reason goes only to the session that requested the restart.** Sessions that were merely interrupted receive the same facts — when it was requested, how long it took, what became of the marker — **without the reason**. It is a note the user left for themselves, not an announcement. So you cannot read someone else's reason, and you should not relay the one you receive.
+- **It cannot cross instances.** It changes this process's lifetime. To work on another instance, discover it first: the discovery tool's result is an authority, host and port only, and **nothing maps an authority to a home**, so any tool that needs a home must be given one by the caller.
+- ⚠️ **A real relaunch is Windows-only.** Elsewhere it refuses structurally **before writing anything**, so it will not "try it" on another platform. Do not read that refusal as a bypassable error.
+- Whether a restart is warranted at all is decided in *When each artifact is read*. Credentials and the 401 split are in *Authentication*.
+
+## Command reference
+
+Placeholders: `<port>`, `<profile>`, `<plugin-repo>`, `<home>`, `<package name>`, `<template>`. The diagnostic and acting tools above cover everything else here.
 
 ```powershell
-# 进程（按端口，唯一可靠）；产物比进程新 = 宿主端是旧产物
-$conn = Get-NetTCPConnection -LocalPort <port> -State Listen
-Get-CimInstance Win32_Process -Filter "ProcessId=$($conn.OwningProcess)" | Select-Object CreationDate
-(Get-Item <plugin-repo>\lib\index.js).LastWriteTime
+# Install / list — no tool covers this.
+dsh plugin --profile <profile> add <plugin-repo>       # local dir -> link
+dsh plugin --profile <profile> add <registry package>  # registry -> copied snapshot
 
-# 安装形态：SymbolicLink=link；普通目录=拷贝
-Get-Item "<DSH_HOME>\profiles\<profile>\node_modules\<包名>" | Select-Object LinkType, Target
+# Isolated instance — no tool covers this.
+# Omitting the template reports that the profile does not exist.
+$env:DSH_HOME = "<separate dir>"
+dsh --profile <new profile> --from-default-profile <template> --port <free port> --no-open
 
-# 安装 / 列表
-dsh plugin --profile <profile> add <plugin-repo>   # 本地目录 -> link
-dsh plugin --profile <profile> add <registry 包>    # registry -> 拷贝
-
-# 核对组合结果（配置错位时最有用）；`patched by <file>` = 该行被该层改过，
-# 无标注的行来自 bundle 层（不是 profile patch 挂的）
-# 注意：退出码恒 0，不能拿它判断配置好坏
-dsh --profile <profile> --dump-config | Select-String -Pattern '<行 id>' -Context 0,8
-
-# 验配置：看 x-cordis.diagnostics（覆盖组合期错 + schema 层）；退出码 1 = 有 error
-dsh --profile <profile> --dump-config-schema
-
-# 加载：entry 在不在、Config 状态为何（inactive 不区分崩溃与禁用）
-#   启动失败才会生成完整诊断 → $DSH_HOME\logs\startup-*.log
-
-# 隔离实例（缺 --from-default-profile 会报 profile does not exist）
-$env:DSH_HOME = "<独立目录>"
-dsh --profile <新 profile> --from-default-profile <template> --port <未占用端口> --no-open
-
-# 认证自检：401=服务活着且认证生效；连接被拒=没启动
-try { Invoke-WebRequest "http://127.0.0.1:<port>/" -MaximumRedirection 0 } `
-catch { $_.Exception.Response.StatusCode.value__ }
-
-# 自签 cookie：取 client-connection/browser-session 的 32B secret（字段均为必填，编码已实测）
-#   name  = "dsh-auth-" + base64url(sha256("<host>:<port>"))     # 摘要 43；前缀 9，完整名 52
-#   body  = base64url(JSON)                                      # 键序无关
-#   value = "v1." + body + "." + base64url(HMAC-SHA256(secret, body))
-#   JSON  = {"version":1,"authority":"<host>:<port>","issuedAt":ms,"expiresAt":ms}
-# 要点：签的是 body 这个字符串本身（不是原始 JSON）；authority 必须与实际 Host 逐字一致
-#       （含端口，且 localhost 与 127.0.0.1 不通用），否则 401。
+# Identify the process holding a port — the only accurate way, and the fallback
+# when no inspection tool is available in this session.
+Get-NetTCPConnection -LocalPort <port> -State Listen
 ```
 
-## 五、边界：管什么、不管什么
+## Boundaries
 
-**管**：装载时机与生效判断（§一）、安装形态与 patch 层归属（§3.1–3.2）、加载状态查询（§3.7–3.8）、认证与凭证（§3.3–3.4）、进程与端口（§3.5）、隔离实例（§3.6）、判断之后的写侧与派生动作（§3.9）。
+**In scope**: load timing and effect verdicts, install form and patch-layer ownership, load-state queries, authentication and credentials, processes and ports, isolated instances, and the write-side, derived and acting tools once a verdict is reached.
 
-**不管**：插件代码怎么写、扩展点选哪个、模板长什么样、preset 怎么改、可安装包有哪些——这些要另找对应资料。
+**Out of scope**: how to write plugin code, which extension point to choose, what a template looks like, how to edit a preset, and which packages are installable. Find the corresponding material elsewhere.
 
-边界上的一处重叠：§3.2 讲 patch 条目，只为判断「这行为什么在这个层」，不涉及 patch 方言的完整写法。
+One overlap at the boundary: *Install form* discusses patch rows only to answer "why is this row on this layer". The full patch dialect is elsewhere.

@@ -168,9 +168,11 @@ describe('registerSkills —— 成功路径', () => {
     expect(report.contentBytes).toBeGreaterThan(0)
     expect(report.contentBytes as number).toBeLessThan(Buffer.byteLength(raw, 'utf8'))
     expect(calls[0].content.startsWith('---')).toBe(false)
-    // 正文首尾的锚点：证明这是 v2.1.4 那份技能，不是别的文件。
-    expect(calls[0].content.startsWith('# DSH 插件排障')).toBe(true)
-    expect(calls[0].content.endsWith('不涉及 patch 方言的完整写法。')).toBe(true)
+    // 正文首尾的锚点：证明这是本仓那份技能，不是别的文件。
+    // （2026-10-15：正文改成全英文，锚点随之换；原先那句「证明这是 v2.1.4 那份技能」里的版本号
+    //   是会漂的值 —— frontmatter 的 `version` 键已删，它本来也没有读取者。）
+    expect(calls[0].content.startsWith('# DSH plugin troubleshooting')).toBe(true)
+    expect(calls[0].content.endsWith('The full patch dialect is elsewhere.')).toBe(true)
   })
 
   it('技能根按产物位置解析：从 lib/skills/ 上溯两级仍落在包根的 skills/', () => {
