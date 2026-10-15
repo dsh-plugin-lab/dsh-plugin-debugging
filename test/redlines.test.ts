@@ -818,10 +818,17 @@ describe('B7 files 覆盖随包必需的路径', () => {
     expect(offenders, describeOffenders('files 没覆盖', offenders)).toEqual([])
   })
 
-  it('判据可被否证：删掉 skills 条目，技能就不再随包', () => {
-    const mutated = (packageJson.files ?? []).filter((entry) => entry !== 'skills')
-    const offenders = judgeFilesCoverage(mutated)
-    expect(offenders).toContain('skills/dsh-plugin-debugging/SKILL.md')
+  it('判据可被否证：删掉所有提到 skills 的条目，技能就不再随包', () => {
+    // **不写死条目名**：`files` 怎么拼（整目录 `skills`，还是显式路径
+    // `skills/<name>/SKILL.md`）与这条否证无关。写死就会变成「改了拼法 ⇒ 一条都没删掉
+    // ⇒ 否证静默失效」—— 那正是本仓踩过的那类空转（与坑 18 同族）。
+    const before = packageJson.files ?? []
+    const mutated = before.filter((entry) => !entry.includes('skills'))
+    expect(
+      mutated.length,
+      '`files` 里一条提到 skills 的条目都没有 —— 变异没落地，这条否证在空转',
+    ).toBeLessThan(before.length)
+    expect(judgeFilesCoverage(mutated)).toContain('skills/dsh-plugin-debugging/SKILL.md')
   })
 
   it('判据可被否证：取反条目不算覆盖', () => {

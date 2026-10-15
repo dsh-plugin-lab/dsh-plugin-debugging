@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-debugging",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "For DSH plugin development: runtime diagnostics and in-place fixes your agent can run itself.",
   "keywords": [
     "dsh",
@@ -39,7 +39,7 @@
     "!lib/**/*.map",
     "icon.svg",
     "locale/*.json",
-    "skills",
+    "skills/dsh-plugin-debugging/SKILL.md",
     "cordis.patch.yml",
     "README.md",
     "README_zh.md",
