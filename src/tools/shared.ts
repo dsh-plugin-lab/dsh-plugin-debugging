@@ -11,6 +11,8 @@
 import type { JsonValue, ToolFail, ToolResult } from '../lib/errors.js'
 import { ensureToolResult, fail } from '../lib/errors.js'
 import type { ResolvedConfig } from '../contracts.js'
+import type { CarrierObservation } from '../lib/carrier.js'
+import { UNKNOWN_CARRIER } from '../lib/carrier.js'
 import type { FetchImpl } from '../lib/http.js'
 import { defaultFetchImpl } from '../lib/http.js'
 import type { SpawnImpl } from '../lib/exec.js'
@@ -21,6 +23,13 @@ import { renderToolResult, type RenderTable, type TextBlockLike } from '../lib/r
 /** 四个工具共享的依赖。 */
 export interface ToolDeps {
   readonly config: ResolvedConfig
+  /**
+   * 这个宿主跑在什么载体上（`apply()` 里探**一次**，判定与理由见 `src/lib/carrier.ts`）。
+   *
+   * **必填**而不是可选：可选会让「没探过」与「探出 `unknown`」在类型上不可分，
+   * 而两者对判据的意义完全不同 —— 前者是接线漏了（本插件的 bug），后者是一条真结论。
+   */
+  readonly carrier: CarrierObservation
   readonly spawn: SpawnImpl
   readonly fetch: FetchImpl
   /** 当前时间；只为测试注入（默认 `Date.now`）。 */
@@ -58,6 +67,11 @@ export function unavailableLoader(): LoaderReadResult {
 /**
  * 造运行期依赖。
  *
+ * `carrier` 的兜底是 {@link UNKNOWN_CARRIER}（**不是** `cli`）：`cli` 会让
+ * `relaunchRouteFor` 在 win32 上给出 `task-scheduler` —— 那就是「把不知道印成有能力」。
+ * 兜底取 `unknown` 于是**偏向拒绝**：任何忘了注入载体的用例都会在闸④上响亮地失败，
+ * 而不是悄悄走通一条它在真机上并不拥有的路线（本仓最典型的那种假绿）。
+ *
  * @param config 已补齐默认值的配置。
  * @param overrides 测试注入的替身。
  */
@@ -67,6 +81,7 @@ export function createToolDeps(
 ): ToolDeps {
   return {
     config,
+    carrier: overrides.carrier ?? UNKNOWN_CARRIER,
     spawn: overrides.spawn ?? defaultSpawnImpl,
     fetch: overrides.fetch ?? defaultFetchImpl,
     now: overrides.now ?? Date.now,

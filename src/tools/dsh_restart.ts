@@ -41,17 +41,32 @@
  * 退出走 `ctx.get('appExit')`（`AppExit = (code: number) => void`）—— 宿主源码点名
  * `process.exit` 那条路 bypassing `ctx.appExit`。取不到 ⇒ **结构化失败**，不猜（B24）。
  *
- * ## 拉起走计划任务
+ * ## 拉起走计划任务 —— 而「能不能回来」是**另一维**
  *
  * `{detached: true}` 实测**不能**逃出宿主的 job（宿主退出时被 `KILL_ON_JOB_CLOSE` 一起收掉），
  * 而计划任务（`schtasks`）实测无需提权、父进程是 `svchost.exe`、被起进程 `inHostJob=0`
- * （见 `docs/HOST-CONTRACTS.md` §2.2.2 的 [A] 行）。⇒ 本层在 Windows 上走它；
- * **别的平台没有已实测的路线**，于是闸④直接判「拿不到启动命令」—— 在**动任何东西之前**拒绝。
+ * （见 `docs/HOST-CONTRACTS.md` §2.2.2 的 [A] 行）。⇒ 本层在 Windows 上走它。
+ *
+ * ⚠️ **但「拼得出一条命令」不等于「有人能把它拉回来」**（2026-10-15 真机缺陷）：
+ * 桌面宿主上命令拼得出来（拼的还是另一个 profile），闸④ 于是放行、宿主退出、**没人回来**。
+ * 所以闸④ 的**第一问是载体**（`lib/carrier.ts` 的路线表）：
+ * - 桌面宿主 ⇒ `no-relaunch-route`（插件侧没有通道，只有 Electron 壳能 `app.relaunch()`）；
+ * - 非 win32 的命令行 ⇒ `no-relaunch-route`（没有已实测路线）；
+ * - 认不出来 ⇒ `no-relaunch-route`（不猜）；
+ * - 只有 `cli × win32` 才轮到第二问「命令定得出来吗」⇒ 定不出来是 `no-launch-command`。
+ *
+ * 两种拒绝都在**动任何东西之前**（零写 marker、零拉起、零退出）。
  */
 import { defineTool, type ToolDefinition, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 
 import { fail, ok, type NextStep, type ToolFail, type ToolResult } from '../lib/errors.js'
 import { budgetFor, createDeadline, toolBudgetMs, type Workload } from '../lib/timeouts.js'
+import {
+  carrierAuditOf,
+  relaunchRefusalFor,
+  type CarrierKind,
+  type CarrierObservation,
+} from '../lib/carrier.js'
 import { resolveDshLaunch } from '../lib/dump.js'
 import type { SpawnImpl } from '../lib/exec.js'
 import { profileDir, readProfileManifest } from '../lib/profile.js'
@@ -237,21 +252,30 @@ export interface RestartToolDeps extends ToolDeps {
  *
  * 逐段理由：
  * - `what`：动词 + 对象，并点明它**跨不到另一个实例**（那是它与「文件型工具」的分界，
- *   也是唯一会让人事后吃亏的地方：重启只作用于本进程所在的宿主）。
+ *   也是唯一会让人事后吃亏的地方：重启只作用于本进程所在的宿主）。措辞从
+ *   `cannot reach another instance` 压成 `not another instance`（2026-10-16）—— 事实没变，
+ *   只是为了给边界段的第四件事实腾字符（B20a 的 240 字符上限）。
  * - `useWhen`：路由信号 —— 「某个改动需要重启」。协作纪律（先问 `dsh_check_effect_mode`）
  *   写在 SKILL 正文里，描述层不复述。
- * - `boundary`：**三件执行前必须知道、且调用结果里学不到的事**：① `ask` 档会弹窗、
+ * - `boundary`：**四件执行前必须知道、且调用结果里学不到的事**：① `ask` 档会弹窗、
  *   `never` 档不问（读档位再决定问不问）；② **只有 Windows 上有已实测的拉起路线** ——
- *   非 win32 上 `launchCommandFrom` 与 `relaunchViaTaskScheduler` 两处都会拒绝，所以这是
- *   一条真的**路由信号**（模型该在调用之前就知道，而不是撞一次拒绝再回头）；③ 写状态还要过
- *   **文件沙箱档**（与审批档互相独立）。三条都是事实，不是承诺。
+ *   非 win32 上 `launchCommandFrom` 与 `relaunchViaTaskScheduler` 两处都会拒绝；③ **桌面宿主
+ *   一律被拒**（2026-10-15 真机缺陷之后新增的那一档）—— 这里写的**不是**「暂时不支持」，
+ *   而是结构事实：插件侧没有重启通道，只有 Electron 壳自己 `app.relaunch()`，而且
+ *   `dsh --profile desktop` 被命令行**无条件拒绝**。所以模型该在**调用之前**就知道这条路
+ *   走不通（真机那次事故正是「先拼出一条命令、宿主退出、没人回来」）；
+ *   ④ 写状态还要过**文件沙箱档**（与审批档互相独立）。四条都是事实，不是承诺。
  * - `cost`：行动类的三件事 —— **不可逆**、有 `dryRun` 可预览、`force` 只覆盖闸②。
  */
 export const RESTART_DESCRIPTION: ToolDescription = {
-  what: 'Restarts this host; it cannot reach another instance.',
+  what: 'Restarts this host, not another instance.',
   useWhen: 'Use when a change needs a restart.',
-  boundary: 'ask prompts, never auto-runs; Windows only; the write also passes the file sandbox.',
-  cost: 'Irreversible; dryRun previews; force overrides only the busy gate.',
+  // 四件事实的顺序即「模型最可能撞上的顺序」：审批窗 → 平台 → 载体 → 沙箱。
+  // ⚠️ 「Windows only」这句现在与下一句**成对读**：**已实测的路线**只在 Windows 上、
+  // 且只在**命令行载体**上；桌面宿主在任何平台都被拒（下一句）。
+  boundary:
+    'ask prompts, never auto-runs; Windows only; Desktop hosts are refused; the write needs the file sandbox.',
+  cost: 'Irreversible; dryRun previews; force: busy gate only.',
 }
 
 /**
@@ -306,6 +330,14 @@ export interface RestartKey {
   markerWritten?: boolean
   /** 这次是演练。 */
   dryRun?: true
+  /**
+   * 这次调用是在什么载体上跑的（`cli` / `desktop-host` / `unknown`）。
+   *
+   * **L2 里只在不是 `cli` 时印**（照 `restartEnabled` 只在为假时印的先例）：
+   * `cli` 是默认路径、没有信息量，而 `desktop-host` / `unknown` 正是「为什么被拒」那一格
+   * —— 模型要对上闸④的 `no-relaunch-route` 就得看得见它。
+   */
+  carrier?: CarrierKind
   /** 这次覆盖了闸②（留痕）。 */
   forced?: true
   /** 写 marker 用的文件沙箱档位。 */
@@ -346,6 +378,11 @@ export function createRestartTool(deps: RestartToolDeps): ToolDefinition {
       let stage: RestartStage = 'gates'
       try {
         const config = deps.config
+        // 载体是 `apply()` 探过**一次**的进程级事实（`ToolDeps.carrier`）。它有两处消费者：
+        // 闸④的路线判据，以及 `audit` 里给人复核的投影 —— 两处必须读**同一份**。
+        const carrier = deps.carrier
+        // 可无损落 JSON 的审计投影（`profile` 取不到时整个键不印，见 `carrierAuditOf`）。
+        const carrierAudit = carrierAuditOf(carrier)
 
         // ── ⓪ 总闸（插件配置 `enableRestart`，**默认关**）──────────────────────
         // 刻意放在**一切之前**，连参数解析与四道闸都不碰：这一格要能说清
@@ -356,12 +393,13 @@ export function createRestartTool(deps: RestartToolDeps): ToolDefinition {
         // 「这个插件不提供 `dsh_restart`」会去另想办法重启、甚至直接让用户手动重启
         // ⇒ 风险不降反升且不可控；而「工具静默消失」正是本仓
         // 「别把不知道印成结论」那一族。所以它**必须明说自己被挡住了**。
-        if (deps.config.enableRestart.get() !== true) return toOutput(disabledByConfig(config))
+        if (deps.config.enableRestart.get() !== true)
+          return toOutput(disabledByConfig(config, carrier))
 
         const emptyHome = assertResolvedDshHome(config)
         if (emptyHome !== undefined) return toOutput(emptyHome)
 
-        const parsed = parseRestartArgs(rawArgs)
+        const parsed = parseRestartArgs(rawArgs, carrier)
         if (!parsed.ok) return toOutput(parsed.failure)
 
         const session = callingSessionOf(exec)
@@ -375,8 +413,8 @@ export function createRestartTool(deps: RestartToolDeps): ToolDefinition {
               {
                 verdict:
                   'nothing was restarted: this call carries no session id, so the tool cannot tell the caller apart from the sessions a restart would interrupt',
-                key: { stage: 'gates', resolved: effectiveConfig(config) },
-                audit: {},
+                key: { stage: 'gates', carrier: carrier.kind, resolved: effectiveConfig(config) },
+                audit: { carrier: carrierAudit },
               },
               {
                 // ⚠️ 原话是「换一个带 session id 的会话再调」—— **模型无法选择自己在哪个会话**
@@ -397,12 +435,16 @@ export function createRestartTool(deps: RestartToolDeps): ToolDefinition {
           force: parsed.force,
           // 第一段永远是演练：闸门与 marker 收在同一个入口里，先探再落盘。
           dryRun: true,
+          // 闸④的第一问就是它 —— 桌面宿主在这一步**动手前**被拒（真机缺陷的根因）。
+          carrier,
         }
 
         // ── ① 四道确定性闸门（dryRun，不落盘）────────────────────────────────
         const probe = await planRestart(request, deps.restart.ports)
-        if (probe.kind === 'refused') return toOutput(refusalResult(probe, config))
-        if (probe.kind === 'failed') return toOutput(planFailureResult(probe, config, 'gates'))
+        if (probe.kind === 'refused') return toOutput(refusalResult(probe, config, carrier))
+        if (probe.kind === 'failed') {
+          return toOutput(planFailureResult(probe, config, 'gates', carrier))
+        }
 
         const planned = relaunchPlanOf(probe.launch, config, parsed.delayMs)
         const base = {
@@ -411,6 +453,7 @@ export function createRestartTool(deps: RestartToolDeps): ToolDefinition {
           relaunch: planned.commandLine,
           sandbox: SANDBOX_MODE,
           resolved: effectiveConfig(config),
+          carrier: carrier.kind,
           ...(probe.marker.force === true ? { forced: true as const } : {}),
         }
 
@@ -429,6 +472,7 @@ export function createRestartTool(deps: RestartToolDeps): ToolDefinition {
                   commandLine: planned.commandLine,
                   commandLineChars: planned.commandLine.length,
                   limit: SCHTASKS_TR_MAX_CHARS,
+                  carrier: carrierAudit,
                 },
               },
               {
@@ -452,7 +496,7 @@ export function createRestartTool(deps: RestartToolDeps): ToolDefinition {
                 verdict:
                   'nothing was written and nothing was relaunched: the launcher provides no appExit channel, so this process could not exit cleanly after the relaunch, and this tool never calls process.exit',
                 key: { ...base, stage: 'gates' },
-                audit: { appExit: 'unavailable' },
+                audit: { appExit: 'unavailable', carrier: carrierAudit },
               },
               {
                 manual: true,
@@ -476,7 +520,7 @@ export function createRestartTool(deps: RestartToolDeps): ToolDefinition {
                   markerWritten: false,
                   approval: 'not-asked (dry run)',
                 },
-                audit: { reason: parsed.reason, delayMs: parsed.delayMs },
+                audit: { reason: parsed.reason, delayMs: parsed.delayMs, carrier: carrierAudit },
               },
               {
                 // ⚠️ 这一支**不指向工具**（B1）：原话给的是 `dsh_check_effect_mode({change:'config'})`，
@@ -508,10 +552,13 @@ export function createRestartTool(deps: RestartToolDeps): ToolDefinition {
               'the restart was not started: the gate check disagreed with itself between the probe and the real pass',
               config,
               'gates',
+              carrier,
             ),
           )
         }
-        if (plan.kind === 'failed') return toOutput(planFailureResult(plan, config, 'marker'))
+        if (plan.kind === 'failed') {
+          return toOutput(planFailureResult(plan, config, 'marker', carrier))
+        }
         if (!plan.markerWritten) {
           return toOutput(
             internalFailure(
@@ -519,6 +566,7 @@ export function createRestartTool(deps: RestartToolDeps): ToolDefinition {
               'the restart was not started: the marker was not written, and nothing may be relaunched before it is',
               config,
               'marker',
+              carrier,
             ),
           )
         }
@@ -554,6 +602,7 @@ export function createRestartTool(deps: RestartToolDeps): ToolDefinition {
                   relaunch: relaunched.reason,
                   markerPath: plan.markerPath,
                   reason: parsed.reason,
+                  carrier: carrierAudit,
                 },
               },
               {
@@ -595,6 +644,7 @@ export function createRestartTool(deps: RestartToolDeps): ToolDefinition {
               markerPath: plan.markerPath,
               reason: parsed.reason,
               taskName: TASK_NAME,
+              carrier: carrierAudit,
             },
           }),
         )
@@ -605,6 +655,9 @@ export function createRestartTool(deps: RestartToolDeps): ToolDefinition {
             'the restart was not started: an unexpected error stopped the restart before it completed',
             deps.config,
             stage,
+            // `carrier` 那个局部量声明在 `try` 里，catch 作用域看不到它 ——
+            // 读的是**同一个** `deps.carrier`（本工具从不改它），不是第二份观测。
+            deps.carrier,
           ),
         )
       }
@@ -629,8 +682,9 @@ type ParsedArgs =
  * - `dryRun` / `force` 只认**字面 `true`**（`'yes'` 那种字符串不当真）。
  *
  * @param rawArgs 宿主给的原始参数。
+ * @param carrier 载体观测（只进 `audit` 的投影 —— 这一格与载体无关，但审计要同形）。
  */
-function parseRestartArgs(rawArgs: unknown): ParsedArgs {
+function parseRestartArgs(rawArgs: unknown, carrier: CarrierObservation): ParsedArgs {
   const args = (typeof rawArgs === 'object' && rawArgs !== null ? rawArgs : {}) as Record<
     string,
     unknown
@@ -644,8 +698,10 @@ function parseRestartArgs(rawArgs: unknown): ParsedArgs {
         {
           verdict:
             'nothing was restarted: no reason was given, and the reason is what the next startup reports back to the user',
+          // ⚠️ `audit` 要**可无损落 JSON**（B26）：`typeof` 的结果是字符串，可以直接落；
+          // 而 `args['reason']` 本身可能就是函数 / 活对象 —— 印它等于把一次硬失败交给宿主。
           key: { stage: 'gates' },
-          audit: { receivedReason: typeof args['reason'] },
+          audit: { receivedReason: typeof args['reason'], carrier: carrierAuditOf(carrier) },
         },
         { manual: true, why: 'call again with a short reason for the restart' },
       ),
@@ -716,7 +772,8 @@ async function resolveApproval(
           verdict:
             'nothing was restarted: the approval policy could not be determined, and this tool does not treat an unknown policy as authorization',
           key: { stage: 'approval', approval: 'unreadable' },
-          audit: {},
+          // 载体只管闸④，但审计块所有分支同形（复核时不必猜「这一格为什么没有它」）。
+          audit: { carrier: carrierAuditOf(deps.carrier) },
         },
         {
           manual: true,
@@ -757,7 +814,7 @@ async function resolveApproval(
       {
         verdict: `nothing was restarted: ${answered}, and only "allowed-once" counts as permission`,
         key: { stage: 'approval', approval: outcome },
-        audit: {},
+        audit: { carrier: carrierAuditOf(deps.carrier) },
       },
       approvalRemedy(outcome),
     ),
@@ -815,8 +872,12 @@ function approvalRemedy(outcome: Exclude<RestartApprovalOutcome, 'allowed-once'>
  * 就是本仓最重的那一类缺陷（说了但不可兑现）。
  *
  * @param config 生效配置（已解析；`enableRestart` 必填，默认关）。
+ * @param carrier 载体观测（进 `audit`；**不猜**：它由 `apply()` 探过一次）。
  */
-function disabledByConfig(config: ResolvedConfig): ToolFail<RestartKey> {
+function disabledByConfig(
+  config: ResolvedConfig,
+  carrier: CarrierObservation,
+): ToolFail<RestartKey> {
   return fail(
     {
       kind: 'not-configured',
@@ -825,7 +886,11 @@ function disabledByConfig(config: ResolvedConfig): ToolFail<RestartKey> {
     {
       verdict: `nothing was restarted: ${RESTART_TOOL} is switched off (${RESTART_CONFIG_FIELD}), and it stays registered so it can say so`,
       key: { stage: 'gates', restartEnabled: false, resolved: effectiveConfig(config) },
-      audit: { configField: RESTART_CONFIG_FIELD, default: false },
+      audit: {
+        configField: RESTART_CONFIG_FIELD,
+        default: false,
+        carrier: carrierAuditOf(carrier),
+      },
     },
     {
       // `manual` 支：**只有人**能改插件配置（模型改不动 —— 与 `timeoutMs` 那一族同一条
@@ -852,12 +917,18 @@ function disabledByConfig(config: ResolvedConfig): ToolFail<RestartKey> {
  * 报给用户」。工具这次的操作**完成了**（它正确地判了「不该做」），只是结论是坏消息 ——
  * 契约里 `ok` 只描述操作有没有完成，不描述系统健不健康。
  *
+ * `carrier` **必须从调用点传进来**（不从 `deps` 里现读一份）：闸④的结论就是它给的，
+ * 「判据用的那份」与「印给模型看的这份」必须是同一个观测 —— 两处各读一次就会出现
+ * 「拒绝理由说 desktop、`key.carrier` 印 cli」这种事后无法复核的自相矛盾。
+ *
  * @param refusal 计划层的拒绝。
  * @param config 生效配置。
+ * @param carrier 载体观测（进 `key` 与 `audit`）。
  */
 function refusalResult(
   refusal: RestartPlanRefused,
   config: ResolvedConfig,
+  carrier: CarrierObservation,
 ): ToolResult<RestartKey> {
   const nextStep: NextStep =
     refusal.suggestedTool === undefined
@@ -878,8 +949,13 @@ function refusalResult(
         code: refusal.code,
         gatesPassed: refusal.gatesPassed,
         resolved: effectiveConfig(config),
+        carrier: carrier.kind,
       },
-      audit: { evidence: [...refusal.evidence], remedy: refusal.remedy },
+      audit: {
+        evidence: [...refusal.evidence],
+        remedy: refusal.remedy,
+        carrier: carrierAuditOf(carrier),
+      },
     },
     nextStep,
   )
@@ -895,11 +971,13 @@ function refusalResult(
  * @param failure 计划层的失败。
  * @param config 生效配置。
  * @param stage 走到哪一步了。
+ * @param carrier 载体观测（进 `audit`；所有失败分支同形）。
  */
 function planFailureResult(
   failure: RestartPlanFailed,
   config: ResolvedConfig,
   stage: RestartStage,
+  carrier: CarrierObservation,
 ): ToolFail {
   const sandboxDenied = failure.detail.includes('FS_SANDBOX_DENIED')
   if (sandboxDenied) {
@@ -912,7 +990,7 @@ function planFailureResult(
         verdict:
           'nothing was written and nothing was restarted: the file sandbox refused the marker write (FS_SANDBOX_DENIED), and the marker must be on disk before anything may be relaunched',
         key: { stage, sandbox: SANDBOX_MODE, resolved: effectiveConfig(config) },
-        audit: { detail: failure.detail },
+        audit: { detail: failure.detail, carrier: carrierAuditOf(carrier) },
       },
       {
         manual: true,
@@ -925,7 +1003,7 @@ function planFailureResult(
     {
       verdict: failure.verdict,
       key: { stage, resolved: effectiveConfig(config) },
-      audit: { detail: failure.detail },
+      audit: { detail: failure.detail, carrier: carrierAuditOf(carrier) },
     },
   )
 }
@@ -948,12 +1026,14 @@ function planFailureResult(
  * @param verdict 给模型看的那句结论（**动手之前**那几格用它）。
  * @param config 生效配置。
  * @param stage 出错时已经走到哪一步。
+ * @param carrier 载体观测（进 `audit`；所有失败分支同形）。
  */
 function internalFailure(
   error: unknown,
   verdict: string,
   config: ResolvedConfig,
   stage: RestartStage,
+  carrier: CarrierObservation,
 ): ToolFail {
   const message = messageOf(error)
   const startedVerdict = startedButUnreportedVerdict(stage)
@@ -968,7 +1048,7 @@ function internalFailure(
         // 这对矛盾从 `key` 里也看不出来。
         ...(startedVerdict === undefined ? {} : { markerWritten: true as const }),
       },
-      audit: { error: message },
+      audit: { error: message, carrier: carrierAuditOf(carrier) },
     },
   )
 }
@@ -1159,11 +1239,13 @@ interface ActivityPort {
  *
  * @param ctx 宿主上下文（结构面，本层不 import cordis）。
  * @param config 生效配置。
+ * @param carrier 载体观测（**显式传入**：闸④的结论全靠它，见 `src/tools/index.ts` 的装配注释）。
  * @param spawn 子进程实现（跑 `schtasks` 用）。
  */
 export function restartHostFrom(
   ctx: unknown,
   config: ResolvedConfig,
+  carrier: CarrierObservation,
   spawn: SpawnImpl,
 ): RestartHost {
   const fs = createRestartFsPort(ctx as HostContextLike, {
@@ -1177,7 +1259,9 @@ export function restartHostFrom(
       restartHistory: async () => await restartHistoryFrom(fs, config.dshHome),
       busySessions: async () => await busySourcesFrom(ctx),
       bundles: async () => await bundlesFrom(config),
-      launchCommand: async () => launchCommandFrom(config),
+      // 载体进闸④的**取值面**（纵深防御的第二道）：桌面端连命令都不给，
+      // 于是「命令拼得出来 ⇒ 放行」这条真机路径在两层上都不成立。
+      launchCommand: async () => launchCommandFrom(config, carrier),
       now: () => Date.now(),
     },
     approval: {
@@ -1418,17 +1502,27 @@ export async function bundlesFrom(config: ResolvedConfig): Promise<Observed<read
 }
 
 /**
- * 闸④：启动命令 —— **不猜**。
+ * 闸④的**取值面**：启动命令 —— **不猜**。
  *
- * 只有 Windows 上的计划任务路线被实测过（`docs/HOST-CONTRACTS.md` §2.2.2 的 [A] 行：
- * 无需提权、父进程 `svchost.exe`、被起进程不在宿主 job 里）。别的平台没有已实测的
- * 路线 ⇒ 判 `{known: false}`，在**动任何东西之前**拒绝（比「写完了 marker 才发现拉不起来」好）。
+ * 三条分支，顺序是判据：
+ * 1. **桌面宿主** ⇒ `{known: false}`，理由逐字用 `relaunchRefusalFor` 的那一句
+ *    （**纵深防御**：判据层已经先拒过一次，这里再拒一次 —— 「命令拼得出来 ⇒ 放行」
+ *    正是 2026-10-15 真机缺陷的成因，所以两层都必须不成立）；
+ * 2. **非 win32** ⇒ `{known: false}`（别的平台没有已实测的路线）；
+ * 3. win32 ⇒ 按 `argv` 拼命令。
  *
  * `process.platform` **在这里读**（调用时，不在模块顶层）：平台分支因此可被判据钉住。
  *
  * @param config 生效配置。
+ * @param carrier 载体观测（只为第 1 条分支；判定表在 `lib/carrier.ts` 一处）。
  */
-export function launchCommandFrom(config: ResolvedConfig): Observed<LaunchCommand> {
+export function launchCommandFrom(
+  config: ResolvedConfig,
+  carrier: CarrierObservation,
+): Observed<LaunchCommand> {
+  if (carrier.kind === 'desktop-host') {
+    return { known: false, reason: relaunchRefusalFor(carrier).reason }
+  }
   if (process.platform !== 'win32') {
     return {
       known: false,
@@ -1776,6 +1870,11 @@ export function keyText(key: RestartKey): string[] {
   // 总闸档位**只在为假时印**（开着是默认路径、没有信息量；关着才是模型必须看见的那一格）。
   if (key?.restartEnabled === false) {
     lines.push(`restartEnabled: false (${RESTART_CONFIG_FIELD})`)
+  }
+  // 载体**只在不是 `cli` 时印**（同一条先例）：`cli` 是默认路径，而 `desktop-host` / `unknown`
+  // 正是闸④那条 `no-relaunch-route` 的成因 —— 模型要对上拒绝码就得看得见它。
+  if (typeof key?.carrier === 'string' && key.carrier !== 'cli') {
+    lines.push(`carrier: ${key.carrier}`)
   }
   const resolved = key?.resolved
   if (resolved !== undefined && resolved !== null) {

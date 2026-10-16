@@ -33,6 +33,7 @@ import {
   type RestartPorts,
   type RestartRequest,
 } from '../../src/lib/restart.ts'
+import { carrierOf } from './helpers.ts'
 
 /** 一次宿主服务调用（记方法名与实参）。 */
 interface HostCall {
@@ -156,6 +157,8 @@ const REQUEST: RestartRequest = {
   callingSession: 'aaaa-1111',
   force: false,
   dryRun: false,
+  // 闸④ 的第一问（载体）：本文件测的是 **fs 端口**，所以显式给「有回归路线」那一格。
+  carrier: carrierOf('cli', 'win32'),
 }
 
 describe('lib/restart-fs · 三值：text / absent / unreadable 互不相同', () => {

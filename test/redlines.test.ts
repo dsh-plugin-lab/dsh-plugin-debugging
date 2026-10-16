@@ -20,6 +20,9 @@ import { afterAll, describe, expect, it } from 'vitest'
 
 import type { ResolvedConfig } from '../src/contracts.ts'
 import { WORKLOAD_DEFAULT_BUDGET_MS } from '../src/lib/timeouts.ts'
+// 载体是**工具语料**的一部分（`ToolDeps.carrier` 的兜底落在拒绝那一端）：
+// 红线要跑的是「工具能跑通的那条路」，所以在任意平台上都必须显式给 `cli × win32`。
+import { carrierOf } from './tools/helpers.ts'
 import type { NextStep, ToolData, ToolErrorKind, ToolResult } from '../src/lib/errors.ts'
 import { ensureToolResult, toolResultProblem } from '../src/lib/errors.ts'
 import type { SpawnImpl } from '../src/lib/exec.ts'
@@ -4236,7 +4239,14 @@ function restartWith(kind: 'dry-run' | 'no-policy'): ToolDefinition {
     launch: { relaunch: async () => ({ ok: true, detail: 'schtasks /run exited 0' }) },
     exit: { exit: () => () => undefined },
   }
-  return createRestartTool({ ...redlineDeps(redlineConfig(home)), restart })
+  // ⚠️ **语料里必须显式给载体**：`ToolDeps.carrier` 的兜底是 `UNKNOWN_CARRIER`，而它在
+  // 闸④上是**拒绝**（没有已实测的回归路线）—— 于是这两条 fixture 会从「闸门全过 + 演练」
+  // 掉进「拒绝」，B16 / B20b / B22 那几条会以一种**看起来像文案问题**的方式变红。
+  // 这里给 `cli × win32`：它是**唯一**有已实测路线的组合，也正是这两条 fixture 想演的那条路。
+  return createRestartTool({
+    ...redlineDeps(redlineConfig(home), { carrier: carrierOf('cli', 'win32') }),
+    restart,
+  })
 }
 
 /**

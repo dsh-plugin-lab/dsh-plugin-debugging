@@ -53,8 +53,12 @@ export function registerTools(ctx: Context, state: PluginState): void {
   // 闭包在每次调用时重新读树（宿主自己也是「每次调用直接读，不另建缓存」——
   // `dsh-host-plugin-inventory\lib\index.js:100-114` 的注释就是这个理由），
   // 所以热重载后的相位变化不会因为我们缓存而失真。
+  //
+  // 载体（`state.carrier`）同样在这一处进 `deps`：它是 `apply()` 探过**一次**的进程级事实，
+  // 六个工具读同一份 —— 各读各的会出现「同一进程里两处判断不一致」，而没有判据照得到那种错。
   const deps = createToolDeps(state.config, {
     loader: () => readLoaderEntries(loaderFrom(ctx)),
+    carrier: state.carrier,
   })
   const factories = [
     createEffectModeTool,
@@ -88,10 +92,16 @@ export function registerTools(ctx: Context, state: PluginState): void {
   // 所以单独装配一处（`restartHostFrom`）—— `deps` 那份是只读工具共享的冻结形状，
   // 不为行动类破例（与 `dsh_hot_reload` 同一个范式）。
   //
+  // ⚠️ **载体是显式传进去的**（不让 `restartHostFrom` 自己再探一次）：闸④的结论全靠它，
+  // 而「同一进程里两处对载体的判断不一致」是没有任何判据照得到的那种错。
+  //
   // ⚠️ 装配发生在 apply 期，但 `restartHostFrom` **不在这里取任何服务**：
   // `ctx.get('fs')` 在 apply 期是 `undefined`（`task-31` 实测，+1s 才有），
   // 所以那个适配器每次读写时各自现取一次，本处只绑 ctx 与配置。
   ctx.tools.register(
-    createRestartTool({ ...deps, restart: restartHostFrom(ctx, state.config, deps.spawn) }),
+    createRestartTool({
+      ...deps,
+      restart: restartHostFrom(ctx, state.config, state.carrier, deps.spawn),
+    }),
   )
 }
