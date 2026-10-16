@@ -49,16 +49,25 @@
 
 ### 工具
 
-| 工具 | 必填 | 可选 | 做什么 |
-|---|---|---|---|
-| `dsh_check_effect_mode` | `change`：`config` / `bundle-added` / `host-code` / `client-code` | `alreadyInDependencies`、`dshHome` | 判断一个改动是实时生效、需要重启，还是热重载。在正在运行的 `profile` 上实际探测。 |
-| `dsh_diagnose_plugin_load` | — | `package`、`port`、`dshHome` | 查一个插件到底加载没有：`bundle` 归属、挂载形态、`loader` 树，并区分实测证据和推断证据。 |
-| `dsh_list_instances` | — | `port` | 列出本机正在运行的 DSH 宿主。只有未认证的 `GET /` 返回完全相同的 DSH 响应体时，才认定为 DSH。“探不到”和“不是 DSH”分开报告。 |
-| `dsh_check_auth` | — | `host`、`port` | 区分“没在运行”和“没通过认证”。 |
-| `dsh_dump_config` | — | `profile`、`dshHome` | 展示一个 `profile` 最终解析成什么：组合树，以及解释它的诊断信息。 |
-| `dsh_hot_reload` | `entryId` / `module` / `serverName` 三者取一 | `dryRun` | 把一个已挂载的 `entry` 替换成磁盘上的最新代码，不重启；失败自动回滚。 |
-| `dsh_sign_cookie` | — | `host`、`port`、`maxAgeDays`、`dshHome` | 签一个浏览器会话 `cookie`，让脚本或命令行客户端访问你自己的 DSH 实例。 |
-| `dsh_restart` | `reason` | `delayMs`、`dryRun`、`force` | 当改动确实需要重启时，重启当前宿主。**仅 Web（Windows）。** **默认关闭。** |
+**只读** —— 它们不改变宿主上的任何状态。
+
+| 工具 | 参数 | 做什么 | Web | Desktop |
+|---|---|---|---|---|
+| `dsh_list_instances` | `port` | 列出本机正在运行的 DSH 宿主。只有未认证的 `GET /` 返回完全相同的 DSH 响应体时，才认定为 DSH。“探不到”和“不是 DSH”分开报告。 | ✓ | ✓ |
+| `dsh_check_auth` | `host`、`port` | 区分“没在运行”和“没通过认证”。 | ✓ | ✓ |
+| `dsh_diagnose_plugin_load` | `package`、`port`、`dshHome` | 查一个插件到底加载没有：`bundle` 归属、挂载形态、`loader` 树，并区分实测证据和推断证据。 | ✓ | ✓ |
+| `dsh_check_effect_mode` | **`change`**：`config` / `bundle-added` / `host-code` / `client-code`，`alreadyInDependencies`、`dshHome` | 判断一个改动是实时生效、需要重启，还是热重载。在正在运行的 `profile` 上实际探测。 | ✓ | ✗ |
+| `dsh_dump_config` | `profile`、`dshHome` | 展示一个 `profile` 最终解析成什么：组合树，以及解释它的诊断信息。 | ✓ | ✗ |
+| `dsh_sign_cookie` | `host`、`port`、`maxAgeDays`、`dshHome` | 签一个浏览器会话 `cookie`，让脚本或命令行客户端访问你自己的 DSH 实例。 | ✓ | ✓ |
+
+**会改变状态** —— 前两个会替换代码，或者结束你正在排障的那个宿主。
+
+| 工具 | 参数 | 做什么 | Web | Desktop |
+|---|---|---|---|---|
+| `dsh_hot_reload` | **`entryId`** / **`module`** / **`serverName`** 三者取其一，外加 `dryRun` | 把一个已挂载的 `entry` 替换成磁盘上的最新代码，不重启；失败自动回滚。 | ✓ | ✓ |
+| `dsh_restart` | **`reason`**，`delayMs`、`dryRun`、`force` | 当改动确实需要重启时，重启当前宿主。**默认关闭。** | ✓ | ✗ |
+
+行的顺序就是使用顺序，所以两张表只按一条线分开：是否改变状态。最后一列是按载体的可用性，原因见[平台支持](#平台支持)。
 
 **三个容易踩的坑：**
 
@@ -109,16 +118,17 @@ Node `>= 20`，以及 DSH 版本满足 [package.json](package.json) 中的范围
 
 ## 安全与边界
 
-这些工具**不会重启进程、不会改写 `profile`、不会写入宿主数据**。这条规则由测试保证：只要有写操作指向宿主数据路径（`profiles` / `sessions` / `storages` / `logs` / `cache` / `attachments` / `backups` / `integrations` / `mcp` / `settings.yaml` / `.credentials.yaml` …），或者把 `DSH_HOME` 本身当作目标，`pnpm run test` 就会失败。
+除 `dsh_restart` 外，这些工具**不会重启进程、不会改写 `profile`、不会写入宿主数据**。这条规则由测试保证：只要有写操作指向宿主数据路径（`profiles` / `sessions` / `storages` / `logs` / `cache` / `attachments` / `backups` / `integrations` / `mcp` / `settings.yaml` / `.credentials.yaml` …），或者把 `DSH_HOME` 本身当作目标，`pnpm run test` 就会失败。
 
-**唯一例外是本插件自己的命名空间** `$DSH_HOME/<包名>/`：只允许 `$DSH_HOME` 下第一层目录名恰好等于包名，再往下的路径不受限制。
+**唯一的写入例外是本插件自己的命名空间** `$DSH_HOME/<包名>/`：只允许 `$DSH_HOME` 下第一层目录名恰好等于包名，再往下的路径不受限制。
 
-**逐工具边界：**
+**各自会碰什么：**
 
 - **只读，不发请求**：`dsh_check_effect_mode`、`dsh_diagnose_plugin_load`、`dsh_dump_config`。只读实例已有的文件，不产生凭据。
 - **只读，会发 HTTP**：`dsh_check_auth` 连接你指定的 `host:port`；`dsh_list_instances` 只探测 loopback 端口。两者都不发凭据。
 - **只动运行中的模块树**：`dsh_hot_reload`，不杀进程。
 - **读本地签名密钥**：`dsh_sign_cookie`，为你自己的实例签一个 `cookie`。不发请求，`cookie` 的值刻意不返回。
+- **结束宿主**：`dsh_restart`，这里唯一不可逆的动作。
 
 ### `dsh_restart`
 
@@ -131,7 +141,7 @@ Node `>= 20`，以及 DSH 版本满足 [package.json](package.json) 中的范围
 **三道的结果都会写进工具输出。** `dryRun` 会跑完所有门槛，但不写任何东西。
 
 > [!IMPORTANT]
-> **仅 Web（Windows）。** 桌面端 App 不能重启自己，Linux/macOS 也没有已实现的拉起路线。桌面端里宿主是 Electron 壳的子进程，它的保留 profile 被 DSH 命令行拒绝，也没有面向插件的通道能重启壳：它在写任何东西之前就拒绝，并告诉用户从托盘退出再启动。
+> **仅在 Windows 上，且宿主由 Web 进程拉起时可用。** 桌面端里它在写任何东西之前就拒绝：从托盘退出再启动即可。
 
 **重启后会发生什么：**
 
@@ -146,7 +156,7 @@ Node `>= 20`，以及 DSH 版本满足 [package.json](package.json) 中的范围
 - **找不到可用命令时**：报告“无法检查”，而不是“没有监听者”。这两个结论正好相反。
 - **弱兜底命令**：可能发现“有人在监听”，但说不出是哪个进程；这种情况记为“未识别”，而不是报告“没有监听者”。
 
-其余能力与平台无关，只有一个例外：`dsh_restart` 仅 Web，且仅限 Windows。如果你能在 Linux 或 macOS 上试一次真机重启，欢迎到 [#44](https://github.com/dsh-plugin-lab/dsh-plugin-debugging/issues/44) 说一声 —— 那个缺口正是这个 issue 留着的原因。
+其余能力与平台无关。`dsh_restart` 需要 Windows，**并且**宿主由 Web 进程拉起 —— 桌面端里宿主是 Electron 壳的子进程，插件侧没有能重启那个壳的通道。如果你能在 Linux 或 macOS 上试一次真机重启，欢迎到 [#44](https://github.com/dsh-plugin-lab/dsh-plugin-debugging/issues/44) 说一声 —— 那个缺口正是这个 issue 留着的原因。
 
 ## 配置
 
@@ -156,20 +166,18 @@ Node `>= 20`，以及 DSH 版本满足 [package.json](package.json) 中的范围
 
 | 字段 | 默认 | 含义 |
 |---|---|---|
-| `enableRestart` | `false` | 是否允许运行 `dsh_restart`（仅 Web，Windows）。立即生效，无需重启宿主。 |
+| `enableRestart` | `false` | 是否允许运行 `dsh_restart`。立即生效，无需重启宿主。 |
 | `dshHome` | `$DSH_HOME` 或 `<home>/.dsh` | 实例存放 `profiles`、日志和凭据的目录。 |
 | `profile` | `$DSH_PROFILE` 或默认 `profile` | 工具要检查哪个 `profile`。 |
 | `port` | `0` | 要探测的宿主端口；`0` 表示自动寻找监听端口。 |
 | `timeoutMs` | `60000` | 快速操作的超时预算：读文件、运行命令，或发一次 HTTP 探测。 |
 | `schemaDumpTimeoutMs` | `240000` | 运行 `--dump-config-schema` 的超时预算（实测 10.2–15.7 秒；高负载 32 秒）。 |
 
-### 预算
-
-工具内部每一条外部命令或 HTTP 探测的超时，都比工具总预算少 2 秒。传输层必须先于宿主的工具时限超时；否则 agent 只会得到一个没有错误类别的 `TimeoutError`，无法判断重试是否有意义。
+这两个预算怎么算出来的，以及为什么传输层必须先于宿主的工具时限超时 → [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §5.1。
 
 ### 调试另一个实例
 
-**什么时候需要它：** 当你正在调试一个实例，但证据在另一个实例上——另一个 `profile`，或另一个 `DSH_HOME`。隔离实例必须给一个 `template profile`，否则新 `home` 没有 `profile` 可起，会直接报 `profile` 不存在。
+**什么时候需要它：** 你正在调试一个实例，但证据在另一个上 —— 另一个 `profile`，或另一个 `DSH_HOME`。
 
 **哪些工具收 `dshHome`：** `dsh_dump_config`、`dsh_check_effect_mode`、`dsh_diagnose_plugin_load`、`dsh_sign_cookie`。路径解析和它启动的 `dsh` 子进程都会使用你传入的 `home`；输出会写明实际读取的是哪一个（`dshHomeSource: tool-argument`）。参数传入的值绝不会被悄悄写成配置默认值。
 

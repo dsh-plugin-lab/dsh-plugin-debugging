@@ -49,16 +49,25 @@ After installation, the agent gains a set of tools and a skill document. The ski
 
 ### Tools
 
-| Tool | Required | Optional | What it does |
-|---|---|---|---|
-| `dsh_check_effect_mode` | `change`: `config` / `bundle-added` / `host-code` / `client-code` | `alreadyInDependencies`, `dshHome` | Tell whether a change takes effect live, needs a restart, or needs a hot reload. It probes the running `profile` instead of guessing. |
-| `dsh_diagnose_plugin_load` | — | `package`, `port`, `dshHome` | Check whether a plugin actually loaded: `bundle` membership, mount form, `loader` tree, with observed evidence kept separate from inferred evidence. |
-| `dsh_list_instances` | — | `port` | List the DSH hosts running on this machine. A port counts as DSH only when an unauthenticated `GET /` returns the exact DSH body. "Could not probe" and "not DSH" are reported separately. |
-| `dsh_check_auth` | — | `host`, `port` | Tell "not running" apart from "not authenticated". |
-| `dsh_dump_config` | — | `profile`, `dshHome` | Show what a `profile` resolved to: the composed tree, plus the diagnostics that explain it. |
-| `dsh_hot_reload` | one of `entryId` / `module` / `serverName` | `dryRun` | Swap a mounted `entry` to the latest code on disk without restarting. Rolled back on failure. |
-| `dsh_sign_cookie` | — | `host`, `port`, `maxAgeDays`, `dshHome` | Sign a browser-session `cookie` so a script or CLI client can reach your own DSH instance. |
-| `dsh_restart` | `reason` | `delayMs`, `dryRun`, `force` | Restart this host when a change truly requires it. **Web only (Windows).** **Off by default.** |
+**Read-only** — they change nothing on the host.
+
+| Tool | Arguments | What it does | Web | Desktop |
+|---|---|---|---|---|
+| `dsh_list_instances` | `port` | List the DSH hosts running on this machine. A port counts as DSH only when an unauthenticated `GET /` returns the exact DSH body. "Could not probe" and "not DSH" are reported separately. | ✓ | ✓ |
+| `dsh_check_auth` | `host`, `port` | Tell "not running" apart from "not authenticated". | ✓ | ✓ |
+| `dsh_diagnose_plugin_load` | `package`, `port`, `dshHome` | Check whether a plugin actually loaded: `bundle` membership, mount form, `loader` tree, with observed evidence kept separate from inferred evidence. | ✓ | ✓ |
+| `dsh_check_effect_mode` | **`change`**: `config` / `bundle-added` / `host-code` / `client-code`, `alreadyInDependencies`, `dshHome` | Tell whether a change takes effect live, needs a restart, or needs a hot reload. It probes the running `profile` instead of guessing. | ✓ | ✗ |
+| `dsh_dump_config` | `profile`, `dshHome` | Show what a `profile` resolved to: the composed tree, plus the diagnostics that explain it. | ✓ | ✗ |
+| `dsh_sign_cookie` | `host`, `port`, `maxAgeDays`, `dshHome` | Sign a browser-session `cookie` so a script or CLI client can reach your own DSH instance. | ✓ | ✓ |
+
+**Changes state** — the first two swap code or end the host you are debugging.
+
+| Tool | Arguments | What it does | Web | Desktop |
+|---|---|---|---|---|
+| `dsh_hot_reload` | exactly one of **`entryId`** / **`module`** / **`serverName`**, plus `dryRun` | Swap a mounted `entry` to the latest code on disk without restarting. Rolled back on failure. | ✓ | ✓ |
+| `dsh_restart` | **`reason`**, `delayMs`, `dryRun`, `force` | Restart this host when a change truly requires it. **Off by default.** | ✓ | ✗ |
+
+Rows follow the order you would use them, so the two tables split on a single line: whether they change anything. The last column is availability by carrier; reasons live under [Platform support](#platform-support).
 
 **Three common traps:**
 
@@ -109,16 +118,17 @@ The `profile`'s `dependency` and `bundle list` are managed by `dsh plugin add`; 
 
 ## Safety and boundaries
 
-These tools **never restart a process, never rewrite a `profile`, and never write to host data**. Tests enforce this rule: as soon as any write targets a host-data path (`profiles` / `sessions` / `storages` / `logs` / `cache` / `attachments` / `backups` / `integrations` / `mcp` / `settings.yaml` / `.credentials.yaml` …), or uses `DSH_HOME` itself as the target, `pnpm run test` fails.
+Except for `dsh_restart`, these tools **never restart a process, never rewrite a `profile`, and never write to host data**. Tests enforce this rule: as soon as any write targets a host-data path (`profiles` / `sessions` / `storages` / `logs` / `cache` / `attachments` / `backups` / `integrations` / `mcp` / `settings.yaml` / `.credentials.yaml` …), or uses `DSH_HOME` itself as the target, `pnpm run test` fails.
 
-**The one exception is this plugin's own namespace**, `$DSH_HOME/<package name>/`: only the first directory directly under `$DSH_HOME` must exactly match the package name; anything below that is unrestricted.
+**The only write exception is this plugin's own namespace**, `$DSH_HOME/<package name>/`: only the first directory directly under `$DSH_HOME` must exactly match the package name; anything below that is unrestricted.
 
-**Per-tool boundaries:**
+**What each one touches:**
 
 - **Read-only, no requests**: `dsh_check_effect_mode`, `dsh_diagnose_plugin_load`, `dsh_dump_config`. They only read files the instance already has, and they produce no credentials.
 - **Read-only, sends HTTP**: `dsh_check_auth` connects to the `host:port` you name; `dsh_list_instances` probes loopback ports only. Neither sends credentials.
 - **Touches the running module tree only**: `dsh_hot_reload`, and kills no process.
 - **Reads the local signing key**: `dsh_sign_cookie`, to sign a `cookie` for your own instance. It sends no request, and the `cookie` value is deliberately not returned.
+- **Ends the host**: `dsh_restart`, the only irreversible action here.
 
 ### `dsh_restart`
 
@@ -131,7 +141,7 @@ These tools **never restart a process, never rewrite a `profile`, and never writ
 **All three results are written into the tool output.** `dryRun` runs every gate but writes nothing.
 
 > [!IMPORTANT]
-> **Web only (Windows).** The Desktop app cannot restart itself, and Linux/macOS have no implemented relaunch path. In the Desktop app the host is a child of the Electron shell, the DSH command line refuses its reserved profile, and no plugin-facing channel can relaunch the shell: it refuses before writing anything, and tells the user to quit from the tray and start again.
+> **Only on Windows, and only when the host was started as a Web process.** In the Desktop app it refuses before writing anything: quit from the tray and start again.
 
 **What happens after a restart:**
 
@@ -146,7 +156,7 @@ These tools **never restart a process, never rewrite a `profile`, and never writ
 - **When no usable command is found**: it reports "could not check", not "no listener". Those are opposite conclusions.
 - **Weaker fallbacks**: they may find "someone is listening" without identifying the process; that is reported as unidentified, not as "no listener".
 
-Everything else is platform-neutral, with one exception: `dsh_restart` is Web only, and only on Windows. If you can try a real relaunch on Linux or macOS, tell us in [#44](https://github.com/dsh-plugin-lab/dsh-plugin-debugging/issues/44) — that gap is exactly what the issue is for.
+Everything else is platform-neutral. `dsh_restart` needs Windows **and** a host started as a Web process: in the Desktop app the host is a child of the Electron shell, and no plugin-facing channel can relaunch that shell. If you can try a real relaunch on Linux or macOS, tell us in [#44](https://github.com/dsh-plugin-lab/dsh-plugin-debugging/issues/44) — that gap is exactly what the issue is for.
 
 ## Configuration
 
@@ -156,20 +166,18 @@ These fields configure this plugin in the `profile` composition. `enableRestart`
 
 | Field | Default | Meaning |
 |---|---|---|
-| `enableRestart` | `false` | Whether `dsh_restart` is allowed to run (Web only, Windows). Takes effect immediately, with no host restart. |
+| `enableRestart` | `false` | Whether `dsh_restart` is allowed to run. Takes effect immediately, with no host restart. |
 | `dshHome` | `$DSH_HOME`, otherwise `<home>/.dsh` | Where the instance keeps `profiles`, logs, and credentials. |
 | `profile` | `$DSH_PROFILE`, otherwise the default `profile` | Which `profile` the tools inspect. |
 | `port` | `0` | Host port to probe; `0` means find the listening port automatically. |
 | `timeoutMs` | `60000` | Timeout budget for quick work: reading a file, running one command, or one HTTP probe. |
 | `schemaDumpTimeoutMs` | `240000` | Timeout budget for running `--dump-config-schema` (measured 10.2–15.7 s; 32 s under load). |
 
-### Budgets
-
-Inside a tool, every external command or HTTP probe gets a timeout 2 seconds shorter than the tool's total budget. The transport layer must time out before the host's tool deadline; otherwise the agent receives a bare `TimeoutError` with no error kind, and cannot tell whether retrying is useful.
+How those two budgets are derived, and why the transport layer has to expire before the host's tool deadline → [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §5.1.
 
 ### Debugging another instance
 
-**When you need it:** you are debugging one instance, but the evidence is on another — a second `profile`, or another `DSH_HOME`. An isolated instance must be given a `template profile`; otherwise the new `home` has no `profile` to start with and reports that the `profile` does not exist.
+**When you need it:** you are debugging one instance, but the evidence is on another — a second `profile`, or another `DSH_HOME`.
 
 **Which tools take `dshHome`:** `dsh_dump_config`, `dsh_check_effect_mode`, `dsh_diagnose_plugin_load`, `dsh_sign_cookie`. Both path resolution and the spawned `dsh` subprocess use the `home` you pass in, and the output says which one was actually read (`dshHomeSource: tool-argument`). A value passed as an argument is never silently reported as the configured default.
 
