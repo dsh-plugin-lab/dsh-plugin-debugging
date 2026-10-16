@@ -84,8 +84,12 @@ import { composeDescription, type ToolDescription } from './describe.js'
 import {
   asAudit,
   assertResolvedDshHome,
+  CANCELLED_MESSAGE,
+  CANCELLED_WHY,
   effectiveConfig,
   resolvedLine as sharedResolvedLine,
+  spawnFailureMessage,
+  spawnFailureOf,
   toOutput,
   toolOutput,
   withCallHome,
@@ -617,14 +621,14 @@ async function probeHmrFor(
       kind: 'fail',
       failure: failureFor(deps.config, {
         kind: 'cancelled',
-        message: 'the caller cancelled this execution',
+        message: CANCELLED_MESSAGE,
         verdict: `no verdict for this ${change} change: the caller cancelled this execution while hmr was being verified, so the effect mode was never decided`,
         stage: 'dump-cancelled',
         dir,
         evidence: fromFiles.evidence,
         nextStep: {
           manual: true,
-          why: 'cancellation is up to the caller; retrying the same call is pointless',
+          why: CANCELLED_WHY,
         },
       }),
     }
@@ -652,12 +656,12 @@ async function probeHmrFor(
   }
 
   if (dump.spawnError !== undefined) {
-    const notFound = dump.spawnError.includes('ENOENT')
+    const { kind, notFound } = spawnFailureOf(dump.spawnError)
     return {
       kind: 'fail',
       failure: failureFor(deps.config, {
-        kind: notFound ? 'not-configured' : 'internal',
-        message: `cannot start dsh: ${dump.spawnError}`,
+        kind,
+        message: spawnFailureMessage(dump.spawnError),
         verdict: notFound
           ? `no verdict for this ${change} change: dsh itself could not be started (${dump.spawnError}), so the composed tree could not be read and hmr stays unverified`
           : `no verdict for this ${change} change: starting dsh failed in an unexpected way (${dump.spawnError}), so the composed tree could not be read and hmr stays unverified`,

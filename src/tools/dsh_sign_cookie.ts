@@ -42,6 +42,7 @@ import type { RenderTable } from '../lib/render.js'
 import { composeDescription, type ToolDescription } from './describe.js'
 import {
   assertResolvedDshHome,
+  CANCELLED_WHY,
   effectiveConfig,
   guardFallbackLine,
   resolvePort,
@@ -264,7 +265,7 @@ async function issueCookie(
         },
         {
           manual: true,
-          why: 'cancellation is up to the caller; retrying the same call is pointless',
+          why: CANCELLED_WHY,
         },
       ),
     )
