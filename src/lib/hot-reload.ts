@@ -46,7 +46,7 @@
  * （渲染不打印它），失败的「所以呢」只能由 `verdict` 承载。
  */
 import { fail, messageOf, ok, asRecord, asFunction, asString, isAborted, toToolError, type JsonValue, type NextStep, type ToolResult } from './errors.js'
-import { loaderFrom } from './loader.js'
+import { loaderFrom, iterate } from './loader.js'
 
 /** 定位 entry 的三种方式（§2.3；三者择一）。 */
 export type ReloadTargetKind = 'entryId' | 'module' | 'serverName'
@@ -1086,40 +1086,8 @@ interface BoundEntry extends ReloadEntryPort {
 }
 
 /** 取一个对象的记录视图；数组/函数/null 都算不合格。 */
-// （isAborted 等类型守卫的正典在 errors.ts，见上文记号。）
-
-/**
- * 迭代一个可迭代对象（数组与自定义迭代器通吃）。
- *
- * **必须按 `Symbol.iterator` 取**：真机上 `loader.entries()` 读到的是**可迭代对象**
- * （`Array.isArray()=false`，188 条），历史上又读到过数组 —— 两种都出现过。
- * 只当数组用（`.find()` / `.length`）会得到**假阴性**（看着像「没有这个 entry」）；
- * 反过来，用「拒绝数组」的 helper 取符号会把数组判成非法 → **每棵树的读出空**。
- * 两种错法都静默。
- *
- * @param value 候选可迭代对象。
- */
-function* iterate(value: unknown): Generator<unknown> {
-  if (typeof value !== 'object' || value === null) return
-  const iteratorFn = (value as { [Symbol.iterator]?: unknown })[Symbol.iterator]
-  if (typeof iteratorFn !== 'function') return
-  let iterator: Iterator<unknown>
-  try {
-    iterator = (iteratorFn as () => Iterator<unknown>).call(value)
-  } catch {
-    return
-  }
-  for (;;) {
-    let step: IteratorResult<unknown>
-    try {
-      step = iterator.next()
-    } catch {
-      return
-    }
-    if (step.done === true) return
-    yield step.value
-  }
-}
+// （isAborted 等类型守卫的正典在 errors.ts；iterate 的唯一实现在 loader.ts ——
+//  2026-10-16 审计 A2 收敛，本文件原有的一份逐字副本已删。）
 
 /** 读一个属性；getter 抛错时当作没有。 */
 function safeGet(target: unknown, key: string): unknown {

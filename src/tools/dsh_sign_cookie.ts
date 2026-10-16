@@ -41,6 +41,7 @@ import {
 import type { RenderTable } from '../lib/render.js'
 import { composeDescription, type ToolDescription } from './describe.js'
 import {
+  authorityLine,
   guardKeyLines,
   assertResolvedDshHome,
   CANCELLED_WHY,
@@ -156,7 +157,8 @@ export function createSignCookieTool(deps: ToolDeps): ToolDefinition {
       dshHome: {
         type: 'string',
         description:
-          "Another instance's DSH_HOME, whose signing key is used. Omit for the configured one.",
+          // 收尾句与其余三个 dshHome 参数统一（2026-10-16 审计 B10：3:1 分歧，取多数派）。
+          "Another instance's DSH_HOME, whose signing key is used. Omit to use the configured one.",
       },
     },
     output: toolOutput(SIGN_COOKIE_TOOL, TABLE),
@@ -393,7 +395,8 @@ function keyText(key: SignCookieKey): string[] {
   const fallback = guardKeyLines(key)
   if (fallback !== undefined) return fallback
   const lines: string[] = [resolvedLine(key.resolved)]
-  if (key.authority !== undefined) lines.push(`authority: ${key.authority}`)
+  const authority = authorityLine(key.authority)
+  if (authority !== undefined) lines.push(authority)
   if (key.cookieName !== undefined) lines.push(`cookie name: ${key.cookieName}`)
   // 到期时刻**只在真签出来时印**。没签出来就不印这一行 —— 印「valid until: not signed」
   // 会让一条「压根没走到签发」的失败路径看起来像「签了但没写出来」。

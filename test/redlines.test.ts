@@ -5240,6 +5240,10 @@ const FORMAT_OWNED_BY_SHARED: ReadonlyArray<readonly [fragment: string, home: st
   // 还装作正常空结果）。唯一合法写法是 guardKeyLines 判定 —— 本片段在工具文件里
   // 出现即违规（正典返回 undefined 让调用方继续，不含这个形状）。
   ["typeof key !== 'object') return []", 'shared.ts'],
+  // B7：「dshHome 为空」的失败 detail 唯一措辞，正典在 lib/restart.ts 的常量。
+  // ⚠️ 两个调用方（restart / restart-recovery）都用常量引用 —— 常量重定义由 NAME 闭集抓，
+  // 字面量再写一遍（忘了改用常量）由这条抓。
+  ['dshHome is empty', 'restart.ts'],
 ] as const
 
 /**
@@ -5271,6 +5275,12 @@ const NAME_OWNED_BY_SHARED: ReadonlyArray<readonly [helper: string, home: string
   ['asString', 'errors.ts'],
   ['isString', 'errors.ts'],
   ['isAborted', 'errors.ts'],
+  // B7：「dshHome 为空」detail 常量的正典在 lib/restart.ts。
+  ['DSH_HOME_EMPTY_DETAIL', 'restart.ts'],
+  // B8：keyText 的 authority 条件行模板正典在 shared.ts。
+  ['authorityLine', 'shared.ts'],
+  // A2：宿主可迭代结构的遍历生成器正典在 lib/loader.ts（hot-reload 写侧同用这一份）。
+  ['iterate', 'loader.ts'],
 ] as const
 
 describe('B30 跨工具共享语义只有一个实现', () => {
