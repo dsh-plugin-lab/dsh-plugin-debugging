@@ -4379,7 +4379,7 @@ interface RedlineToolShape {
   description: ToolDescription
   /** `composeDescription` 的结果（= 模型看到的 description）。 */
   text: string
-  /** 工具定义（取 `parameters` 与 `output.render`）。 */
+  /** 工具定义（取 `description` / `parameters` / `output.render`）。 */
   tool: ToolDefinition
 }
 
@@ -4590,6 +4590,25 @@ describe('B20a 描述四段骨架 + 参数描述下界', () => {
     expect(offenders, `B20a 违规：\n${offenders.join('\n')}`).toEqual([])
     // 实测值随断言带出去：红了能一眼看出是哪一项顶到上限。
     expect(measured.length).toBe(shapes.length)
+  })
+
+  it('每个工具 defineTool 里的 description 真的来自 composeDescription（不是手写字符串）', () => {
+    // ⚠️ 这一条照的是 B20a 上面那条的盲区：上面的判据全部作用于 `composeDescription`
+    // 的**合成结果** —— 而 `defineTool` 的 `description:` 字段若被人绕开合成器
+    // **手写**一段字符串，四段骨架 / 滤空段 / `\n` 连接就全部失守，上面那条**照样全绿**
+    // （它从头到尾没读过 `tool.description`）。test/tools 的共享断言
+    // `expectSynthesizedDescription` 只在逐工具测试里守这一格 —— 这里把同一不变量
+    // 提到红线层，对**全部工具的闭集**判一次（下界：shapes 非空，见 §10.0）。
+    const shapes = toolShapes()
+    expect(shapes.length, '一个工具都没构造出来 —— 这条判据在空转').toBeGreaterThan(0)
+    const offenders = shapes
+      .filter((shape) => shape.tool.description !== shape.text)
+      .map(
+        (shape) =>
+          `${shape.name}: defineTool 的 description 与 composeDescription(声明) 不一致 —— ` +
+          `手写或改错了合成调用（声明合成结果 ${String(shape.text.length)} 字符，定义里 ${String(shape.tool.description.length)} 字符）`,
+      )
+    expect(offenders, `B20a（合成器一致）违规：\n${offenders.join('\n')}`).toEqual([])
   })
 })
 
@@ -5219,6 +5238,12 @@ describe('B25 守卫合成的兜底必须可渲染', () => {
  * - **名字**：这几个助手在工具文件里**不许有定义**（`function x(` / `const x =`）。
  *
  * ⚠️ 闭集写死在这里，加共享助手时同批加。
+ * ⚠️ **已知限制（2026-10-17 复核，判定不上 AST）**：FORMAT 片段判**逐字**子串 ⇒
+ * 「换一种说法的同一件事」照不到；闭集覆盖的是**今天已知的**重复面，未来若真出现
+ * 一次换说法的漏网，先靠 review / 审计抓，再评估要不要上 AST（ts-morph / compiler
+ * API 的语义等价判定没有便宜写法，且本仓大量**有意的相似**——三个 `omit for` 参数
+ * 描述、C2 的 `'unknown'` 各表一格——会被相似度误伤）。决策依据见
+ * `.agents/notes/2026-10-16-duplication-inventory.md` §一 第 3 条。
  */
 /**
  * 「格式模板 → 它的唯一落点」。**落点不一定是 `shared.ts`** —— 每个「格式」声明自己的家，
