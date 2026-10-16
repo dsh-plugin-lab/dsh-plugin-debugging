@@ -201,6 +201,67 @@ export function restartMarkerPath(dshHome: string): string {
 }
 
 /**
+ * 拉起启动器的绝对路径：`$DSH_HOME/<包名>/restart/relaunch.vbs`。
+ *
+ * ⚠️ 与 {@link restartMarkerPath} 同一条纪律：紧跟 `dshHome` 的第一段**必须是字符串字面量**
+ * （B10 的白名单只认字面量）。
+ *
+ * **为什么把「真正跑什么」从 `/tr` 挪进这个文件**：`/tr` 的值要先被 `schtasks` 存进任务
+ * 定义、再由 Task Scheduler 重放一遍，那两跳里的**引号保真度从未实测过**（原已知限度③）；
+ * 文件内容不过那两跳。顺带 `/tr` 从 199 字符掉到 105 字符量级（实测值）。
+ *
+ * @param dshHome 宿主数据目录（`$DSH_HOME`）。
+ */
+export function restartLauncherPath(dshHome: string): string {
+  return join(dshHome, 'dsh-plugin-debugging', 'restart', 'relaunch.vbs')
+}
+
+/**
+ * 启动器自己的日志落点：`$DSH_HOME/<包名>/restart/relaunch.log`。
+ *
+ * **为什么必须有**：一条「没跑起来」的拉起此前在任何地方都不留痕 —— 没有窗口、没有 stdout、
+ * `startup-*.log` 又只在启动失败时才落盘 ⇒ **失败与「还没到点」长得一模一样**。
+ * 这个文件是那条路的唯一留痕，它的路径要进工具的 `key`，否则等于没写。
+ *
+ * @param dshHome 宿主数据目录（`$DSH_HOME`）。
+ */
+export function restartLauncherLogPath(dshHome: string): string {
+  return join(dshHome, 'dsh-plugin-debugging', 'restart', 'relaunch.log')
+}
+
+/**
+ * `wscript.exe` 的绝对路径（**Windows 系统目录**，不走 PATH）。
+ *
+ * 用绝对路径而不是裸名：`/tr` 的值由 Task Scheduler 重放，那里的 `PATH` 不是本进程的
+ * `PATH`，裸名会解析失败 —— 而失败形态是「任务跑了但什么都没起」。
+ */
+export function wscriptPath(): string {
+  const root = process.env['SystemRoot'] ?? process.env['windir'] ?? 'C:\\Windows'
+  return join(root, 'System32', 'wscript.exe')
+}
+
+/**
+ * 这台机器上有没有可用的隐藏启动器（`wscript.exe`）。
+ *
+ * ⚠️ **它决定「这次拉起会不会弹窗」，不是「这次拉起能不能成」**：没有它时回退到
+ * `cmd /c` 形态（能起、但会创建一个可见控制台）。VBScript 已被微软标记弃用
+ * （Windows 11 24H2 起是可按需移除的功能），所以这一格必须有回退而不是假定存在。
+ *
+ * **本层不做这个判断**（本文件不 import `node:fs` —— 那会踩 B10，见 `restart-fs.test.ts`
+ * 那条「两个模块都不 import node:fs」）：探存在性是 IO，由调用方（工具层）用
+ * {@link wscriptPath} 自己判。
+ *
+ * @param exists 探路径是否存在的函数（工具层注入，测试可替身）。
+ */
+export function hiddenLauncherAvailable(exists: (path: string) => boolean): boolean {
+  try {
+    return exists(wscriptPath())
+  } catch {
+    return false
+  }
+}
+
+/**
  * 把 marker 序列化成落盘文本。
  *
  * 三个细节都是有意的：

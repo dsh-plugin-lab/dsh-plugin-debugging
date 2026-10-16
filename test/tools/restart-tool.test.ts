@@ -101,7 +101,14 @@ interface FsRecorder {
   port: RestartFsPort
   reads: string[]
   writes: { path: string; text: string }[]
-  /** 当前内容（`undefined` = 文件不在）。 */
+  /**
+   * 只数 **marker** 的写入（不含启动器脚本）。
+   *
+   * 拉起前的判据是「**marker** 已经落盘」—— 2026-10-17 起一次成功拉起会写两份
+   * （marker + VBS 启动器），所以「写了几次」必须分开问，否则那条判据会被脚本的写入垫高。
+   */
+  markerWrites(): { path: string; text: string }[]
+  /** marker 的当前内容（`undefined` = 文件不在）。 */
   content(): string | undefined
   seed(text: string): void
 }
@@ -109,18 +116,25 @@ interface FsRecorder {
 /**
  * 造 marker 的 IO 替身。
  *
- * @param options `seed` = 预置内容；`failWriteWith` = 每次写都抛这个错误（沙箱拒绝那条路）。
+ * ⚠️ **按路径分开存**（2026-10-17 起）：marker 一份、启动器脚本（VBS）是另一份。
+ * 早先的实现只有一格 `stored`，两次写会互相覆盖 —— 那时只写 marker 所以没暴露，
+ * 现在写两份就必须分路径，否则「marker 的内容」问出来的是 VBS。
+ *
+ * @param options `seed` = 预置 marker 内容；`failWriteWith` = 每次写都抛这个错误（沙箱拒绝那条路）。
  */
 function makeFs(
   options: { seed?: string; failWriteWith?: { code: string; message: string } } = {},
 ): FsRecorder {
   const reads: string[] = []
   const writes: { path: string; text: string }[] = []
-  let stored: string | undefined = options.seed
+  const files = new Map<string, string>()
+  let seeded = options.seed
+  const isMarker = (path: string): boolean => path.endsWith('marker.json')
   const port: RestartFsPort = {
     read: async (path): Promise<TextRead> => {
       reads.push(path)
-      return stored === undefined ? { status: 'absent' } : { status: 'text', text: stored }
+      const text = files.get(path) ?? (isMarker(path) ? seeded : undefined)
+      return text === undefined ? { status: 'absent' } : { status: 'text', text }
     },
     write: async (path, text) => {
       if (options.failWriteWith !== undefined) {
@@ -129,16 +143,20 @@ function makeFs(
         })
       }
       writes.push({ path, text })
-      stored = text
+      files.set(path, text)
     },
   }
   return {
     port,
     reads,
     writes,
-    content: () => stored,
+    markerWrites: () => writes.filter((entry) => isMarker(entry.path)),
+    content: () => {
+      const marker = writes.filter((entry) => isMarker(entry.path)).at(-1)
+      return marker?.text ?? seeded
+    },
     seed: (text) => {
-      stored = text
+      seeded = text
     },
   }
 }
@@ -187,6 +205,17 @@ interface HarnessOptions {
   requestThrows?: boolean
   /** 拉起端口自己抛（用来钉「兜底分支的 `key.stage` 按调用点报」）。 */
   relaunchThrows?: boolean
+  /**
+   * 隐藏启动器（`wscript.exe`）在不在。
+   *
+   * **必须显式钉住分支**（本仓纪律：平台相关判据不许按真实平台走，见 `test/AGENTS.md`）：
+   * CI 是 ubuntu（`wscript.exe` 必然不在 ⇒ 走回退）、本机是 Windows（在 ⇒ 走隐藏形态）。
+   * 按真实平台判，两条分支里总有一条在某个环境上**永远跑不到**。
+   *
+   * 默认 `true`（隐藏形态）：本文件绝大多数用例与这两条分支无关，而其中少数几条断言
+   * `key` 的形状 —— 给一个确定的默认值比让它们在 CI 上悄悄换路要诚实。
+   */
+  hiddenLauncher?: boolean
   /**
    * 这个宿主跑在什么载体上。
    *
@@ -283,6 +312,8 @@ function harnessFor(home: string, options: HarnessOptions = {}): Harness {
   }
 
   const host: RestartHost = {
+    // 显式钉住隐藏启动器那一格（`hiddenLauncher: false` 测回退形态）。
+    pathExists: () => options.hiddenLauncher !== false,
     ports,
     approval: {
       policyOf: (agent) => {
@@ -432,7 +463,7 @@ describe('dsh_restart · `ask` 档：只有 allowed-once 算允许', () => {
     const result = await run(h.tool, ARGS, execFor())
     const data = expectOk(result)
     expect(h.requestCalls, '没有走审批门').toHaveLength(1)
-    expect(h.fs.writes, 'marker 没写').toHaveLength(1)
+    expect(h.fs.markerWrites(), 'marker 没写').toHaveLength(1)
     expect(h.launchCalls).toHaveLength(1)
     // 顺序（两条都要）：结论先到、退出后到。少断前一条就放过「退出排在结论之前」那个真缺陷。
     expect(h.exitCalls, '退出排在了结论之前 ⇒ 真机上 verdict 不会落盘').toEqual([])
@@ -449,7 +480,7 @@ describe('dsh_restart · `ask` 档：只有 allowed-once 算允许', () => {
       const failure = expectFail(result)
       expect(h.requestCalls, `${outcome}: 没问审批`).toHaveLength(1)
       expect(failure.data.verdict, `${outcome}: verdict 没说清为什么拒绝`).toContain(outcome)
-      expect(h.fs.writes, `${outcome}: 拒绝了却写了 marker`).toHaveLength(0)
+      expect(h.fs.markerWrites(), `${outcome}: 拒绝了却写了 marker`).toHaveLength(0)
       expect(h.launchCalls, `${outcome}: 拒绝了却拉起了`).toHaveLength(0)
       expect(h.exitCalls, `${outcome}: 拒绝了却退出了`).toHaveLength(0)
       // 防空转：三种必须给出**互不相同**的机器码，否则「映射表」只是同一个值的三个名字。
@@ -503,7 +534,7 @@ describe('dsh_restart · `never` 档：不问，直接执行', () => {
     // 判据是**计数**：在 `never` 档主动去问必然被拒，那会把「你什么都授权了」变成「什么都不许做」。
     expect(h.requestCalls, '`never` 档去问审批了 —— 那一档问了必然被拒').toHaveLength(0)
     expect(h.policyCalls, '没读档位就决定了问不问').toHaveLength(1)
-    expect(h.fs.writes).toHaveLength(1)
+    expect(h.fs.markerWrites()).toHaveLength(1)
     expect(h.launchCalls).toHaveLength(1)
     expect(h.exitCalls, '退出排在了结论之前').toEqual([])
     await flushDeferredExit()
@@ -523,7 +554,7 @@ describe('dsh_restart · 档位读不出来 ⇒ fail-closed', () => {
     expect(failure.data.verdict).toContain('could not be determined')
     expect(failure.data.key['approval']).toBe('unreadable')
     expect(h.requestCalls, '档位读不出来还去问审批了').toHaveLength(0)
-    expect(h.fs.writes).toHaveLength(0)
+    expect(h.fs.markerWrites()).toHaveLength(0)
     expect(h.launchCalls).toHaveLength(0)
     expect(h.exitCalls).toHaveLength(0)
   })
@@ -537,7 +568,7 @@ describe('dsh_restart · dryRun 零写零拉起零退出（配一条反空转）
     const dry = harnessFor(home, { policy: 'never' })
     const dryResult = await run(dry.tool, { ...ARGS, dryRun: true }, execFor())
     expectOk(dryResult)
-    expect(dry.fs.writes, 'dryRun 写了 marker').toHaveLength(0)
+    expect(dry.fs.markerWrites(), 'dryRun 写了 marker').toHaveLength(0)
     expect(dry.launchCalls, 'dryRun 拉起了').toHaveLength(0)
     expect(dry.exitCalls, 'dryRun 退出了').toHaveLength(0)
     expect(dry.requestCalls, 'dryRun 弹了审批窗').toHaveLength(0)
@@ -546,7 +577,7 @@ describe('dsh_restart · dryRun 零写零拉起零退出（配一条反空转）
     // 可能只是因为这条路径根本不碰那些端口。
     const real = harnessFor(home, { policy: 'never' })
     expectOk(await run(real.tool, ARGS, execFor()))
-    expect(real.fs.writes).toHaveLength(1)
+    expect(real.fs.markerWrites()).toHaveLength(1)
     expect(real.launchCalls).toHaveLength(1)
     // 退出排在结论之后，所以这里要先 flush 再数（否则量到的是「还没轮到退出」）。
     await flushDeferredExit()
@@ -610,7 +641,7 @@ describe('dsh_restart · `force` 只覆盖闸②', () => {
     expect(data.key['forced']).toBe(true)
     expect(forced.launchCalls, 'force 没有放行闸②').toHaveLength(1)
     // 覆盖必须留痕：marker 里要有 force: true 与那条 override trace。
-    expect(forced.fs.writes[0]?.text).toContain('"force": true')
+    expect(forced.fs.markerWrites()[0]?.text).toContain('"force": true')
   })
 
   it('①③④ 在 force: true 下**仍然**拒绝（签名里根本没有 force）', async () => {
@@ -637,7 +668,7 @@ describe('dsh_restart · `force` 只覆盖闸②', () => {
       const result = await run(h.tool, { ...ARGS, force: true }, execFor())
       const data = expectOk(result)
       expect(data.key['code'], `${item.label}: force 把不可绕过的闸也绕过了`).toBe(item.code)
-      expect(h.fs.writes, `${item.label}: 被拒却写了 marker`).toHaveLength(0)
+      expect(h.fs.markerWrites(), `${item.label}: 被拒却写了 marker`).toHaveLength(0)
       expect(h.launchCalls, `${item.label}: 被拒却拉起了`).toHaveLength(0)
       // 拒绝是**设计的一部分**：`ok: true`（工具完成了它的判定），但结论是「不许做」。
       expect(result.ok, `${item.label}: 闸门拒绝应当是 ok:true（拒绝不是失败）`).toBe(true)
@@ -740,7 +771,7 @@ describe('dsh_restart · 载体：桌面宿主在动手之前被拒（零写 / �
     expect(data.key['carrier']).toBe('desktop-host')
 
     // 根因事实：**三条各有一断**。少了任何一条，「拒绝了却已经动手」都会漏过去。
-    expect(h.fs.writes, '桌面端却写了 marker').toHaveLength(0)
+    expect(h.fs.markerWrites(), '桌面端却写了 marker').toHaveLength(0)
     expect(h.launchCalls, '桌面端却拉起了新进程 —— 那正是真机缺陷的那一半').toHaveLength(0)
     expect(h.exitCalls, '桌面端却调了退出通道').toHaveLength(0)
     // 顺序：闸门全过才轮到审批门 ⇒ 这一格连档位都不该读。
@@ -811,7 +842,7 @@ describe('dsh_restart · 载体：桌面宿主在动手之前被拒（零写 / �
         'no-relaunch-route',
       )
       expect(data.verdict, `${item.label}: 文案串档了`).toContain(item.marker)
-      expect(h.fs.writes, `${item.label}: 被拒却写了 marker`).toHaveLength(0)
+      expect(h.fs.markerWrites(), `${item.label}: 被拒却写了 marker`).toHaveLength(0)
       expect(h.launchCalls, `${item.label}: 被拒却拉起了`).toHaveLength(0)
       expect(h.exitCalls, `${item.label}: 被拒却退出了`).toHaveLength(0)
       // L3：非 Windows 那两档的**唯一**判据落点。此前只有库层用例逐字比对了 `relaunchRefusalFor`，
@@ -839,7 +870,7 @@ describe('dsh_restart · 载体：桌面宿主在动手之前被拒（零写 / �
     expect(data.key['carrier']).toBe('cli')
     // `cli` 是默认路径、没有信息量 ⇒ L2 里**不印**（照 `restartEnabled` 只在为假时印的先例）。
     expect(renderText(h.tool, ARGS, result)).not.toContain('carrier: cli')
-    expect(h.fs.writes).toHaveLength(1)
+    expect(h.fs.markerWrites()).toHaveLength(1)
     expect(h.launchCalls).toHaveLength(1)
     await flushDeferredExit()
     expect(h.exitCalls).toEqual([0])
@@ -851,7 +882,7 @@ describe('dsh_restart · 载体：桌面宿主在动手之前被拒（零写 / �
     const data = expectOk(await run(h.tool, { ...ARGS, dryRun: true }, execFor()))
     expect(data.key['code']).toBe('no-relaunch-route')
     expect(data.key['stage']).toBe('gates')
-    expect(h.fs.writes).toHaveLength(0)
+    expect(h.fs.markerWrites()).toHaveLength(0)
     expect(h.launchCalls).toHaveLength(0)
     expect(h.exitCalls).toHaveLength(0)
   })
@@ -861,6 +892,7 @@ describe('dsh_restart · 载体：桌面宿主在动手之前被拒（零写 / �
     const config = configFor(home, { enableRestart: volatileOf(true) })
     const ports = harnessFor(home, { policy: 'never' }).ports
     const host: RestartHost = {
+      pathExists: () => true,
       ports,
       approval: { policyOf: () => 'never', request: async () => 'allowed-once' },
       launch: { relaunch: async () => ({ ok: true, detail: 'stub' }) },
@@ -969,7 +1001,7 @@ describe('dsh_restart · 文件沙箱拒绝要可诊断', () => {
     // 根因事实：写失败 ⇒ 零拉起、零退出。
     expect(h.launchCalls).toHaveLength(0)
     expect(h.exitCalls).toHaveLength(0)
-    expect(h.fs.writes).toHaveLength(0)
+    expect(h.fs.markerWrites()).toHaveLength(0)
   })
 })
 
@@ -1039,7 +1071,7 @@ describe('dsh_restart · 顺序：闸门全过之后才轮到审批门', () => {
 // ── 10. 拉起命令可复核 ─────────────────────────────────────────────────────
 
 describe('dsh_restart · 拉起的命令可复核', () => {
-  it('`key.relaunch` 里能看到那条命令，且与真正交给拉起端口的**逐字相同**', async () => {
+  it('`key.relaunch` 是**目标命令**；`/tr` 只指向启动器，两者都在 key 里能对上', async () => {
     const home = await tempDshHome()
     const h = harnessFor(home, { policy: 'never' })
     const result = await run(h.tool, ARGS, execFor())
@@ -1050,32 +1082,73 @@ describe('dsh_restart · 拉起的命令可复核', () => {
     // 新宿主必须看到**同一个** home（计划任务不继承本进程的环境变量）。
     expect(relaunch).toContain(home)
     expect(h.launchCalls).toHaveLength(1)
-    expect(h.launchCalls[0]?.commandLine).toBe(relaunch)
+    // ⚠️ 交给拉起端口的**不是**那条目标命令，而是启动器调用（2026-10-17 起）：
+    // 目标命令进了脚本文件，`/tr` 只指它 —— 这样引号不过 `schtasks` 的存储/重放两跳。
+    const tr = String(h.launchCalls[0]?.commandLine)
+    expect(tr).toContain('wscript.exe')
+    expect(tr).toContain('relaunch.vbs')
+    expect(tr, '目标命令不该再出现过 /tr 里').not.toContain('bin.js')
     // 渲染文本里也要有（L2 才是模型真正读的那一层）。
     expect(renderText(h.tool, ARGS, result)).toContain('bin.js')
   })
 
-  it('命令行是**纯粹可执行的**：设 home → 进工作目录 → 等待 → 起宿主，不含说明性文字', async () => {
+  it('落盘的启动器脚本：设 home → 进工作目录 → 起宿主，且**不含**说明性文字', async () => {
     const home = await tempDshHome()
     const h = harnessFor(home, { policy: 'never' })
     await run(h.tool, ARGS, execFor())
-    const line = String(h.launchCalls[0]?.commandLine)
-    // 逐段钉住形状：这串会**逐字**交给计划任务去执行，掺一句给人看的说明就会被真的执行。
-    expect(line.startsWith(`cmd /c set "DSH_HOME=${home}" && cd /d C:/repo && ping -n 11`)).toBe(
-      true,
-    )
-    expect(line.endsWith('& node bin.js --profile web')).toBe(true)
-    expect(line, '命令行里掺了说明性文字 —— 那串会被真的执行').not.toContain('(cwd')
-    expect(line, '命令行里出现了给人看的 home 括注').not.toContain('home ')
+    const script = h.fs.writes.find((entry) => entry.path.endsWith('relaunch.vbs'))
+    expect(script, '启动器脚本没落盘 —— `/tr` 指的就是它').toBeDefined()
+    const vbs = String(script?.text)
+    expect(h.launchCalls[0]?.commandLine).toContain(String(script?.path))
+    // 目标命令行逐字进脚本（VBS 里 `"` 写成 `""`，所以比较的是去转义后的形状）。
+    expect(vbs).toContain(`set ""DSH_HOME=${home}""`)
+    expect(vbs).toContain('cd /d C:/repo')
+    expect(vbs).toContain('node bin.js --profile web')
+    // 隐藏执行：窗口样式 0（这是**没有可见控制台**的那一刀）。
+    expect(vbs).toContain('sh.Run target, 0, False')
+    // WMI moniker 必须是无路径形态：写成 `winmgmts:\\.\root\cimv2` 时 TS 会把 `\r`
+    // 解释成回车，生成出一条坏 moniker（lint 的 no-useless-escape 抓过一次）。
+    expect(vbs).toContain('GetObject("winmgmts:")')
+    expect(vbs, 'moniker 里带反斜杠 = 踩了 TS 转义').not.toMatch(/winmgmts:\\/u)
+    expect(vbs, 'moniker 里混进了真回车').not.toMatch(/winmgmts:[\r\n]/u)
+    // 脚本第一步就写日志 —— 脚本写坏 = 静默不启动，靠这份日志分开「没跑」与「跑了失败」。
+    expect(vbs).toContain('Say "launcher started')
+    expect(vbs, '启动器里掺了给人看的括注').not.toContain('(cwd')
+    expect(vbs, '启动器里出现了给人看的 home 括注').not.toContain('home ')
   })
 
-  it('delayMs 进命令行；预算经 budgetFor 取（拉起端口拿到的预算 > 0）', async () => {
+  it('等待是**上限**：进脚本的是 capMs 与旧进程号，不再是命令行里的 `ping -n`', async () => {
     const home = await tempDshHome()
     const h = harnessFor(home, { policy: 'never' })
     await run(h.tool, { ...ARGS, delayMs: 30_000 }, execFor())
     expect(h.launchCalls[0]?.delayMs).toBe(30_000)
-    expect(String(h.launchCalls[0]?.commandLine)).toContain('ping -n 31')
+    const vbs = String(h.fs.writes.find((entry) => entry.path.endsWith('relaunch.vbs'))?.text)
+    expect(vbs).toContain('capMs = 30000')
+    expect(vbs).toContain(`oldPid = ${String(process.pid)}`)
+    expect(vbs, '固定睡眠应已被 PID 等待取代').toContain('Do While waited < capMs')
+    expect(String(h.launchCalls[0]?.commandLine)).not.toContain('ping')
     expect(h.launchCalls[0]?.budgetMs).toBeGreaterThan(0)
+  })
+
+  it('回退形态（`wscript.exe` 不在）：退回 cmd 行 + `ping`，且**不写**启动器脚本', async () => {
+    // 两条分支都在**任意平台**上被真跑到：这一条显式把谓词钉成「不在」——
+    // CI 是 ubuntu（真机上必然不在）、本机是 Windows（真机上在），按真实平台判
+    // 总有一条分支在某个环境里永远跑不到（`test/AGENTS.md` 的平台纪律）。
+    const home = await tempDshHome()
+    const h = harnessFor(home, { policy: 'never', hiddenLauncher: false })
+    const data = expectOk(await run(h.tool, ARGS, execFor()))
+    const tr = String(h.launchCalls[0]?.commandLine)
+    expect(tr.startsWith(`cmd /c set "DSH_HOME=${home}"`)).toBe(true)
+    expect(tr, '回退形态的等待只能靠 ping').toContain('ping -n 4')
+    expect(tr).toContain('node bin.js --profile web')
+    expect(
+      h.fs.writes.some((entry) => entry.path.endsWith('relaunch.vbs')),
+      '回退却写了 VBS',
+    ).toBe(false)
+    // 回退形态必须**如实进 key**：没有 `launcher` / `launcherLog` 两格即是回退的信号。
+    expect(data.key['launcher']).toBeUndefined()
+    expect(data.key['launcherLog']).toBeUndefined()
+    expect(String(data.key['relaunch']), 'key 里仍应是目标命令').toContain('bin.js')
   })
 })
 
@@ -1099,18 +1172,19 @@ describe('dsh_restart · 接线断言（坑 42）', () => {
     const tool = createRestartTool({
       ...deps,
       restart: {
+        pathExists: () => true,
         ports: wired,
         approval: { policyOf: () => 'never', request: async () => 'allowed-once' },
         launch: {
           relaunch: async (request) => {
             h.launchCalls.push(request)
-            h.writesAtLaunch.push(fs.writes.length)
+            h.writesAtLaunch.push(fs.markerWrites().length)
             return { ok: true, detail: 'stub' }
           },
         },
         exit: {
           exit: () => (code: number) => {
-            h.writesAtExit.push(fs.writes.length)
+            h.writesAtExit.push(fs.markerWrites().length)
             h.exitCalls.push(code)
           },
         },
@@ -1120,7 +1194,7 @@ describe('dsh_restart · 接线断言（坑 42）', () => {
     const result = await run(tool, ARGS, execFor())
     const data = expectOk(result)
     expect(data.key['stage']).toBe('exit')
-    expect(fs.writes).toHaveLength(1)
+    expect(fs.markerWrites()).toHaveLength(1)
     // 顺序是判据：拉起与退出**被调用时**，marker 已经写完（各 1 次）。
     expect(h.writesAtLaunch).toEqual([1])
     expect(h.exitCalls, '退出排在结论之前 ⇒ 真机上 verdict 不会落盘').toEqual([])
@@ -1652,7 +1726,7 @@ describe('dsh_restart · appExit 缺失：动手之前就拒绝', () => {
     expect(failure.kind).toBe('not-configured')
     // 判据一（根因，不是症状）：拉起**一次都没发生**、marker **一次都没写**。
     // 把 bug 改回去（先拉起、后取 appExit）时，这两条各判红一次。
-    expect(h.fs.writes, 'appExit 取不到却写了 marker').toHaveLength(0)
+    expect(h.fs.markerWrites(), 'appExit 取不到却写了 marker').toHaveLength(0)
     expect(h.launchCalls, 'appExit 取不到却拉起了 —— 那正是双宿主那一半').toHaveLength(0)
     expect(h.exitCalls, 'appExit 取不到却退出了').toHaveLength(0)
     // 判据二（文本）：verdict 不许说「没开始」。改回旧顺序时它会变回
@@ -1670,7 +1744,7 @@ describe('dsh_restart · appExit 缺失：动手之前就拒绝', () => {
     const h = harnessFor(home, { policy: 'never', exitChannel: undefined })
     const failure = expectFail(await run(h.tool, { ...ARGS, dryRun: true }, execFor()))
     expect(failure.data.verdict).toContain('appExit')
-    expect(h.fs.writes).toHaveLength(0)
+    expect(h.fs.markerWrites()).toHaveLength(0)
     expect(h.launchCalls).toHaveLength(0)
   })
 
@@ -1678,7 +1752,7 @@ describe('dsh_restart · appExit 缺失：动手之前就拒绝', () => {
     const home = await tempDshHome()
     const h = harnessFor(home, { policy: 'never' })
     expectOk(await run(h.tool, ARGS, execFor()))
-    expect(h.fs.writes).toHaveLength(1)
+    expect(h.fs.markerWrites()).toHaveLength(1)
     expect(h.launchCalls).toHaveLength(1)
     // 退出排在结论之后 ⇒ flush 之后再数，否则量到的是「还没轮到退出」。
     await flushDeferredExit()
@@ -1690,7 +1764,10 @@ describe('dsh_restart · appExit 缺失：动手之前就拒绝', () => {
 
 describe('dsh_restart · 拉起的命令行长度上限（schtasks /tr 的文档值）', () => {
   it('超长 ⇒ 结构化拒绝，且**零写零拉起**（动手之前拒）', async () => {
-    const home = await tempDshHome()
+    // ⚠️ 触发点变了（2026-10-17）：`/tr` 现在只指启动器脚本，目标命令进了脚本文件 ——
+    // 所以让 `/tr` 超限的唯一办法是把 **`dshHome` 拉长**（启动器路径在它下面）。
+    // 这正是现实中的成因：`$DSH_HOME` 太深。
+    const home = `C:/${'h'.repeat(SCHTASKS_TR_MAX_CHARS)}`
     const h = harnessFor(home, {
       policy: 'never',
       launch: {
@@ -1698,7 +1775,7 @@ describe('dsh_restart · 拉起的命令行长度上限（schtasks /tr 的文档
         value: {
           command: 'node',
           args: ['bin.js'],
-          cwd: `C:/${'x'.repeat(SCHTASKS_TR_MAX_CHARS)}`,
+          cwd: 'C:/repo',
         },
       },
     })
@@ -1706,9 +1783,12 @@ describe('dsh_restart · 拉起的命令行长度上限（schtasks /tr 的文档
     expect(failure.kind).toBe('not-configured')
     expect(failure.data.verdict).toContain('nothing was written and nothing was relaunched')
     expect(failure.data.verdict).toContain(String(SCHTASKS_TR_MAX_CHARS))
-    // 模型要能看见「哪条行超了」——`key.relaunch` 就是那条行。
-    expect(String(failure.data.key['relaunch']).length).toBeGreaterThan(SCHTASKS_TR_MAX_CHARS)
-    expect(h.fs.writes, '命令行超限却写了 marker').toHaveLength(0)
+    // 模型要能看见**哪条行**超了：超的是交给 `/tr` 的那条启动器调用（2026-10-17 起
+    // 目标命令走脚本文件，不占 `/tr`），所以它必须进 `key` —— 否则模型无从下手去缩短。
+    expect(String(failure.data.key['launcherCommand']).length).toBeGreaterThan(
+      SCHTASKS_TR_MAX_CHARS,
+    )
+    expect(h.fs.markerWrites(), '命令行超限却写了 marker').toHaveLength(0)
     expect(h.launchCalls, '命令行超限却拉起了').toHaveLength(0)
     expect(h.exitCalls).toHaveLength(0)
   })
@@ -1766,8 +1846,11 @@ describe('dsh_restart · 命令行对 cmd 元字符加引号', () => {
     expect(line).toContain('"C:/R&D/node.exe"')
     expect(line).toContain('"C:/R&D/bin.js"')
     expect(line).toContain('cd /d "C:/R&D"')
-    // 交出去的那条行与 `key` 里逐字相同（模型复核的就是它）。
-    expect(h.launchCalls[0]?.commandLine).toBe(line)
+    // 交出去的是启动器调用；那条目标行逐字进了脚本文件（`"` 在 VBS 里写成 `""`）。
+    const vbs = String(h.fs.writes.find((entry) => entry.path.endsWith('relaunch.vbs'))?.text)
+    expect(vbs).toContain('""C:/R&D/node.exe""')
+    expect(vbs).toContain('""C:/R&D/bin.js""')
+    expect(vbs).toContain('cd /d ""C:/R&D""')
   })
 
   it('其余元字符（`|` `^` `<` `>` `(` `)`）与空白同样加引号', async () => {
@@ -1803,7 +1886,7 @@ describe('dsh_restart · 兜底分支的 stage 按调用点报', () => {
     const failure = expectFail(result)
     expect(failure.kind).toBe('internal')
     // 顺序是判据：抛之前 marker 已经写完（拉起替身被调用过，且在写之后）。
-    expect(h.fs.writes).toHaveLength(1)
+    expect(h.fs.markerWrites()).toHaveLength(1)
     expect(h.launchCalls).toHaveLength(1)
     expect(failure.data.key['stage'], '兜底把「marker 已写完」报成了「还没动手」').toBe('relaunch')
     // ⚠️ **B2 的根因判据**：这一刻 marker 已在盘上、拉起请求已发出 ⇒ L1 **不许**再说
@@ -1866,7 +1949,7 @@ describe('dsh_restart · 兜底分支的 stage 按调用点报', () => {
     const failure = expectFail(await run(h.tool, ARGS, execFor()))
     expect(failure.kind).toBe('internal')
     expect(failure.data.key['stage']).toBe('gates')
-    expect(h.fs.writes).toHaveLength(0)
+    expect(h.fs.markerWrites()).toHaveLength(0)
     // 反空转：**动手之前**那一格**必须**说「没写」，且 `key` 里不许出现 marker 已落盘
     // —— 否则上面两条对「所有 stage 都说已开始」也绿。
     // （这一格走的是计划层的 `failed`，措辞是「the restart was not planned: … nothing was written」。）
@@ -1994,6 +2077,7 @@ describe('dsh_restart · 总闸 enableRestart（默认关 ⇒ 结构化拒绝，
     })
     // `Harness` 只导出计数器与工具（它**不**导出 `restart` 那一面），所以宿主面另造一份。
     const hostOf = (fs: FsRecorder): RestartHost => ({
+      pathExists: () => true,
       ports: harnessFor(home, { policy: 'never', fs }).ports,
       approval: { policyOf: () => 'never', request: async () => 'allowed-once' },
       launch: { relaunch: async () => ({ ok: true, detail: 'stub' }) },
@@ -2014,7 +2098,7 @@ describe('dsh_restart · 总闸 enableRestart（默认关 ⇒ 结构化拒绝，
     const watched = makeFs()
     expectOk(await run(createRestartTool({ ...deps, restart: hostOf(watched) }), ARGS, execFor()))
     expect(
-      watched.writes,
+      watched.markerWrites(),
       '换掉开关值之后仍被拒 ⇒ 读取链把它缓存了（宿主说 no restart，这边却要重启）',
     ).toHaveLength(1)
   })
@@ -2029,7 +2113,7 @@ describe('dsh_restart · 总闸 enableRestart（默认关 ⇒ 结构化拒绝，
     expect(toolResultProblem(result), '关着时的返回值形状非法').toBeUndefined()
     expect(ensureToolResult(result), '没过守卫').toBe(result)
     // 三条各有断言：「拒绝了却已经动手」是静默坏，而 planRestart 那一格**会写 marker**。
-    expect(h.fs.writes, '被配置禁用却写了 marker').toHaveLength(0)
+    expect(h.fs.markerWrites(), '被配置禁用却写了 marker').toHaveLength(0)
     expect(h.launchCalls, '被配置禁用却拉起了新进程').toHaveLength(0)
     expect(h.exitCalls, '被配置禁用却调了退出通道').toHaveLength(0)
     // 连参数与审批门都不许碰（闸门前置 ⇒ 这两个计数也必须是 0）。
@@ -2040,7 +2124,7 @@ describe('dsh_restart · 总闸 enableRestart（默认关 ⇒ 结构化拒绝，
     const home = await tempDshHome()
     const h = harnessFor(home, { policy: 'never', config: { enableRestart: volatileOf(true) } })
     expectOk(await run(h.tool, ARGS, execFor()))
-    expect(h.fs.writes).toHaveLength(1)
+    expect(h.fs.markerWrites()).toHaveLength(1)
     expect(h.launchCalls).toHaveLength(1)
     await flushDeferredExit()
     expect(h.exitCalls, '开着的那条路没退出 ⇒ 上面三个 0 可能只是「这条路什么都不做」').toEqual([0])

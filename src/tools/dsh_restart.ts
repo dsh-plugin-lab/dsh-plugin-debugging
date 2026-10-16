@@ -82,8 +82,12 @@ import { createRestartFsPort } from '../lib/restart-fs.js'
 import { RESTART_SANDBOX_MODE } from '../lib/restart-recovery.js'
 import {
   decideRecovery,
+  hiddenLauncherAvailable,
   planRestart,
   readRestartMarker,
+  restartLauncherLogPath,
+  restartLauncherPath,
+  wscriptPath,
   type BusySource,
   type GateId,
   type LaunchCommand,
@@ -137,8 +141,12 @@ const DUMP_CONFIG_TOOL = 'dsh_dump_config'
  *
  * 它不是 `timeouts.ts` 那套预算（那套管的是「这次调用能等多久」，唯一出处是
  * `toolBudgetMs`）；它是「新进程什么时候起来」。两者混起来会让「预算」这个词有两个含义。
+ *
+ * 3 秒的依据（2026-10-17 真机）：marker 在闸④之后、排程之前就已落盘（`markerWritten: true`
+ * 先于排程打印），旧进程在排程后只做「退出」这一件事 —— 维护者 2026-10-17 拍板收窄到 3s；
+ * 若真机出现「旧进程未死透」的竞态（新宿主抢文件失败），这里的第一嫌疑就是本值。
  */
-const DEFAULT_DELAY_MS = 10_000
+const DEFAULT_DELAY_MS = 3_000
 
 /**
  * 写 marker 时显式传给宿主 `fs.writeText` 的沙箱档位。
@@ -244,6 +252,15 @@ export interface RestartHost {
   readonly approval: RestartApprovalPort
   readonly launch: RelaunchPort
   readonly exit: RestartExitPort
+  /**
+   * 探一个路径存不存在（用来判 `wscript.exe` 在不在）。
+   *
+   * **为什么是注入面而不是直接 `existsSync`**：这是**平台相关判据** —— CI 是 ubuntu、
+   * 本机是 Windows，直接判真机平台会让两条分支里总有一条在某个环境上永远跑不到
+   * （本仓纪律：平台相关判据要能显式钉住分支，见 `test/AGENTS.md`）。注入之后，
+   * 「隐藏启动器在」与「回退到 cmd」两条分支在**任意**平台上都能被真跑到。
+   */
+  readonly pathExists: (path: string) => boolean
 }
 
 /**
@@ -331,8 +348,24 @@ export interface RestartKey {
   gatesPassed?: readonly GateId[]
   /** 审批档与结论（例如 `not-required (policy=never)`）。 */
   approval?: string
-  /** 会跑的那条命令行（模型可复核）。 */
+  /** 会跑的那条**目标**命令行（模型可复核：新宿主以什么参数起来）。 */
   relaunch?: string
+  /**
+   * 隐藏启动器脚本的落点（只有走 `wscript` 形态时出现）。
+   *
+   * 印出来是为了**可拦**：脚本写坏就静默不启动，所以「它到底跑了没有」得有个可查的文件。
+   * 回退形态（`wscript.exe` 不在）下没有这一格 —— 那种形态会创建一个可见控制台。
+   */
+  launcher?: string
+  /** 启动器自己的日志落点（与 `launcher` 同进同出）：失败与「还没到点」靠它分开。 */
+  launcherLog?: string
+  /**
+   * 交给 `schtasks /tr` 的那条调用 —— **只在它超限被拒时出现**。
+   *
+   * 为什么不是常驻字段：平时它对模型没有信息量（模型要复核的是**目标命令**，走 `relaunch`），
+   * 而超限时它是唯一能据以判断「该缩短哪个路径」的东西。
+   */
+  launcherCommand?: string
   /** marker 的落点。 */
   marker?: string
   /** marker 真的落盘了吗（只有走到那一步才印）。 */
@@ -455,11 +488,21 @@ export function createRestartTool(deps: RestartToolDeps): ToolDefinition {
           return toOutput(planFailureResult(probe, config, 'gates', carrier))
         }
 
-        const planned = relaunchPlanOf(probe.launch, config, parsed.delayMs)
+        const planned = relaunchPlanOf(
+          probe.launch,
+          config,
+          parsed.delayMs,
+          process.pid,
+          deps.restart.pathExists,
+        )
         const base = {
           gatesPassed: gatesPassedOf(probe),
           marker: probe.markerPath,
-          relaunch: planned.commandLine,
+          // `relaunch` 印**真正会跑的目标命令**（不是 `/tr` 那条启动器调用）：
+          // 模型要复核的是「新宿主会以什么参数起来」，而启动器路径另有 `launcher` 一行。
+          relaunch: planned.target,
+          ...(planned.scriptPath === undefined ? {} : { launcher: planned.scriptPath }),
+          ...(planned.logPath === undefined ? {} : { launcherLog: planned.logPath }),
           sandbox: SANDBOX_MODE,
           resolved: effectiveConfig(config),
           carrier: carrier.kind,
@@ -476,7 +519,13 @@ export function createRestartTool(deps: RestartToolDeps): ToolDefinition {
               { kind: 'not-configured', message: lineProblem },
               {
                 verdict: `nothing was written and nothing was relaunched: ${lineProblem}, and this tool refuses before touching the disk because the task scheduler would only fail later with an opaque argument error`,
-                key: { ...base, stage: 'gates' },
+                key: {
+                  ...base,
+                  stage: 'gates',
+                  // 超的是**这一条**（`/tr` 的值）——它平时不进 `key`（冗长且对模型无用），
+                  // 但拒绝时它是模型唯一能据以缩短路径的东西。
+                  launcherCommand: planned.commandLine,
+                },
                 audit: {
                   commandLine: planned.commandLine,
                   commandLineChars: planned.commandLine.length,
@@ -590,6 +639,37 @@ export function createRestartTool(deps: RestartToolDeps): ToolDefinition {
 
         // ── ⑥ 拉起新进程（计划任务；失败 ⇒ 可诊断的结构化失败）────────────────
         stage = 'relaunch'
+        // 启动器脚本必须在拉起**之前**落盘：`/tr` 只指向它，脚本不在就是「任务跑了、
+        // 什么都没起」。写失败按「拉起没发生」收敛（marker 仍在盘上，可解释）。
+        if (planned.scriptPath !== undefined && planned.scriptText !== undefined) {
+          try {
+            await deps.restart.ports.fs.write(planned.scriptPath, planned.scriptText)
+          } catch (error) {
+            return toOutput(
+              fail(
+                {
+                  kind: 'command-failed',
+                  message: `the launcher script could not be written (${messageOf(error)})`,
+                },
+                {
+                  verdict: `nothing was relaunched: the launcher script at ${planned.scriptPath} could not be written (${messageOf(error)}), so the scheduled task would have had nothing to run; this host keeps running and the marker is left armed`,
+                  key: markerKey,
+                  audit: {
+                    launcher: planned.scriptPath,
+                    launcherLog: planned.logPath ?? '(none)',
+                    markerPath: plan.markerPath,
+                    reason: parsed.reason,
+                    carrier: carrierAudit,
+                  },
+                },
+                {
+                  manual: true,
+                  why: 'restart the host yourself when convenient (it is still running); the marker is left armed so the next startup can report that this restart never completed',
+                },
+              ),
+            )
+          }
+        }
         const relaunched = await deps.restart.launch.relaunch({
           command: planned.command,
           args: planned.args,
@@ -1099,58 +1179,194 @@ function gatesPassedOf(plan: RestartPlan): readonly GateId[] {
 
 // ── 拉起 ───────────────────────────────────────────────────────────────────
 
-/** 一次拉起的计划（命令 + 可复核的命令行）。 */
+/** 一次拉起的计划（`/tr` 的值 + 启动器脚本 + 给人看的目标命令）。 */
 interface RelaunchPlan {
   command: string
   args: readonly string[]
   cwd: string
+  /** 交给 `schtasks /tr` 的**那一条**（隐藏启动器；回退形态下是 `cmd /c` 行本身）。 */
   commandLine: string
+  /** 真正会跑的目标命令行（进 `key`，模型可复核）。 */
+  target: string
+  /** 启动器脚本的落点；回退形态下没有。 */
+  scriptPath?: string
+  /** 启动器脚本内容；回退形态下没有。 */
+  scriptText?: string
+  /** 启动器日志的落点；回退形态下没有。 */
+  logPath?: string
 }
 
 /**
  * 把计划层的启动命令变成**真正会跑的那条命令行**。
  *
- * 三件事都必须写进命令行本身（`schtasks` 起的进程**不继承**本进程的环境与工作目录）：
+ * 两件事都必须写进目标命令行本身（`schtasks` 起的进程**不继承**本进程的环境与工作目录）：
  * 1. **`DSH_HOME`** —— 不写它，新宿主会去读默认的 `~/.dsh`，那是「看着重启了、
  *    其实起的是另一个实例」；
- * 2. **工作目录** —— 与 `launch.cwd` 一致；
- * 3. **回执窗口** —— `ping -n` 是这台机器上已被实测用过的等待形态（`task-19` 的计划任务
- *    探针就用它）；`delayMs` 由它表达，秒级粒度。
+ * 2. **工作目录** —— 与 `launch.cwd` 一致。
  *
- * ⚠️ **返回值里不许掺任何「说明性文字」**：这条字符串会逐字交给计划任务去执行。
- * 给人看的事实（cwd / home）走 `key` 的 `relaunch` 与 `resolved` 两行，不掺进命令里。
+ * ## 目标命令**不经 `/tr`**（2026-10-17 起）
  *
- * ⚠️ **已知限度（三条，别以为只剩一条）**：
- * ① **cmd 元字符**：`quoteArg` 现在对 `& | ^ < > ( ) "` 与空白**一律加引号**（**已修**，
- *    修前含 `&` 的路径会让 `cmd` 在那里断开、**错起一条命令**）；但外层 `cmd /c` 与内层
- *    `set "…"` 的**嵌套引号**规则仍未实测。
- * ② **`/tr` 的长度上限**：{@link SCHTASKS_TR_MAX_CHARS}（261，**文档值**）在**动手之前**
- *    结构化拒绝（**已修**）；本机真实形状的那条行实测已达 269 字符，所以这不是理论问题。
- * ③ **`schtasks` 存储 → Task Scheduler 重放之间的引号保真度未实测**（真机项）：`/tr` 的值
- *    先被 `schtasks` 存进任务定义，再由 Task Scheduler 起 `cmd` 重放一遍 —— 这两跳里引号
- *    怎么转义**没有真机验证过**；路径含空格时内层引号的转义行为也在这条里。
- *    ⇒ 前两条已经落成代码，**只有这一条仍然悬着**，别把「已修」读成「没有已知限度」。
+ * 它被写进 `$DSH_HOME/<包名>/restart/relaunch.vbs`，`/tr` 只指那个脚本。
+ * 两个收益：① 原已知限度③（`schtasks` 存储→重放之间的**引号保真度未实测**）**不再适用**
+ * —— 那条串不过那两跳；② `/tr` 从 199 字符掉到 105 字符量级（实测），离 261 的上限远得多。
+ *
+ * ## 回退形态（`wscript.exe` 不在时）
+ *
+ * 退回「等待写在命令行里」的老形态：能起，但**会创建一个可见控制台**
+ * （`cmd.exe` 是控制台程序）。这一格如实体现在 `key` 的 `launcher` 字段里。
  *
  * @param launch 计划层定出的启动命令。
  * @param config 生效配置。
- * @param delayMs 回执窗口（毫秒）。
+ * @param delayMs 等待上限（毫秒）—— 不是固定睡眠（见 {@link buildLauncherScript}）。
+ * @param pid 本进程号：启动器等的就是它消失。
+ * @param pathExists 探路径存不存在的谓词（装配处注入 `existsSync`）—— 用来判隐藏启动器在不在。
  */
 function relaunchPlanOf(
   launch: LaunchCommand,
   config: ResolvedConfig,
   delayMs: number,
+  pid: number,
+  pathExists: (path: string) => boolean,
 ): RelaunchPlan {
   const argv = [launch.command, ...launch.args].map(quoteArg).join(' ')
-  const count = Math.max(1, Math.ceil(delayMs / 1000) + 1)
   const setHome = `set "DSH_HOME=${config.dshHome}"`
   const enter = launch.cwd.trim() === '' ? '' : ` && cd /d ${quoteArg(launch.cwd)}`
-  const sleep = `ping -n ${String(count)} 127.0.0.1`
+  const target = `cmd /c ${setHome}${enter} & ${argv}`
+
+  if (!hiddenLauncherAvailable(pathExists)) {
+    // 回退：cmd 里没有 sleep，等待只能用 `ping -n`（这台机器上已被实测用过的形态）。
+    const count = Math.max(1, Math.ceil(delayMs / 1000) + 1)
+    return {
+      command: launch.command,
+      args: launch.args,
+      cwd: launch.cwd,
+      target,
+      commandLine: `cmd /c ${setHome}${enter} && ping -n ${String(count)} 127.0.0.1 & ${argv}`,
+    }
+  }
+
+  const scriptPath = restartLauncherPath(config.dshHome)
+  const logPath = restartLauncherLogPath(config.dshHome)
   return {
     command: launch.command,
     args: launch.args,
     cwd: launch.cwd,
-    commandLine: `cmd /c ${setHome}${enter} && ${sleep} & ${argv}`,
+    target,
+    scriptPath,
+    logPath,
+    scriptText: buildLauncherScript({ target, oldPid: pid, capMs: delayMs, logPath }),
+    commandLine: `${quoteArg(wscriptPath())} ${quoteArg(scriptPath)}`,
   }
+}
+
+/**
+ * 把一段文本变成 VBScript 的字符串字面量（内部的 `"` 一律写成 `""`）。
+ *
+ * @param value 原始文本。
+ */
+function vbsStringLiteral(value: string): string {
+  return `"${value.split('"').join('""')}"`
+}
+
+/**
+ * 生成隐藏启动器（VBScript，交给 `wscript.exe` 跑）。
+ *
+ * ## 为什么是 VBScript + `wscript`（实测，不是推断）
+ *
+ * `wscript.exe` 是 **GUI 子系统**程序 —— 它自己**没有控制台**。而 `cmd.exe` /
+ * `powershell.exe` 是控制台程序：在把 Windows Terminal 设为默认终端的机器上，它们
+ * **一定**会被开成一个可见标签页。2026-10-17 实测四种形态（20ms 采样 7 秒）：
+ *
+ * | 形态 | 控制台活动 |
+ * |---|---|
+ * | `cmd /c …`（改前的形态） | **新控制台**（标题变成 `cmd.EXE`） |
+ * | `powershell -WindowStyle Hidden -File …` | **新控制台**（`SW_HIDE` 管不到 ConPTY 下 WT 的标签页） |
+ * | `powershell -File …`（不加隐藏） | **新控制台** |
+ * | **`wscript.exe … .vbs` + `sh.Run(cmd, 0, False)`** | **零窗口活动** |
+ *
+ * ## 等待语义：`capMs` 是**上限**，不是固定睡眠
+ *
+ * 启动器轮询「旧进程（`oldPid`）还在不在」，一消失就立刻起新的，最多等到 `capMs`。
+ * 旧进程通常在一秒内退干净 ⇒ 常见路径比原来的固定 3 秒更快。
+ *
+ * ⚠️ **PID 复用的前提**（本判据的适用边界）：这里判的是「存在一个进程号等于 `oldPid`
+ * 的进程」。旧进程退出后系统把这个号分配给别的进程时，本判据会**多等一会儿**（直到上限），
+ * 而不是误判成「旧进程还在、所以不起」—— 代价只是慢，方向安全。
+ *
+ * ⚠️ **本文件新增的风险：脚本写坏 = 静默不启动**。VBScript 的语法错在这里没有任何
+ * 编译期拦截，所以脚本**第一步就写日志**，日志路径进工具的 `key` —— 「压根没跑」与
+ * 「跑了但失败」靠那份日志分开。这是本仓最怕的「静默坏」在拉起这条路上的对策。
+ *
+ * @param input 目标命令行、旧进程号、等待上限、日志落点。
+ */
+function buildLauncherScript(input: {
+  target: string
+  oldPid: number
+  capMs: number
+  logPath: string
+}): string {
+  const lines = [
+    "' dsh-plugin-debugging - relaunch launcher (generated; do not edit)",
+    "' Starts the host again with no visible window, waiting for the old process to exit",
+    "' (up to the cap) instead of sleeping a fixed time.",
+    'Option Explicit',
+    'Dim fso, sh, wmi, logPath, target, oldPid, capMs, waited, hasWmi',
+    `logPath = ${vbsStringLiteral(input.logPath)}`,
+    `target = ${vbsStringLiteral(input.target)}`,
+    `oldPid = ${String(input.oldPid)}`,
+    `capMs = ${String(input.capMs)}`,
+    'Set fso = CreateObject("Scripting.FileSystemObject")',
+    'Set sh = CreateObject("WScript.Shell")',
+    // ⚠️ **WMI 只取一次、且用无路径形态**：`GetObject("winmgmts:")` 默认落在本机
+    // `root` 的 `cimv2` 命名空间（这正是要的），顺带避开 TS 字符串里写
+    // `winmgmts:\\.\root\\cimv2` 的转义坑 —— `\r` 会被 TS 当成回车、生成出坏 moniker
+    // （lint 的 `no-useless-escape` 正是在拦这一处）。取不到 WMI 时 `hasWmi` 为假：
+    // `Alive` 恒假、等待退化成「立刻起」，与「不等」同向，不会卡住拉起。
+    'On Error Resume Next',
+    'Set wmi = GetObject("winmgmts:")',
+    'hasWmi = (Err.Number = 0)',
+    '',
+    'Sub Say(msg)',
+    '  On Error Resume Next',
+    '  Dim f',
+    '  Set f = fso.OpenTextFile(logPath, 8, True)',
+    '  f.WriteLine Now & "  " & msg',
+    '  f.Close',
+    'End Sub',
+    '',
+    'Function Alive(p)',
+    '  Dim q',
+    '  Alive = False',
+    '  If Not hasWmi Then Exit Function',
+    '  On Error Resume Next',
+    '  Set q = wmi.ExecQuery("SELECT ProcessId FROM Win32_Process WHERE ProcessId=" & p)',
+    '  If Err.Number = 0 Then',
+    '    If q.Count > 0 Then Alive = True',
+    '  End If',
+    'End Function',
+    '',
+    'Say "launcher started; wmi=" & hasWmi & "; waiting up to " & capMs & " ms for pid " & oldPid',
+    'waited = 0',
+    'Do While waited < capMs',
+    '  If Not Alive(oldPid) Then Exit Do',
+    '  WScript.Sleep 150',
+    '  waited = waited + 150',
+    'Loop',
+    'If Alive(oldPid) Then',
+    '  Say "pid " & oldPid & " still alive after " & capMs & " ms; launching anyway"',
+    'Else',
+    '  Say "pid " & oldPid & " gone after " & waited & " ms"',
+    'End If',
+    '',
+    'On Error Resume Next',
+    'sh.Run target, 0, False',
+    'If Err.Number <> 0 Then',
+    '  Say "LAUNCH FAILED: " & Err.Description',
+    'Else',
+    '  Say "launched hidden"',
+    'End If',
+  ]
+  return `${lines.join('\r\n')}\r\n`
 }
 
 /**
@@ -1250,12 +1466,14 @@ interface ActivityPort {
  * @param config 生效配置。
  * @param carrier 载体观测（**显式传入**：闸④的结论全靠它，见 `src/tools/index.ts` 的装配注释）。
  * @param spawn 子进程实现（跑 `schtasks` 用）。
+ * @param pathExists 探路径存不存在的谓词（**平台相关**：判隐藏启动器在不在）。
  */
 export function restartHostFrom(
   ctx: unknown,
   config: ResolvedConfig,
   carrier: CarrierObservation,
   spawn: SpawnImpl,
+  pathExists: (path: string) => boolean,
 ): RestartHost {
   const fs = createRestartFsPort(ctx as HostContextLike, {
     // 显式给档位：默认档写 $DSH_HOME 必被拒（实测见 restart-fs.ts 文件头）。
@@ -1263,6 +1481,8 @@ export function restartHostFrom(
   })
 
   return {
+    // 平台相关的那一格：由装配处注入（本层与库层都不碰 `node:fs`）。
+    pathExists,
     ports: {
       fs,
       restartHistory: async () => await restartHistoryFrom(fs, config.dshHome),
@@ -1868,6 +2088,12 @@ export function keyText(key: RestartKey): string[] {
   if (key?.markerWritten === true) lines.push('markerWritten: true')
   if (typeof key?.relaunch === 'string' && key.relaunch !== '') {
     lines.push(`relaunch: ${key.relaunch}`)
+  }
+  if (typeof key?.launcher === 'string' && key.launcher !== '') {
+    lines.push(`launcher: ${key.launcher}`)
+  }
+  if (typeof key?.launcherLog === 'string' && key.launcherLog !== '') {
+    lines.push(`launcherLog: ${key.launcherLog}`)
   }
   // 总闸档位**只在为假时印**（开着是默认路径、没有信息量；关着才是模型必须看见的那一格）。
   if (key?.restartEnabled === false) {
