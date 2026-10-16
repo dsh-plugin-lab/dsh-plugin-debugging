@@ -52,7 +52,6 @@ import {
   fail,
   ok,
   toToolError,
-  type JsonValue,
   type NextStep,
   type ToolData,
   type ToolError,
@@ -76,9 +75,13 @@ import { probeHmr, type HmrProbe } from '../lib/effect.js'
 import type { RenderTable } from '../lib/render.js'
 import { composeDescription, type ToolDescription } from './describe.js'
 import {
+  asAudit,
   assertResolvedDshHome,
   childEnvFor,
   effectiveConfig,
+  guardFallbackLine,
+  oneLine,
+  resolvedLine as sharedResolvedLine,
   spawnWithHome,
   toOutput,
   toolOutput,
@@ -901,7 +904,7 @@ function keyText(key: DumpConfigKey): string[] {
   // 「缺席」与「空数组」不是一回事：兜底路径上不许把「不知道」印成「没有」
   // （活跃坑 18 的三值纪律，`listStartupLogs` 那边同样处理）。
   if (!Array.isArray(key.invocations)) {
-    lines.push('dump: unknown (the guard synthesized this result)')
+    lines.push(guardFallbackLine('dump'))
   } else {
     for (const invocation of key.invocations) lines.push(invocationLine(invocation))
   }
@@ -913,7 +916,7 @@ function keyText(key: DumpConfigKey): string[] {
     )
   }
   if (!Array.isArray(key.actionable)) {
-    lines.push('actionable: unknown (the guard synthesized this result)')
+    lines.push(guardFallbackLine('actionable'))
   } else if (key.actionable.length > 0) {
     for (const item of key.actionable) lines.push(actionableLine(item))
     // 真错要报，覆盖不全也要说：有内容时读者最容易以为「该看的都看了」，
@@ -961,22 +964,19 @@ function coverageLine(flags: readonly string[]): string {
  * 那一刻模型最该知道的事实正是「这个结果是守卫合成的，里面的字段都不可信」。
  * 省略这一行会让兜底**静默**（看起来像一次正常的空结果）。
  */
-const GUARD_FALLBACK_LINE = 'resolved: unknown (the guard synthesized this result)'
+const GUARD_FALLBACK_LINE = guardFallbackLine()
 
 /**
  * `resolved:` 那一行 —— 整份结论的前提，也是 `nextStep.args.profile` 的取值来源。
  *
- * 字段按 `typeof` 防御取值：兜底合成的 `key` 里整块 `resolved` 都不在，
- * 直接取字段会当场抛（这正是本工具过去在兜底路径上崩掉的原因）。
+ * 格式、字段顺序与兜底由 `shared.ts` 的唯一渲染点定（`ResolvedKey` 是
+ * `EffectiveConfigBlock` 的结构子集，结构可赋值）；本工具**不碰端口**、不读
+ * profile 目录，所以两个可选字段都不传。
  *
  * @param resolved `key.resolved`（可能是兜底合成的 `undefined`）。
  */
 function resolvedLine(resolved: ResolvedKey | undefined): string {
-  if (!resolved || typeof resolved !== 'object') return GUARD_FALLBACK_LINE
-  const profile = typeof resolved.profile === 'string' ? resolved.profile : 'unknown'
-  const dshHome = typeof resolved.dshHome === 'string' ? resolved.dshHome : 'unknown'
-  const source = typeof resolved.dshHomeSource === 'string' ? resolved.dshHomeSource : 'unknown'
-  return `resolved: profile=${profile} dshHome=${dshHome} (${source})`
+  return sharedResolvedLine(resolved)
 }
 
 /**
@@ -999,29 +999,6 @@ function actionableLine(item: ClassifiedDiagnostic): string {
   const where = item.path === undefined ? '' : ` path=${item.path}`
   const entryId = item.entryId === undefined ? '' : ` entryId=${item.entryId}`
   return `actionable: [${item.classification}]${where}${entryId} ${oneLine(item.message)}`
-}
-
-/**
- * 压成一行（stderr 与 message 都可能带换行，进 L2 会把「一行一条」破坏掉）。
- *
- * @param text 原始文本。
- */
-function oneLine(text: string): string {
-  return text.replace(/\s+/gu, ' ').trim()
-}
-
-/**
- * 把一个只读记录转成 `audit` 的契约类型 `JsonValue`。
- *
- * 为什么要这个函数：`JsonValue` 是**带索引签名**的递归联合，而本仓的记录是 `interface`
- * —— interface **不带隐式索引签名**，结构上合法的对象也通不过赋值检查（同一条 TS 规则，
- * 见 `shared.ts` 的 `toOutput`）。与其为一个 TS 规则把冻结的契约层改成类型别名，
- * 不如在**唯一一处**边界上显式转型；`audit` 必须是无损 JSON 这条要求由契约本身承担。
- *
- * @param value 任一可无损落 JSON 的只读记录。
- */
-function asAudit(value: unknown): JsonValue {
-  return value as JsonValue
 }
 
 /**

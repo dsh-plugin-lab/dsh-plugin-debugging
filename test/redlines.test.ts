@@ -5203,6 +5203,79 @@ describe('B25 守卫合成的兜底必须可渲染', () => {
   })
 })
 
+// ── B30 跨工具共享语义不许被重新实现 ──────────────────────────────────────
+
+/**
+ * B30：**同一种语义只许有一个实现**。
+ *
+ * 由来（2026-10-16 核对）：`resolved:` 那一行曾在 6 个工具里各写一份，`dsh_restart` 的
+ * 字段顺序与其余五个**相反**；`asAudit` 5 份逐字相同、`oneLine` 3 份、兜底行 5 份。
+ * 这类缺陷**不抛不报错、既有判据全绿** —— B25 明写不断言措辞一致，B16 / B21 也不管「印得一样」。
+ *
+ * ## 判据分两条（靶子不同，别合并）
+ *
+ * - **格式**：只能出现在 `shared.ts`。工具里出现 `resolved: profile=` / `resolved: dshHome=`
+ *   或兜底句 = 有人又在自己拼那一行。**薄适配器不算违规**（它调共享实现，只绑本工具的取舍）。
+ * - **名字**：这几个助手在工具文件里**不许有定义**（`function x(` / `const x =`）。
+ *
+ * ⚠️ 闭集写死在这里，加共享助手时同批加。
+ */
+const FORMAT_OWNED_BY_SHARED = [
+  'resolved: profile=',
+  'resolved: dshHome=',
+  'the guard synthesized this result',
+] as const
+
+const NAME_OWNED_BY_SHARED = [
+  'asAudit',
+  'oneLine',
+  'withCallHome',
+  'withHomeOverride',
+  'spawnWithHome',
+  'childEnvFor',
+  'effectiveConfig',
+] as const
+
+describe('B30 跨工具共享语义只在 shared.ts 实现', () => {
+  it('`src` 下没有第二份格式模板，也没有第二份助手定义', () => {
+    // ⚠️ **扫描面是整个 `src`**，不是 `src/tools`（2026-10-16 审计实测的盲区）：
+    // 曾只扫 `src/tools` 下文件名含 `dsh_` 的文件 ⇒ `src/lib` 整层与
+    // `src/tools/{index,describe}.ts` **全在门外**，而重复最多的恰是 `src/lib`。
+    // `src/client` 除外：它是另一半边（B14 同此分法）。
+    const sources = readSourcesUnder('src').filter(
+      (source) => !source.path.endsWith('/shared.ts') && !source.path.startsWith('src/client/'),
+    )
+    // 空转判红：一个文件都没扫到时不许算通过（坑 18 的同族）。
+    expect(sources.length, '一个文件都没扫到 —— 这条判据在空转').toBeGreaterThan(0)
+
+    const offenders: string[] = []
+    for (const source of sources) {
+      const text = stripComments(source.text)
+      for (const fragment of FORMAT_OWNED_BY_SHARED) {
+        if (text.includes(fragment)) offenders.push(`${source.path} 又自己拼了一份「${fragment}」`)
+      }
+      for (const helper of NAME_OWNED_BY_SHARED) {
+        if (
+          new RegExp(`\\bfunction\\s+${helper}\\s*\\(`, 'u').test(text) ||
+          new RegExp(`\\bconst\\s+${helper}\\s*=`, 'u').test(text)
+        ) {
+          offenders.push(`${source.path} 又定义了一份 \`${helper}\``)
+        }
+      }
+    }
+
+    expect(offenders, `B30 违规：\n${offenders.join('\n')}`).toEqual([])
+  })
+
+  it('判据可被否证：两种定义形态与格式片段都能认出来', () => {
+    // 下界：正则或片段写错时这条会常绿（坑 37）。
+    expect(/\bfunction\s+oneLine\s*\(/u.test('function oneLine(t: string) {}')).toBe(true)
+    expect(/\bconst\s+asAudit\s*=/u.test('const asAudit = (v: unknown) => v')).toBe(true)
+    expect('/x'.includes('resolved: profile=')).toBe(false)
+    expect('resolved: profile=web dshHome=/h'.includes('resolved: profile=')).toBe(true)
+  })
+})
+
 // ── B26 返回值必须可无损落 JSON（宿主边界的硬要求） ────────────────────────
 
 /**

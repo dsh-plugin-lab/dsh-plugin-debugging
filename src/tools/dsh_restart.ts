@@ -95,6 +95,7 @@ import { composeDescription, type ToolDescription } from './describe.js'
 import {
   assertResolvedDshHome,
   effectiveConfig,
+  resolvedLine,
   toOutput,
   toolOutput,
   type EffectiveConfigBlock,
@@ -1877,10 +1878,10 @@ export function keyText(key: RestartKey): string[] {
     lines.push(`carrier: ${key.carrier}`)
   }
   const resolved = key?.resolved
+  // 字段顺序、端口取舍与逐字段兜底由 `shared.ts` 的唯一渲染点定
+  // （此前这里是 `dshHome` 在前、且无兜底 —— 兜底路径上会印出 `undefined` 逐字）。
   if (resolved !== undefined && resolved !== null) {
-    lines.push(
-      `resolved: dshHome=${resolved.dshHome} profile=${resolved.profile} (${resolved.dshHomeSource})`,
-    )
+    lines.push(resolvedLine(resolved as EffectiveConfigBlock))
   }
   return lines
 }

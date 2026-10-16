@@ -32,6 +32,7 @@
 | 技能正文的 frontmatter 或首尾 | [test/redlines.test.ts](test/redlines.test.ts) 的 B12 / B12b、[test/skills/register.test.ts](test/skills/register.test.ts) 的锚点 |
 | 配置字段 | [src/config.ts](src/config.ts) → [docs/SHAPE.md](docs/SHAPE.md) → 两份门面的配置表 |
 | 输出契约 | [src/contracts.ts](src/contracts.ts) → SHAPE §4.1 → 红线 B24 |
+| 跨工具共享的助手（装配 / 投影 / 渲染） | 只住在 [src/tools/shared.ts](src/tools/shared.ts)；落点索引见 [src/tools/README.md](src/tools/README.md)「共享助手住在哪」 |
 | 依赖范围 | `peerDependencies` **与** devDependencies 同时改（坑 1：`engines.dsh` 没人读） |
 | 门面或 `locale/*.json` | 成对改（两份门面 / 两份 locale） |
 | 任何文档 | 跑 `python "..\scripts\check-links.py" . --fragments --refs`，**错误数必须保持 0** |

@@ -56,9 +56,13 @@ import {
 } from '../lib/startup-log.js'
 import { composeDescription, type ToolDescription } from './describe.js'
 import {
+  asAudit,
   assertResolvedDshHome,
   effectiveConfig,
+  guardFallbackLine,
+  oneLine,
   resolvePort,
+  resolvedLine as sharedResolvedLine,
   toOutput,
   toolOutput,
   withCallHome,
@@ -1061,20 +1065,6 @@ function toMessageAudit(message: StartupMessage): JsonValue {
 }
 
 /**
- * 把一个只读记录转成 `audit` 的契约类型 `JsonValue`。
- *
- * 为什么要这个函数：`JsonValue` 是**带索引签名**的递归联合，而本仓的记录是 `interface`
- * —— interface **不带隐式索引签名**，结构上合法的对象也通不过赋值检查（同一条 TS 规则，
- * 见 `shared.ts` 的 `toOutput`）。与其为一个 TS 规则把冻结的契约层改成类型别名，
- * 不如在**唯一一处**边界上显式转型；`audit` 必须是无损 JSON 这条要求由契约本身承担。
- *
- * @param value 任一可无损落 JSON 的只读记录。
- */
-function asAudit(value: unknown): JsonValue {
-  return value as JsonValue
-}
-
-/**
  * 把 `listStartupLogs` 的三值结果投影成 `key`。
  *
  * 顺序就是三值的判定顺序：**读不到 → `unknown`**（绝不等于「没有」）；
@@ -1124,7 +1114,7 @@ function keyText(key: DiagnoseKey): string[] {
   }
   // 「缺席」与「空列表」不是一回事：兜底路径上不许把「不知道」印成「一个包都没有」。
   if (!Array.isArray(key.packages)) {
-    lines.push('packages: unknown (the guard synthesized this result)')
+    lines.push(guardFallbackLine('packages'))
   } else {
     for (const item of key.packages) lines.push(packageLine(item))
   }
@@ -1154,7 +1144,7 @@ function keyText(key: DiagnoseKey): string[] {
  * 那一刻模型最该知道的事实正是「这个结果是守卫合成的，里面的字段都不可信」。
  * 省略这一行会让兜底**静默**（看起来像一次正常的空结果）。
  */
-const GUARD_FALLBACK_LINE = 'resolved: unknown (the guard synthesized this result)'
+const GUARD_FALLBACK_LINE = guardFallbackLine()
 
 /**
  * `resolved:` 那一行。
@@ -1165,16 +1155,12 @@ const GUARD_FALLBACK_LINE = 'resolved: unknown (the guard synthesized this resul
  * @param resolved `key.resolved`（可能是兜底合成的 `undefined`）。
  */
 function resolvedLine(resolved: ResolvedKey | undefined): string {
-  if (!resolved || typeof resolved !== 'object') return GUARD_FALLBACK_LINE
-  const profile = typeof resolved.profile === 'string' ? resolved.profile : 'unknown'
-  const dshHome = typeof resolved.dshHome === 'string' ? resolved.dshHome : 'unknown'
-  const source = typeof resolved.dshHomeSource === 'string' ? resolved.dshHomeSource : 'unknown'
-  const port =
-    typeof resolved.port !== 'number'
-      ? ''
-      : ` port=${String(resolved.port)} (${typeof resolved.portSource === 'string' ? resolved.portSource : 'unknown'})`
-  const dir = typeof resolved.profileDir === 'string' ? ` dir=${resolved.profileDir}` : ''
-  return `resolved: profile=${profile} dshHome=${dshHome} (${source})${port}${dir}`
+  // 格式、字段顺序与兜底由 `shared.ts` 的唯一渲染点定；本工具既涉及端口也读 profile 目录。
+  return sharedResolvedLine(
+    resolved,
+    { port: resolved?.port ?? null, source: resolved?.portSource ?? 'none' },
+    resolved?.profileDir,
+  )
 }
 
 /**
@@ -1275,15 +1261,6 @@ function histogramText(histogram: Record<string, number>): string {
     .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
     .map(([phase, count]) => `${phase}=${String(count)}`)
     .join(' ')
-}
-
-/**
- * 压成一行（错误文本可能带换行，进 L2 会把「一行一条」破坏掉）。
- *
- * @param text 原始文本。
- */
-function oneLine(text: string): string {
-  return text.replace(/\s+/gu, ' ').trim()
 }
 
 /**

@@ -380,3 +380,111 @@ export function assertResolvedDshHome(config: ResolvedConfig): ToolFail | undefi
     },
   )
 }
+
+/**
+ * 守卫兜底那一支的降级行。
+ *
+ * **为什么它住在 `shared.ts`**：守卫合成的结果里整块 `key` 都是 `{}`（见
+ * `lib/errors.ts` 的 `ensureToolResult`），渲染层仍必须**印得出一行**（`lib/render.ts`
+ * 的「永远有输出」）。这一句此前是**每个工具各抄一份**的逐字副本，共 5 处；
+ * 抄漏 / 抄走样都不会被任何判据照出来（红线 B25 只断言「可渲染、不抛」，
+ * **不**断言措辞，见 `test/redlines.test.ts` 的「这条**不**断言什么」）。
+ *
+ * ⚠️ **形参是可选的、不是必填**：不同工具兜底时缺的东西不同（`list_instances`
+ * 缺的是「扫到了什么」，`check_auth` 缺的是「用的是哪个实例」），所以**措辞
+ * 本身**仍是各工具自己的契约 —— 这里只统一「兜底时印一行、并说清是守卫合成的」
+ * 这件事。想要自己的措辞就传 `label`。
+ */
+export const GUARD_FALLBACK_LINE = 'resolved: unknown (the guard synthesized this result)'
+
+/** {@link GUARD_FALLBACK_LINE} 的可选变体：把「缺的是什么」写进行里。 */
+export function guardFallbackLine(label = 'resolved'): string {
+  return `${label}: unknown (the guard synthesized this result)`
+}
+
+/**
+ * `resolvedLine` 实际读的那几个字段 —— **不是** `EffectiveConfigBlock` 本身。
+ *
+ * 为什么收窄：各工具的 `key.resolved` 形状**按各自需要裁剪**（`dsh_dump_config` 不碰端口，
+ * 于是它那块 `ResolvedKey` 里根本没有 `port` / `portSource`；`dsh_diagnose_plugin_load` 的
+ * `port` 是可选的）。渲染器要的只是「这几个字段在不在、是什么类型」，
+ * 参数类型写成整块 `EffectiveConfigBlock` 会强迫每个工具的 `key` 都长成同一副样子 ——
+ * 那是在改契约来迁就渲染，而不是相反。
+ */
+export interface ResolvedLineInput {
+  profile?: unknown
+  dshHome?: unknown
+  dshHomeSource?: unknown
+}
+
+/**
+ * `resolved:` 那一行的**唯一渲染点**：模型在工具之间读的是同一张脸
+ * （`dsh_check_auth.ts` 原本就把这句要求写在注释里，实现却各写一份）。
+ *
+ * **字段集合由调用方决定，各工具的取舍是有意的**（`SHAPE.md` §3.1 的 L2 规则：
+ * 只印本次非默认、且下一个决定要用到的）：
+ * - `port` 传 `'omit'` → 不印端口（不涉及端口的工具）；
+ * - `dir` 传 `undefined` → 不印 profile 目录（不读 profile 目录的工具）。
+ *
+ * **字段顺序在这里定死**：`profile` → `dshHome` → 来源 → 端口 → 目录。
+ * 此前 `dsh_restart` 是反的（`dshHome` 在前），它自己没给理由。
+ *
+ * **逐字段按 `typeof` 防御**：`dsh_check_auth` 的注释记着原因 —— 兜底合成的 `key`
+ * 里整块 `resolved` 都不在，直接取字段会在兜底路径上抛（那是它过去真实崩过的原因）。
+ * 抽到一处之后，**六个工具都受这条保护**，包括此前没受保护的 `dsh_restart`。
+ *
+ * @param resolved 生效配置块（可能是兜底合成的 `undefined` / 缺字段；只读上面那几个字段）。
+ * @param port 端口投影；`'omit'` = 这个工具不涉及端口。
+ * @param dir profile 目录；`undefined` = 不印。
+ */
+export function resolvedLine(
+  resolved: ResolvedLineInput | undefined,
+  port: 'omit' | { port: number | null; source: PortSource | 'none' | 'not-used' } = 'omit',
+  dir?: string,
+): string {
+  if (!resolved || typeof resolved !== 'object') return GUARD_FALLBACK_LINE
+  const profile = typeof resolved.profile === 'string' ? resolved.profile : 'unknown'
+  const dshHome = typeof resolved.dshHome === 'string' ? resolved.dshHome : 'unknown'
+  const source = typeof resolved.dshHomeSource === 'string' ? resolved.dshHomeSource : 'unknown'
+  const head = `resolved: profile=${profile} dshHome=${dshHome} (${source})`
+  if (port === 'omit') return typeof dir === 'string' && dir !== '' ? `${head} dir=${dir}` : head
+  const portText =
+    typeof port.port !== 'number'
+      ? ''
+      : ` port=${String(port.port)} (${typeof port.source === 'string' ? port.source : 'unknown'})`
+  const dirText = typeof dir === 'string' && dir !== '' ? ` dir=${dir}` : ''
+  return `${head}${portText}${dirText}`
+}
+
+/**
+ * 把一个只读记录转成 `audit` 的契约类型 `JsonValue`。
+ *
+ * 为什么需要它：`JsonValue` 是**带索引签名**的递归联合，而本仓的记录是 `interface`
+ * —— interface **不带隐式索引签名**，结构上合法的对象也通不过赋值检查（同一条 TS 规则，
+ * 见本文件的 `toOutput`）。与其为一个 TS 规则把冻结的契约层改成类型别名，
+ * 不如在**唯一一处**边界上显式转型；`audit` 必须是无损 JSON 这条要求由契约本身承担
+ * （红线 B26 真的走一次 JSON 往返来验）。
+ *
+ * ⚠️ **它此前是 5 份逐字相同的副本**（`check_auth` / `diagnose` / `effect_mode` /
+ * `list_instances` / `dump_config`），每个文件还各自抄了一遍这段理由。
+ *
+ * @param value 任一可无损落 JSON 的只读记录。
+ */
+export function asAudit(value: unknown): JsonValue {
+  return value as JsonValue
+}
+
+/**
+ * 把可能含换行的文本压成一行。
+ *
+ * 为什么必须有：L2 的契约是**一行一条**（`lib/render.ts` 的 `RenderTable.key` 返回
+ * `readonly string[]`）。子进程的 stderr、日志里的 `detail` 都可能自带换行 ——
+ * 不压就会把一个条目拆成两行，读者看到的是两条事实。
+ *
+ * ⚠️ **它此前是 3 份逐字相同的副本**（`diagnose` / `list_instances` / `dump_config`）。
+ *
+ * @param text 原始文本。
+ */
+export function oneLine(text: string): string {
+  return text.replace(/\s+/gu, ' ').trim()
+}

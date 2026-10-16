@@ -43,7 +43,9 @@ import { composeDescription, type ToolDescription } from './describe.js'
 import {
   assertResolvedDshHome,
   effectiveConfig,
+  guardFallbackLine,
   resolvePort,
+  resolvedLine as sharedResolvedLine,
   toOutput,
   toolOutput,
   withCallHome,
@@ -402,9 +404,9 @@ function keyText(key: SignCookieKey): string[] {
 /**
  * 兜底行：`ensureToolResult` 合成的结果里 `key` 是 `{}`。
  *
- * @see dsh_check_auth.ts 同名常量
+ * 逐字常量现住在 `shared.ts`（此前各工具各抄一份，靠 `@see` 手工同步）。
  */
-const GUARD_FALLBACK_LINE = 'resolved: unknown (the guard synthesized this result)'
+const GUARD_FALLBACK_LINE = guardFallbackLine()
 
 /**
  * 生效配置那一行（与其它工具逐字一致，避免同一种事印出两种说法）。
@@ -412,7 +414,9 @@ const GUARD_FALLBACK_LINE = 'resolved: unknown (the guard synthesized this resul
  * @param resolved 生效配置块。
  */
 function resolvedLine(resolved: EffectiveConfigBlock | undefined): string {
-  if (!resolved || typeof resolved !== 'object') return GUARD_FALLBACK_LINE
-  const port = resolved.port === null ? 'none' : String(resolved.port)
-  return `resolved: profile=${resolved.profile} dshHome=${resolved.dshHome} (${resolved.dshHomeSource}) port=${port} (${resolved.portSource})`
+  // 格式、字段顺序与兜底由 `shared.ts` 的唯一渲染点定；本工具涉及端口。
+  return sharedResolvedLine(resolved, {
+    port: resolved?.port ?? null,
+    source: resolved?.portSource ?? 'none',
+  })
 }

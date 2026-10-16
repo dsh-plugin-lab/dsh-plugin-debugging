@@ -37,9 +37,12 @@ import type { ResolvedConfig } from '../contracts.js'
 import type { RenderTable } from '../lib/render.js'
 import { composeDescription, type ToolDescription } from './describe.js'
 import {
+  asAudit,
   assertResolvedDshHome,
   effectiveConfig,
+  guardFallbackLine,
   resolvePort,
+  resolvedLine as sharedResolvedLine,
   toOutput,
   toolOutput,
   type EffectiveConfigBlock,
@@ -404,19 +407,6 @@ function unresolvedPortConfig(config: ResolvedConfig): EffectiveConfigBlock {
 }
 
 /**
- * 把一个只读记录转成 `audit` 的契约类型 `JsonValue`。
- *
- * 同 `dsh_diagnose_plugin_load.ts` 的理由：`JsonValue` 是**带索引签名**的递归联合，
- * 而本仓的记录是 `interface`（interface 不带隐式索引签名），结构上合法的对象也通不过
- * 赋值检查。与其为一个 TS 规则改冻结的契约层，不如在唯一一处边界上显式转型。
- *
- * @param value 任一可无损落 JSON 的只读记录。
- */
-function asAudit(value: unknown): JsonValue {
-  return value as JsonValue
-}
-
-/**
  * 把 `key` 投影成 L2 的逐行文本。
  *
  * 顺序即输出顺序：**先框架（读了哪份配置、探的是哪个 authority），再观测**。
@@ -443,8 +433,10 @@ function keyText(key: CheckAuthKey): string[] {
  * 为什么**必须**印出来而不是省略整行：这条路径只在「工具自己返回了坏形状」时才走到 ——
  * 那一刻模型最该知道的事实正是「这个结果是守卫合成的，里面的字段都不可信」。
  * 省略这一行会让兜底**静默**（看起来像一次正常的空结果）。
+ *
+ * 逐字常量现住在 `shared.ts`（此前是五个工具各抄一份，抄漏无判据照得出）。
  */
-const GUARD_FALLBACK_LINE = 'resolved: unknown (the guard synthesized this result)'
+const GUARD_FALLBACK_LINE = guardFallbackLine()
 
 /**
  * `resolved:` 那一行（与 `dsh_diagnose_plugin_load` 同格式：模型在两个工具之间读的是同一张脸）。
@@ -455,15 +447,11 @@ const GUARD_FALLBACK_LINE = 'resolved: unknown (the guard synthesized this resul
  * @param resolved 生效配置块（可能是兜底合成的 `undefined`）。
  */
 function resolvedLine(resolved: EffectiveConfigBlock | undefined): string {
-  if (!resolved || typeof resolved !== 'object') return GUARD_FALLBACK_LINE
-  const profile = typeof resolved.profile === 'string' ? resolved.profile : 'unknown'
-  const dshHome = typeof resolved.dshHome === 'string' ? resolved.dshHome : 'unknown'
-  const source = typeof resolved.dshHomeSource === 'string' ? resolved.dshHomeSource : 'unknown'
-  const port =
-    typeof resolved.port !== 'number'
-      ? ''
-      : ` port=${String(resolved.port)} (${typeof resolved.portSource === 'string' ? resolved.portSource : 'unknown'})`
-  return `resolved: profile=${profile} dshHome=${dshHome} (${source})${port}`
+  // 格式、字段顺序与兜底由 `shared.ts` 的唯一渲染点定；本工具涉及端口。
+  return sharedResolvedLine(resolved, {
+    port: resolved?.port ?? null,
+    source: resolved?.portSource ?? 'none',
+  })
 }
 
 /**
