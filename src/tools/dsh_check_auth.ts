@@ -37,11 +37,11 @@ import type { ResolvedConfig } from '../contracts.js'
 import type { RenderTable } from '../lib/render.js'
 import { composeDescription, type ToolDescription } from './describe.js'
 import {
+  guardKeyLines,
   asAudit,
   assertResolvedDshHome,
   CANCELLED_WHY,
   effectiveConfig,
-  guardFallbackLine,
   resolvePort,
   resolvedLine as sharedResolvedLine,
   toOutput,
@@ -417,10 +417,10 @@ function unresolvedPortConfig(config: ResolvedConfig): EffectiveConfigBlock {
  * @param key 本次的 `key`。
  */
 function keyText(key: CheckAuthKey): string[] {
-  // 渲染层**绝不抛**（`render.ts` §3.1）：`ensureToolResult` 合成的兜底里 `data.key` 是 `{}`
-  // （`lib/errors.ts` 的 `malformedResult`），字段可能整块缺席。`key` 本身不是对象时
-  // 也要有输出 —— **不许静默返回空数组**：那会把「结果被守卫换掉了」这件事藏起来。
-  if (!key || typeof key !== 'object') return [GUARD_FALLBACK_LINE]
+  // 渲染层**绝不抛**（`render.ts` §3.1）：守卫合成的兜底里 `data.key` 是 `{}`。
+  // 「key 不是对象时印什么」的唯一判定在 shared.ts 的 guardKeyLines —— **不许静默返回空数组**。
+  const fallback = guardKeyLines(key)
+  if (fallback !== undefined) return fallback
   const lines: string[] = [resolvedLine(key.resolved)]
   if (key.authority !== undefined) lines.push(`authority: ${key.authority}`)
   if (key.probe !== undefined) lines.push(probeLine(key.probe))
@@ -437,7 +437,6 @@ function keyText(key: CheckAuthKey): string[] {
  *
  * 逐字常量现住在 `shared.ts`（此前是五个工具各抄一份，抄漏无判据照得出）。
  */
-const GUARD_FALLBACK_LINE = guardFallbackLine()
 
 /**
  * `resolved:` 那一行（与 `dsh_diagnose_plugin_load` 同格式：模型在两个工具之间读的是同一张脸）。
