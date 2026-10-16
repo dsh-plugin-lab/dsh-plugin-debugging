@@ -24,15 +24,12 @@ import {
   toBundleKey,
 } from '../../src/tools/dsh_diagnose_plugin_load.ts'
 import { parseStartupLog } from '../../src/lib/startup-log.ts'
-import {
-  composeDescription,
-  DESCRIPTION_MAX_CHARS,
-  DESCRIPTION_MAX_LINES,
-} from '../../src/tools/describe.ts'
+import { composeDescription } from '../../src/tools/describe.ts'
 import { FIBER_STATE } from '../../src/lib/fiber.ts'
 import { PORT_LOOKUP_SHELL } from '../../src/lib/ports.ts'
 import { ensureToolResult, TOOL_ERROR_KINDS, toolResultProblem } from '../../src/lib/errors.ts'
 import { toolBudgetMs, TRANSPORT_MARGIN_MS } from '../../src/lib/timeouts.ts'
+import type { RunCommandOptions } from '../../src/lib/exec.ts'
 import {
   cmdResult,
   configFor,
@@ -41,6 +38,8 @@ import {
   execWith,
   expectFail,
   expectOk,
+  expectParameterDescriptionsNotBlank,
+  expectSynthesizedDescription,
   jumpingClock,
   linkDir,
   loaderUnavailable,
@@ -60,53 +59,66 @@ import {
 /** 一段正常回答端口查询的输出（pid|进程名|启动时间）。 */
 const LISTENING_OUTPUT = '4242|node|2026-10-12T20:00:00.0000000+08:00\n'
 
+/**
+ * 本文件最常用的底座（2026-10-16 审计 D4 收敛）：`web` profile 声明 `bundles`、
+ * 把列出的包全部装好、端口查询按 `stdout` 应答（默认空）、loader 可选注入。
+ *
+ * 返回 `dshHome` 与 `calls`：往 home 里再写文件（日志等）或要数 spawn 调用次数的
+ * 用例直接解构。**只收敛逐字相同的形状** —— 带中止控制器、会抛的替身、双 home
+ * 的用例保持内联（可读性优先于零重复）。
+ *
+ * @param options `bundles` 默认 `['pkg-a']`；`install` 默认等于 `bundles`；
+ *   `port` 缺省不传；`stdout` 默认空串；`loader` 缺省不注入。
+ */
+async function baseFixture(
+  options: {
+    bundles?: string[]
+    install?: string[]
+    port?: number
+    stdout?: string
+    loader?: ReturnType<typeof loaderWith>
+  } = {},
+): Promise<{ tool: ToolDefinition; dshHome: string; calls: RunCommandOptions[] }> {
+  const dshHome = await tempDshHome()
+  const bundles = options.bundles ?? ['pkg-a']
+  const profileDir = await writeProfile(dshHome, 'web', { bundles })
+  for (const name of options.install ?? bundles) await writeInstalledPackage(profileDir, name)
+  const { spawn, calls } = recordingSpawn(() => cmdResult({ stdout: options.stdout ?? '' }))
+  const tool = createDiagnosePluginLoadTool(
+    depsFor(
+      configFor(dshHome, options.port === undefined ? {} : { port: options.port }),
+      options.loader === undefined ? { spawn } : { spawn, loader: options.loader },
+    ),
+  )
+  return { tool, dshHome, calls }
+}
+
 describe('dsh_diagnose_plugin_load', () => {
   it('工具名与契约一致', () => {
     expect(DIAGNOSE_PLUGIN_LOAD_TOOL).toBe('dsh_diagnose_plugin_load')
   })
 
   describe('形状：描述层（SHAPE §2.1 冻结）', () => {
-    it('四段骨架：合成器与声明一致、行数 ≤4、字符 ≤240', () => {
+    it('四段骨架：合成器与声明一致（B20a 照不到的那一半）+ 本工具的参数闭集', () => {
       const tool = createDiagnosePluginLoadTool(depsFor(configFor('/tmp/nowhere')))
       const description = DIAGNOSE_PLUGIN_LOAD_DESCRIPTION
 
       // 合成器与声明必须一致 —— 防止有人手写字符串绕过骨架。
-      expect(tool.description).toBe(composeDescription(description))
-      // 必填两段非空（滤空段不放宽它们）。
-      expect(description.what.trim()).not.toBe('')
-      expect(description.useWhen.trim()).not.toBe('')
-      // 上界：骨架就是四段；下界：段数不许被空格连接并成一行。
-      const present = [
-        description.what,
-        description.useWhen,
-        description.boundary,
-        description.cost,
-      ].filter((segment) => segment !== undefined && segment.trim() !== '').length
-      const lines = composeDescription(description).split('\n')
-      expect(lines.length).toBeGreaterThanOrEqual(present)
-      expect(lines.length).toBeLessThanOrEqual(DESCRIPTION_MAX_LINES)
-      expect((tool.description ?? '').length).toBeLessThanOrEqual(DESCRIPTION_MAX_CHARS)
+      // ⚠️ 这条 **B20a 照不到**（它的 `shape.text` 是从声明重新合成的，不读 `tool.description`）。
+      expectSynthesizedDescription(tool, composeDescription(description))
+      // 骨架的其余判据（段非空 / 行数与字符上界 / 连接符）由红线 B20a 对闭集全量覆盖，
+      // 这里不再逐字重抄（一处一事实）；本用例只留本工具特有的**精确参数名闭集**。
 
-      // ⚠️ `defineTool` 把参数编译成了 JSON schema（`{ type, properties }`），所以要点进
-      // `properties` 才看得到每个参数的描述。直接 `Object.values(tool.parameters)` 会拿到
-      // `'object'` 字符串与 properties 对象本身 → 每条 `description` 都是 `undefined`
-      // → 合计恒为 0 → **判据空转**（SHAPE §10.0 的口 3；活跃坑 18 的形状）。
+      // ⚠️ `defineTool` 把参数编译成了 JSON schema（`{ type, properties }`）——
+      // 下界判定在 helpers.ts 的 `expectParameterDescriptionsNotBlank`（坑 39 的口 3）。
       const parameters = tool.parameters as {
         properties?: Record<string, { description?: string }>
       }
       const props = parameters.properties ?? {}
       const names = Object.keys(props)
-      // 下界：一个参数都没读到 = 注入/取数错了，判据空转，必须判红。
       // 精确闭集：加参数要同批改这里（`dshHome` 只换得动磁盘那一半，见 `key.scope`）。
       expect(names, '一个参数都没读到 —— 判据空转').toEqual(['package', 'port', 'dshHome'])
-      for (const name of names) {
-        expect(props[name]?.description ?? '', `参数 ${name} 的描述是空的`).not.toBe('')
-      }
-      const total = Object.values(props).reduce(
-        (sum, item) => sum + (item.description?.length ?? 0),
-        0,
-      )
-      expect(total).toBeGreaterThan(0)
+      expectParameterDescriptionsNotBlank(tool)
     })
 
     it('搬走的恒定知识**只能**在描述层出现一次（旧的两种 caveat 逐字不在输出里）', () => {
@@ -160,12 +172,8 @@ describe('dsh_diagnose_plugin_load', () => {
     })
 
     it('默认没有 loader → 降级成 inferred，带上原因（不再是恒定 note 文本）', async () => {
-      const dshHome = await tempDshHome()
-      const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
-      await writeInstalledPackage(profileDir, 'pkg-a')
-      const { spawn } = recordingSpawn(() => cmdResult({ stdout: '' }))
-      // 不给 loader → 用默认的「没有宿主上下文」实现。
-      const tool = createDiagnosePluginLoadTool(depsFor(configFor(dshHome), { spawn }))
+      // 不给 loader → 用默认的「没有宿主上下文」实现（baseFixture 默认就不注入）。
+      const { tool } = await baseFixture()
 
       const data = expectOk(await run(tool, {}))
       const observation = data.key['observation'] as Record<string, unknown>
@@ -201,11 +209,7 @@ describe('dsh_diagnose_plugin_load', () => {
     })
 
     it('没有 startup 日志 = **确定没有**（state=none），知识在描述层不在这里', async () => {
-      const dshHome = await tempDshHome()
-      const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
-      await writeInstalledPackage(profileDir, 'pkg-a')
-      const { spawn } = recordingSpawn(() => cmdResult({ stdout: '' }))
-      const tool = createDiagnosePluginLoadTool(depsFor(configFor(dshHome), { spawn }))
+      const { tool } = await baseFixture()
 
       const data = expectOk(await run(tool, {}))
       const logs = data.key['startupLogs'] as Record<string, unknown>
@@ -217,13 +221,9 @@ describe('dsh_diagnose_plugin_load', () => {
     })
 
     it('有 startup 日志时给出**路径**（下一个决定要用它去读文件）', async () => {
-      const dshHome = await tempDshHome()
-      const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
-      await writeInstalledPackage(profileDir, 'pkg-a')
+      const { tool, dshHome } = await baseFixture()
       const logPath = join(dshHome, 'logs', 'startup-2026-10-12T20-00-00-000Z-abc.log')
       await writeText(logPath, 'boom\n')
-      const { spawn } = recordingSpawn(() => cmdResult({ stdout: '' }))
-      const tool = createDiagnosePluginLoadTool(depsFor(configFor(dshHome), { spawn }))
 
       const data = expectOk(await run(tool, {}))
       const logs = data.key['startupLogs'] as Record<string, unknown>
@@ -236,13 +236,9 @@ describe('dsh_diagnose_plugin_load', () => {
     })
 
     it('日志目录**读不到** → state=unknown（绝不等于「没有失败日志」）', async () => {
-      const dshHome = await tempDshHome()
-      const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
-      await writeInstalledPackage(profileDir, 'pkg-a')
+      const { tool, dshHome } = await baseFixture()
       // 把 `logs` 造成一个**文件**：readdir 会以 ENOTDIR 失败 —— 那是「未知」，不是「没有」。
       await writeText(join(dshHome, 'logs'), 'not a directory\n')
-      const { spawn } = recordingSpawn(() => cmdResult({ stdout: '' }))
-      const tool = createDiagnosePluginLoadTool(depsFor(configFor(dshHome), { spawn }))
 
       const data = expectOk(await run(tool, {}))
       const logs = data.key['startupLogs'] as Record<string, unknown>
@@ -255,12 +251,8 @@ describe('dsh_diagnose_plugin_load', () => {
     })
 
     it('装上但**没进 bundles** → inBundles=false（第一类「装了没生效」）', async () => {
-      const dshHome = await tempDshHome()
-      const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
-      await writeInstalledPackage(profileDir, 'pkg-a')
-      await writeInstalledPackage(profileDir, 'pkg-b')
-      const { spawn } = recordingSpawn(() => cmdResult({ stdout: '' }))
-      const tool = createDiagnosePluginLoadTool(depsFor(configFor(dshHome), { spawn }))
+      // pkg-a 在 bundles 里、pkg-b 装了但不在 —— baseFixture 的 install 独立于 bundles。
+      const { tool } = await baseFixture({ install: ['pkg-a', 'pkg-b'] })
 
       const data = expectOk(await run(tool, { package: 'pkg-b' }))
       const pkg = (data.key['packages'] as Record<string, unknown>[])[0]
@@ -282,13 +274,7 @@ describe('dsh_diagnose_plugin_load', () => {
 
     it('win32：端口上有监听者 → probed=true / listening=true / 拿到 pid 与启动时间', async () => {
       await withPlatform('win32', async () => {
-        const dshHome = await tempDshHome()
-        const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
-        await writeInstalledPackage(profileDir, 'pkg-a')
-        const { spawn, calls } = recordingSpawn(() => cmdResult({ stdout: LISTENING_OUTPUT }))
-        const tool = createDiagnosePluginLoadTool(
-          depsFor(configFor(dshHome, { port: 3080 }), { spawn }),
-        )
+        const { tool, calls } = await baseFixture({ port: 3080, stdout: LISTENING_OUTPUT })
 
         const data = expectOk(await run(tool, {}))
         const lookup = (data.audit['port'] as Record<string, unknown>)['lookup'] as Record<
@@ -307,13 +293,7 @@ describe('dsh_diagnose_plugin_load', () => {
 
     it('win32：端口上没有监听者 → probed=true 但 listening=false（不算失败）', async () => {
       await withPlatform('win32', async () => {
-        const dshHome = await tempDshHome()
-        const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
-        await writeInstalledPackage(profileDir, 'pkg-a')
-        const { spawn } = recordingSpawn(() => cmdResult({ stdout: '' }))
-        const tool = createDiagnosePluginLoadTool(
-          depsFor(configFor(dshHome, { port: 3080 }), { spawn }),
-        )
+        const { tool } = await baseFixture({ port: 3080 })
 
         const data = expectOk(await run(tool, {}))
         const lookup = (data.audit['port'] as Record<string, unknown>)['lookup'] as Record<
@@ -327,16 +307,10 @@ describe('dsh_diagnose_plugin_load', () => {
 
     it('非 win32（CI 就是这一条）：只跑本平台的命令，绝不跑 powershell.exe', async () => {
       await withPlatform('linux', async () => {
-        const dshHome = await tempDshHome()
-        const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
-        await writeInstalledPackage(profileDir, 'pkg-a')
         // 关键断言：**一条命令都不许是 `powershell.exe`** —— 在 Linux 上跑它毫无意义。
         // 断言「跑了几条」会把实现细节钉死（恰好两条 ss 是当前实现的巧合），
         // 所以这里断言**命令的族**，不是条数。
-        const { spawn, calls } = recordingSpawn(() => cmdResult({ stdout: LISTENING_OUTPUT }))
-        const tool = createDiagnosePluginLoadTool(
-          depsFor(configFor(dshHome, { port: 3080 }), { spawn }),
-        )
+        const { tool, calls } = await baseFixture({ port: 3080, stdout: LISTENING_OUTPUT })
 
         const data = expectOk(await run(tool, {}))
         const lookup = (data.audit['port'] as Record<string, unknown>)['lookup'] as Record<
@@ -364,16 +338,11 @@ describe('dsh_diagnose_plugin_load', () => {
 
     it('win32：产物比进程启动时刻新 → `artifactFreshness=changed-after-process-start`', async () => {
       await withPlatform('win32', async () => {
-        const dshHome = await tempDshHome()
-        const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
-        await writeInstalledPackage(profileDir, 'pkg-a')
         // 进程启动时间设成 2020 年，产物是「现在」写的 → 产物晚于进程启动。
-        const { spawn, calls } = recordingSpawn(() =>
-          cmdResult({ stdout: '4242|node|2020-01-01T00:00:00.0000000+08:00\n' }),
-        )
-        const tool = createDiagnosePluginLoadTool(
-          depsFor(configFor(dshHome, { port: 3080 }), { spawn }),
-        )
+        const { tool, calls } = await baseFixture({
+          port: 3080,
+          stdout: '4242|node|2020-01-01T00:00:00.0000000+08:00\n',
+        })
 
         const data = expectOk(await run(tool, {}))
         const pkg = (data.key['packages'] as Record<string, unknown>[])[0]
@@ -388,15 +357,10 @@ describe('dsh_diagnose_plugin_load', () => {
 
     it('非 win32：`ss` 那张表给不出进程启动时间 → `artifactFreshness=undated`（未知，不是「没变」）', async () => {
       await withPlatform('linux', async () => {
-        const dshHome = await tempDshHome()
-        const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
-        await writeInstalledPackage(profileDir, 'pkg-a')
-        const { spawn, calls } = recordingSpawn(() =>
-          cmdResult({ stdout: '4242|node|2020-01-01T00:00:00.0000000+08:00\n' }),
-        )
-        const tool = createDiagnosePluginLoadTool(
-          depsFor(configFor(dshHome, { port: 3080 }), { spawn }),
-        )
+        const { tool, calls } = await baseFixture({
+          port: 3080,
+          stdout: '4242|node|2020-01-01T00:00:00.0000000+08:00\n',
+        })
 
         const data = expectOk(await run(tool, {}))
         const pkg = (data.key['packages'] as Record<string, unknown>[])[0]
@@ -413,13 +377,8 @@ describe('dsh_diagnose_plugin_load', () => {
     })
 
     it('只查指定包时不会展开整份 bundles', async () => {
-      const dshHome = await tempDshHome()
-      const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
-      await writeInstalledPackage(profileDir, 'pkg-a')
       // pkg-b **装了但不在 bundles 里** —— 正是「装了没启用」的第一类原因。
-      await writeInstalledPackage(profileDir, 'pkg-b')
-      const { spawn } = recordingSpawn(() => cmdResult({ stdout: '' }))
-      const tool = createDiagnosePluginLoadTool(depsFor(configFor(dshHome), { spawn }))
+      const { tool } = await baseFixture({ install: ['pkg-a', 'pkg-b'] })
 
       const data = expectOk(await run(tool, { package: 'pkg-b' }))
       expect((data.key['packages'] as unknown[]).length).toBe(1)
@@ -505,17 +464,10 @@ describe('dsh_diagnose_plugin_load', () => {
     })
 
     it('装了但树里一行都没有 → 硬证据：组合层没有它（下一步给 dsh_dump_config）', async () => {
-      const dshHome = await tempDshHome()
-      const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
-      await writeInstalledPackage(profileDir, 'pkg-a')
-      const { spawn } = recordingSpawn(() => cmdResult({ stdout: '' }))
-      const tool = createDiagnosePluginLoadTool(
-        depsFor(configFor(dshHome), {
-          spawn,
-          // 树里有别的行，就是没有 pkg-a。
-          loader: loaderWith([entrySnapshot({ moduleName: 'other-pkg', fiberState: 2 })]),
-        }),
-      )
+      // 树里有别的行，就是没有 pkg-a。
+      const { tool } = await baseFixture({
+        loader: loaderWith([entrySnapshot({ moduleName: 'other-pkg', fiberState: 2 })]),
+      })
 
       const result = await run(tool, {})
       const data = expectOk(result)
@@ -536,16 +488,9 @@ describe('dsh_diagnose_plugin_load', () => {
       // 判据（`absent`）只是「树读到了、这个包一行都没匹配上」，**不含**任何「它装了」的观测。
       // 模型显式传一个没装的包名时，同一段代码照样走到这一档 —— 旧文案说「Installed but absent」，
       // 那是**把没查到写成查到了**。变异：把 `Named` 改回 `Installed` → 这条判红。
-      const dshHome = await tempDshHome()
-      const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
-      await writeInstalledPackage(profileDir, 'pkg-a')
-      const { spawn } = recordingSpawn(() => cmdResult({ stdout: '' }))
-      const tool = createDiagnosePluginLoadTool(
-        depsFor(configFor(dshHome), {
-          spawn,
-          loader: loaderWith([entrySnapshot({ moduleName: 'other-pkg', fiberState: 2 })]),
-        }),
-      )
+      const { tool } = await baseFixture({
+        loader: loaderWith([entrySnapshot({ moduleName: 'other-pkg', fiberState: 2 })]),
+      })
 
       const data = expectOk(await run(tool, { package: 'never-installed-pkg' }))
       const pkg = (data.key['packages'] as Record<string, unknown>[])[0]
@@ -556,19 +501,12 @@ describe('dsh_diagnose_plugin_load', () => {
     })
 
     it('一个包有多行时取最坏的一档（报 active 而另一行崩了最误导）', async () => {
-      const dshHome = await tempDshHome()
-      const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
-      await writeInstalledPackage(profileDir, 'pkg-a')
-      const { spawn } = recordingSpawn(() => cmdResult({ stdout: '' }))
-      const tool = createDiagnosePluginLoadTool(
-        depsFor(configFor(dshHome), {
-          spawn,
-          loader: loaderWith([
-            entrySnapshot({ moduleName: 'pkg-a', entryId: 'a1', fiberState: 2 }),
-            entrySnapshot({ moduleName: 'pkg-a', entryId: 'a2', hasFiber: false }),
-          ]),
-        }),
-      )
+      const { tool } = await baseFixture({
+        loader: loaderWith([
+          entrySnapshot({ moduleName: 'pkg-a', entryId: 'a1', fiberState: 2 }),
+          entrySnapshot({ moduleName: 'pkg-a', entryId: 'a2', hasFiber: false }),
+        ]),
+      })
 
       const data = expectOk(await run(tool, {}))
       const pkg = (data.key['packages'] as Record<string, unknown>[])[0]
@@ -577,20 +515,13 @@ describe('dsh_diagnose_plugin_load', () => {
     })
 
     it('观测模式给出 entry 总数与相位直方图（判断快照是否已稳定）', async () => {
-      const dshHome = await tempDshHome()
-      const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
-      await writeInstalledPackage(profileDir, 'pkg-a')
-      const { spawn } = recordingSpawn(() => cmdResult({ stdout: '' }))
-      const tool = createDiagnosePluginLoadTool(
-        depsFor(configFor(dshHome), {
-          spawn,
-          loader: loaderWith([
-            entrySnapshot({ moduleName: 'pkg-a', fiberState: 2 }),
-            entrySnapshot({ moduleName: 'pkg-b', fiberState: 3 }),
-            entrySnapshot({ moduleName: 'pkg-c', hasFiber: false }),
-          ]),
-        }),
-      )
+      const { tool } = await baseFixture({
+        loader: loaderWith([
+          entrySnapshot({ moduleName: 'pkg-a', fiberState: 2 }),
+          entrySnapshot({ moduleName: 'pkg-b', fiberState: 3 }),
+          entrySnapshot({ moduleName: 'pkg-c', hasFiber: false }),
+        ]),
+      })
 
       const data = expectOk(await run(tool, {}))
       const observation = data.key['observation'] as Record<string, unknown>
@@ -640,15 +571,9 @@ describe('dsh_diagnose_plugin_load', () => {
     })
 
     it('cancelled：调用方在进入前就取消（与平台无关的取消路径）', async () => {
-      const dshHome = await tempDshHome()
-      const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
-      await writeInstalledPackage(profileDir, 'pkg-a')
+      const { tool } = await baseFixture({ port: 3080 })
       const controller = new AbortController()
       controller.abort()
-      const { spawn } = recordingSpawn(() => cmdResult({ stdout: '' }))
-      const tool = createDiagnosePluginLoadTool(
-        depsFor(configFor(dshHome, { port: 3080 }), { spawn }),
-      )
 
       // 这条**不依赖端口查询**：进入前已取消，工具在读完文件后必须报 cancelled。
       // 第一版把它建在「端口查询中途 abort」上，于是非 Windows（CI）上 spawn 压根不被调用
@@ -714,14 +639,8 @@ describe('dsh_diagnose_plugin_load', () => {
   describe('signal 与超时纪律', () => {
     it('win32：exec.signal 原样透传给端口查询的 spawn', async () => {
       await withPlatform('win32', async () => {
-        const dshHome = await tempDshHome()
-        const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
-        await writeInstalledPackage(profileDir, 'pkg-a')
+        const { tool, calls } = await baseFixture({ port: 3080 })
         const controller = new AbortController()
-        const { spawn, calls } = recordingSpawn(() => cmdResult({ stdout: '' }))
-        const tool = createDiagnosePluginLoadTool(
-          depsFor(configFor(dshHome, { port: 3080 }), { spawn }),
-        )
 
         await run(tool, {}, execWith(controller.signal))
         expect(calls).toHaveLength(1)
@@ -752,13 +671,7 @@ describe('dsh_diagnose_plugin_load', () => {
 
     it('win32：端口按 LocalPort 查，不用命令行子串（子串会误匹配派生 shell）', async () => {
       await withPlatform('win32', async () => {
-        const dshHome = await tempDshHome()
-        const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
-        await writeInstalledPackage(profileDir, 'pkg-a')
-        const { spawn, calls } = recordingSpawn(() => cmdResult({ stdout: '' }))
-        const tool = createDiagnosePluginLoadTool(
-          depsFor(configFor(dshHome, { port: 3080 }), { spawn }),
-        )
+        const { tool, calls } = await baseFixture({ port: 3080 })
 
         await run(tool, {})
         expect(calls).toHaveLength(1)
@@ -773,18 +686,13 @@ describe('dsh_diagnose_plugin_load', () => {
   })
 
   describe('形状：三层文本与 data（§3.1 / §4.1）', () => {
-    /** 造一份「有 loader、包 active」的成功 fixture。 */
+    /** 造一份「有 loader、包 active」的成功 fixture（baseFixture 的 loader 传入型）。 */
     async function activeFixture(): Promise<ToolDefinition> {
-      const dshHome = await tempDshHome()
-      const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
-      await writeInstalledPackage(profileDir, 'pkg-a')
-      const { spawn } = recordingSpawn(() => cmdResult({ stdout: '' }))
-      return createDiagnosePluginLoadTool(
-        depsFor(configFor(dshHome), {
-          spawn,
+      return (
+        await baseFixture({
           loader: loaderWith([entrySnapshot({ moduleName: 'pkg-a', fiberState: 2 })]),
-        }),
-      )
+        })
+      ).tool
     }
 
     it('`data` 顶层**恰好**三键：成功与失败都同形（B21）', async () => {
@@ -876,16 +784,12 @@ describe('dsh_diagnose_plugin_load', () => {
       const active = await activeFixture()
       const activeResult = await run(active, {})
 
-      const dshHome = await tempDshHome()
-      const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
-      await writeInstalledPackage(profileDir, 'pkg-a')
-      const { spawn } = recordingSpawn(() => cmdResult({ stdout: '' }))
-      const failed = createDiagnosePluginLoadTool(
-        depsFor(configFor(dshHome), {
-          spawn,
+      // 第二份各用一份**独立的临时 home**（baseFixture 每次现造）—— B16 判据要求，见上。
+      const failed = (
+        await baseFixture({
           loader: loaderWith([entrySnapshot({ moduleName: 'pkg-a', hasFiber: false })]),
-        }),
-      )
+        })
+      ).tool
       const failedResult = await run(failed, {})
 
       const candidates = (tool: ToolDefinition, value: unknown): string[] => {
@@ -908,19 +812,12 @@ describe('dsh_diagnose_plugin_load', () => {
 
     it('产物在进程启动后变过（无别的症状）→ 下一步是**可派发**的 dsh_check_effect_mode', async () => {
       await withPlatform('win32', async () => {
-        const dshHome = await tempDshHome()
-        const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
-        await writeInstalledPackage(profileDir, 'pkg-a')
         // 进程启动时间设成 2020 → 产物晚于进程启动。
-        const { spawn } = recordingSpawn(() =>
-          cmdResult({ stdout: '4242|node|2020-01-01T00:00:00.0000000+08:00\n' }),
-        )
-        const tool = createDiagnosePluginLoadTool(
-          depsFor(configFor(dshHome, { port: 3080 }), {
-            spawn,
-            loader: loaderWith([entrySnapshot({ moduleName: 'pkg-a', fiberState: 2 })]),
-          }),
-        )
+        const { tool } = await baseFixture({
+          port: 3080,
+          stdout: '4242|node|2020-01-01T00:00:00.0000000+08:00\n',
+          loader: loaderWith([entrySnapshot({ moduleName: 'pkg-a', fiberState: 2 })]),
+        })
 
         const result = await run(tool, {})
         const data = expectOk(result)
@@ -942,16 +839,9 @@ describe('dsh_diagnose_plugin_load', () => {
       // 注：B17 的取值面含「目标工具自己的描述/参数文本」（Lead 裁决扩的），所以枚举值
       // （如 `change: 'host-code'`）**不必**出现在本次输出里；本用例挑的是标识符那一类
       // —— `dsh_dump_config` 的 `args.profile` 必须真的印在 L2 的 `resolved:` 行里。
-      const dshHome = await tempDshHome()
-      const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
-      await writeInstalledPackage(profileDir, 'pkg-a')
-      const { spawn } = recordingSpawn(() => cmdResult({ stdout: '' }))
-      const tool = createDiagnosePluginLoadTool(
-        depsFor(configFor(dshHome), {
-          spawn,
-          loader: loaderWith([entrySnapshot({ moduleName: 'other-pkg', fiberState: 2 })]),
-        }),
-      )
+      const { tool } = await baseFixture({
+        loader: loaderWith([entrySnapshot({ moduleName: 'other-pkg', fiberState: 2 })]),
+      })
 
       const result = await run(tool, {})
       const step = result.nextStep as { tool?: string; args?: Record<string, unknown> } | undefined
@@ -1011,13 +901,8 @@ describe('dsh_diagnose_plugin_load', () => {
 
   describe('三值不许压成两值（缺 A 与活跃坑 18 的回归守卫）', () => {
     it('inferred 模式下 `reason` 短于 40 字符（它每次调用都同值，长句会被 B16 判成恒定块）', async () => {
-      const dshHome = await tempDshHome()
-      const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
-      await writeInstalledPackage(profileDir, 'pkg-a')
-      const { spawn } = recordingSpawn(() => cmdResult({ stdout: '' }))
-      const tool = createDiagnosePluginLoadTool(
-        depsFor(configFor(dshHome), { spawn, loader: loaderUnavailable() }),
-      )
+      // 刻意传 `loaderUnavailable`（baseFixture 的 loader 可选参收不了这个变体）。
+      const { tool } = await baseFixture({ loader: loaderUnavailable() })
 
       const data = expectOk(await run(tool, {}))
       const observation = data.key['observation'] as Record<string, unknown>
@@ -1054,20 +939,17 @@ describe('dsh_diagnose_plugin_load', () => {
         artifactAgeMs: number,
         startedOffsetMs: number,
       ): Promise<() => ToolDefinition> {
-        const dshHome = await tempDshHome()
-        const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
-        const packageDir = await writeInstalledPackage(profileDir, 'pkg-a')
+        const { tool, dshHome } = await baseFixture({
+          port: 3080,
+          stdout: `4242|node|${new Date(Date.now() + startedOffsetMs).toISOString()}\n`,
+          loader: loaderWith([entrySnapshot({ moduleName: 'pkg-a', fiberState: 2 })]),
+        })
+        // 产物 mtime 由入参决定（baseFixture 建不出这一维）：直接找到产物文件改时间。
+        const packageDir = join(dshHome, 'profiles', 'web', 'node_modules', 'pkg-a')
         const artifact = new Date(Date.now() + artifactAgeMs)
         await utimes(join(packageDir, 'lib', 'index.js'), artifact, artifact)
-        const startedAt = new Date(Date.now() + startedOffsetMs).toISOString()
-        const { spawn } = recordingSpawn(() => cmdResult({ stdout: `4242|node|${startedAt}\n` }))
-        return () =>
-          createDiagnosePluginLoadTool(
-            depsFor(configFor(dshHome, { port: 3080 }), {
-              spawn,
-              loader: loaderWith([entrySnapshot({ moduleName: 'pkg-a', fiberState: 2 })]),
-            }),
-          )
+        // 返回工厂只是沿用原签名（`withPlatform` 包住构造**并**执行，坑 25）；tool 已构造好。
+        return () => tool
       }
 
       it('产物在进程启动之后变过 ⇒ 那一档**不带**任何「跑的是旧产物」的结论', async () => {
@@ -1134,27 +1016,16 @@ describe('dsh_diagnose_plugin_load', () => {
           )
 
           // 拿不到参照（不给端口 ⇒ 不做端口查询 ⇒ 没有进程启动时间）⇒ 第三档。
-          const noPort = await (async () => {
-            const dshHome = await tempDshHome()
-            const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
-            await writeInstalledPackage(profileDir, 'pkg-a')
-            const { spawn, calls } = recordingSpawn(() => cmdResult({ stdout: '' }))
-            const built = createDiagnosePluginLoadTool(
-              depsFor(configFor(dshHome), {
-                spawn,
-                loader: loaderWith([entrySnapshot({ moduleName: 'pkg-a', fiberState: 2 })]),
-              }),
-            )
-            return { built, calls }
-          })()
+          const noPort = await baseFixture({
+            loader: loaderWith([entrySnapshot({ moduleName: 'pkg-a', fiberState: 2 })]),
+          })
           const undatedValue = String(
             (
-              expectOk(await run(noPort.built, {})).key['packages'] as Record<string, unknown>[]
+              expectOk(await run(noPort.tool, {})).key['packages'] as Record<string, unknown>[]
             )[0]?.['artifactFreshness'],
           )
           // 下界：那个 spawn 替身一次都没被调用的话，「没给端口就不查端口」就成了恒真的假设。
           expect(noPort.calls, '没给端口却仍去查端口了').toHaveLength(0)
-
           // 三档互不相同（塌成两档就是反向结论），且每档都在**运行时闭集**里。
           expect(new Set([changedValue, unchangedValue, undatedValue]).size).toBe(3)
           expect(ARTIFACT_FRESHNESS_VALUES).toContain(changedValue)
@@ -1469,17 +1340,14 @@ describe('dsh_diagnose_plugin_load', () => {
   })
 
   describe('A2 · 工具投影（解析结论进 key，别读成「没有失败」）', () => {
-    /** 造一个「有一份日志」的诊断 fixture。 */
+    /** 造一个「有一份日志」的诊断 fixture（baseFixture + 往 home 写日志）。 */
     async function logFixture(
       content: string,
       name = 'startup-2026-01-01T00-00-00-000Z-abc.log',
     ): Promise<ToolDefinition> {
-      const dshHome = await tempDshHome()
-      const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
-      await writeInstalledPackage(profileDir, 'pkg-a')
+      const { tool, dshHome } = await baseFixture()
       await writeText(join(dshHome, 'logs', name), content)
-      const { spawn } = recordingSpawn(() => cmdResult({ stdout: '' }))
-      return createDiagnosePluginLoadTool(depsFor(configFor(dshHome), { spawn }))
+      return tool
     }
 
     it('解析成功：失败条目 / required 数 / profile 一致性进 key，根因（EADDRINUSE）进 L1 与 L2', async () => {
@@ -1539,13 +1407,9 @@ describe('dsh_diagnose_plugin_load', () => {
     })
 
     it('**读不到**日志：`parseState=unreadable`（未知 ≠ 没有失败），与「目录读不到」分开', async () => {
-      const dshHome = await tempDshHome()
-      const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
-      await writeInstalledPackage(profileDir, 'pkg-a')
+      const { tool, dshHome } = await baseFixture()
       // 把 `startup-x.log` 造成一个**目录**：`readdir` 列得到它，`readFile` 会失败。
       await writeText(join(dshHome, 'logs', 'startup-x.log', 'inner'), 'x\n')
-      const { spawn } = recordingSpawn(() => cmdResult({ stdout: '' }))
-      const tool = createDiagnosePluginLoadTool(depsFor(configFor(dshHome), { spawn }))
 
       const data = expectOk(await run(tool, {}))
       // 列表层是 present（真列到了），解析层是 unreadable（读不到内容）—— 两个轴不许混。
@@ -1587,11 +1451,7 @@ describe('dsh_diagnose_plugin_load', () => {
     })
 
     it('没有日志 / 目录读不到时**不给** `startupEvidence`（「没查」与「查了没有」可分）', async () => {
-      const dshHome = await tempDshHome()
-      const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
-      await writeInstalledPackage(profileDir, 'pkg-a')
-      const { spawn } = recordingSpawn(() => cmdResult({ stdout: '' }))
-      const tool = createDiagnosePluginLoadTool(depsFor(configFor(dshHome), { spawn }))
+      const { tool } = await baseFixture()
 
       const data = expectOk(await run(tool, {}))
       expect(data.key['startupEvidence']).toBeUndefined()
@@ -1624,28 +1484,22 @@ describe('dsh_diagnose_plugin_load', () => {
      * @param logAgeMs 日志文件 mtime 相对现在的偏移（负数 = 过去）。
      */
     async function freshnessFixture(logAgeMs: number): Promise<() => ToolDefinition> {
-      const dshHome = await tempDshHome()
-      const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
-      await writeInstalledPackage(profileDir, 'pkg-a')
+      const { tool, dshHome } = await baseFixture({
+        port: 3080,
+        stdout: `4242|node|${new Date(Date.now() + PROCESS_AGE_MS).toISOString()}\n`,
+        loader: loaderWith([entrySnapshot({ moduleName: 'pkg-a', fiberState: 2 })]),
+      })
       const logPath = join(dshHome, 'logs', LOG_NAME)
       await writeText(logPath, REAL_STARTUP_LOG)
       const at = new Date(Date.now() + logAgeMs)
       await utimes(logPath, at, at)
 
-      const startedAt = new Date(Date.now() + PROCESS_AGE_MS).toISOString()
-      const { spawn } = recordingSpawn(() => cmdResult({ stdout: `4242|node|${startedAt}\n` }))
       // ⚠️ **钉平台必须把「执行」一起包住**（坑 25 的隐蔽变体）：端口查询只有 Windows 分支
       // 会起子进程、并按 win32 形状解析 spawn 的输出。所以这里返回**工厂**，由调用方在
       // 同一个 `withPlatform` 里构造**并**跑。只把「构造」包进去、让执行落在 `finally`
       // 恢复平台之后，就是「本机绿、CI 红」—— 本 PR 首次推送在 CI（ubuntu）上真踩：
       // 那段 win32 形状的输出被按 linux 分支解析 ⇒ 红。
-      return () =>
-        createDiagnosePluginLoadTool(
-          depsFor(configFor(dshHome, { port: 3080 }), {
-            spawn,
-            loader: loaderWith([entrySnapshot({ moduleName: 'pkg-a', fiberState: 2 })]),
-          }),
-        )
+      return () => tool
     }
 
     it('日志比进程旧 → `freshness=stale`，L1 明说它是历史遗留；当前进程的日志 → `current`，不说', async () => {
@@ -1690,18 +1544,11 @@ describe('dsh_diagnose_plugin_load', () => {
     })
 
     it('拿不到进程启动时间（没给端口）→ `freshness=undated`，L1 不许把它读成「当前进程失败了」', async () => {
-      const dshHome = await tempDshHome()
-      const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
-      await writeInstalledPackage(profileDir, 'pkg-a')
+      const { tool, dshHome } = await baseFixture({
+        loader: loaderWith([entrySnapshot({ moduleName: 'pkg-a', fiberState: 2 })]),
+      })
       await writeText(join(dshHome, 'logs', LOG_NAME), REAL_STARTUP_LOG)
       // **不给端口** ⇒ 没有端口查询 ⇒ 没有进程启动时间这个参照物。
-      const { spawn } = recordingSpawn(() => cmdResult({ stdout: '' }))
-      const tool = createDiagnosePluginLoadTool(
-        depsFor(configFor(dshHome), {
-          spawn,
-          loader: loaderWith([entrySnapshot({ moduleName: 'pkg-a', fiberState: 2 })]),
-        }),
-      )
 
       const data = expectOk(await run(tool, {}))
       const evidence = data.key['startupEvidence'] as Record<string, unknown>
@@ -1760,8 +1607,8 @@ describe('dsh_diagnose_plugin_load', () => {
     })
 
     it('**字符串与数组两种形态都算「声明了」**（数组不是只取第一个）', async () => {
-      const dshHome = await tempDshHome()
-      const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-str', 'pkg-arr'] })
+      const { tool, dshHome } = await baseFixture({ bundles: ['pkg-str', 'pkg-arr'], install: [] })
+      const profileDir = join(dshHome, 'profiles', 'web')
       await writeRawPackage(
         profileDir,
         'pkg-str',
@@ -1778,8 +1625,6 @@ describe('dsh_diagnose_plugin_load', () => {
         },
         ['lib/index.js', 'one.yml', 'two.yml'],
       )
-      const { spawn } = recordingSpawn(() => cmdResult({ stdout: '' }))
-      const tool = createDiagnosePluginLoadTool(depsFor(configFor(dshHome), { spawn }))
 
       const single = packageKeyOf(expectOk(await run(tool, { package: 'pkg-str' })))[
         'bundle'
@@ -1798,8 +1643,8 @@ describe('dsh_diagnose_plugin_load', () => {
     })
 
     it('数组形态里**第二个**文件不在 → `missing` 判出来（只看第一个是假绿）', async () => {
-      const dshHome = await tempDshHome()
-      const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-arr'] })
+      const { tool, dshHome } = await baseFixture({ bundles: ['pkg-arr'], install: [] })
+      const profileDir = join(dshHome, 'profiles', 'web')
       await writeRawPackage(
         profileDir,
         'pkg-arr',
@@ -1810,8 +1655,6 @@ describe('dsh_diagnose_plugin_load', () => {
         },
         ['lib/index.js', 'one.yml'],
       )
-      const { spawn } = recordingSpawn(() => cmdResult({ stdout: '' }))
-      const tool = createDiagnosePluginLoadTool(depsFor(configFor(dshHome), { spawn }))
 
       const data = expectOk(await run(tool, {}))
       const bundle = packageKeyOf(data)['bundle'] as Record<string, unknown>
@@ -1824,11 +1667,7 @@ describe('dsh_diagnose_plugin_load', () => {
     })
 
     it('没声明 `dsh.bundle` → `declared=false` + L2 明说「不贡献层」', async () => {
-      const dshHome = await tempDshHome()
-      const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
-      await writeInstalledPackage(profileDir, 'pkg-a')
-      const { spawn } = recordingSpawn(() => cmdResult({ stdout: '' }))
-      const tool = createDiagnosePluginLoadTool(depsFor(configFor(dshHome), { spawn }))
+      const { tool } = await baseFixture()
 
       const data = expectOk(await run(tool, {}))
       const bundle = packageKeyOf(data)['bundle'] as Record<string, unknown>
@@ -1841,16 +1680,14 @@ describe('dsh_diagnose_plugin_load', () => {
     })
 
     it('`dsh.bundle.patch` 形态坏（数字）→ `malformed`：宿主丢掉整条层，必须说出来', async () => {
-      const dshHome = await tempDshHome()
-      const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-bad'] })
+      const { tool, dshHome } = await baseFixture({ bundles: ['pkg-bad'], install: [] })
+      const profileDir = join(dshHome, 'profiles', 'web')
       await writeRawPackage(
         profileDir,
         'pkg-bad',
         { name: 'pkg-bad', main: './lib/index.js', dsh: { bundle: { patch: 42 } } },
         ['lib/index.js'],
       )
-      const { spawn } = recordingSpawn(() => cmdResult({ stdout: '' }))
-      const tool = createDiagnosePluginLoadTool(depsFor(configFor(dshHome), { spawn }))
 
       const data = expectOk(await run(tool, {}))
       const bundle = packageKeyOf(data)['bundle'] as Record<string, unknown>
@@ -1861,11 +1698,8 @@ describe('dsh_diagnose_plugin_load', () => {
     })
 
     it('那份 `package.json` 读不到（坏 JSON）→ `declared=null`（未知 ≠ 没声明）', async () => {
-      const dshHome = await tempDshHome()
-      const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-broken'] })
-      await writeRawPackage(profileDir, 'pkg-broken', '{ this is not json')
-      const { spawn } = recordingSpawn(() => cmdResult({ stdout: '' }))
-      const tool = createDiagnosePluginLoadTool(depsFor(configFor(dshHome), { spawn }))
+      const { tool, dshHome } = await baseFixture({ bundles: ['pkg-broken'], install: [] })
+      await writeRawPackage(join(dshHome, 'profiles', 'web'), 'pkg-broken', '{ this is not json')
 
       const data = expectOk(await run(tool, {}))
       const bundle = packageKeyOf(data)['bundle'] as Record<string, unknown>
@@ -1902,13 +1736,10 @@ describe('dsh_diagnose_plugin_load', () => {
   describe('C · `entry=present` 不许被读成「装了=生效了」', () => {
     /** 造一个 `pkg-a` 已装、bundles 里有它的 fixture，可选注入 loader。 */
     async function presentFixture(loader?: () => never): Promise<ToolDefinition> {
-      const dshHome = await tempDshHome()
-      const profileDir = await writeProfile(dshHome, 'web', { bundles: ['pkg-a'] })
-      await writeInstalledPackage(profileDir, 'pkg-a')
-      const { spawn } = recordingSpawn(() => cmdResult({ stdout: '' }))
-      return createDiagnosePluginLoadTool(
-        depsFor(configFor(dshHome), loader === undefined ? { spawn } : { spawn, loader }),
+      const { tool } = await baseFixture(
+        loader === undefined ? {} : { loader: loader as unknown as ReturnType<typeof loaderWith> },
       )
+      return tool
     }
 
     it('**读不到树**时带方向性措辞（这时这行是唯一原料）', async () => {

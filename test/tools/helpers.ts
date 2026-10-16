@@ -9,7 +9,7 @@
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { afterEach } from 'vitest'
+import { afterEach, expect } from 'vitest'
 
 import type { ResolvedConfig } from '../../src/contracts.ts'
 import { WORKLOAD_DEFAULT_BUDGET_MS } from '../../src/lib/timeouts.ts'
@@ -520,4 +520,48 @@ function viewOf(data: ToolData<unknown>): ToolDataView {
     key: data.key as Record<string, unknown>,
     audit: data.audit as Record<string, unknown>,
   }
+}
+
+/**
+ * 「合成器与声明一致」的断言 —— **B20a 照不到的那一半**，这里收敛为唯一实现。
+ *
+ * 红线 B20a（`test/redlines.test.ts`）的 `shape.text` 是从 `description` **重新合成**的，
+ * 从不读 `tool.description` ⇒ 「有人手写字符串绕过骨架」这一档只有各工具测试能照到。
+ * 骨架的其余判据（段非空 / 行数与字符上界 / 参数描述下界）**B20a 已全量覆盖且更严**，
+ * 工具测试不再逐字重抄 —— 只留一行指针注释（一处一事实）。
+ *
+ * @param tool 工具定义（读它**注册后**的 `description`，即合成器的真实产物）。
+ * @param composed `composeDescription(声明)` 的结果。
+ */
+export function expectSynthesizedDescription(tool: ToolDefinition, composed: string): void {
+  expect(tool.description).toBe(composed)
+}
+
+/**
+ * 「参数描述非空 + 合计 > 0」的下界 —— 点进 `.properties` 才有效的那个口（坑 39）。
+ *
+ * 与 B20a 的差别：B20a 是**全仓扫描**（对闭集每个工具跑一遍），这里是**本工具自己**的
+ * 单点断言（红了直接指到本文件）。两处都留是有意的：红线防「加新工具忘了」，这里防
+ * 「改本工具时弄坏」。**精确的参数名闭集各工具自己断**（那是本工具的契约，不是骨架的）。
+ *
+ * @param tool 工具定义。
+ * @param label 用例失败时的点名前缀。
+ */
+export function expectParameterDescriptionsNotBlank(tool: ToolDefinition, label = '本工具'): void {
+  // ⚠️ `defineTool` 把参数编译成了 JSON schema（`{ type, properties }`，活跃坑 11）——
+  // 直接 `Object.values(tool.parameters)` 会拿到 `'object'` 与 properties 对象本身，
+  // 每条 `description` 都是 `undefined` ⇒ 合计恒为 0 ⇒ **判据空转**。
+  const parameters = tool.parameters as {
+    properties?: Record<string, { description?: string }>
+  }
+  const props = parameters.properties ?? {}
+  const names = Object.keys(props)
+  expect(names.length, `${label} 一个参数都没读到 —— 判据空转`).toBeGreaterThan(0)
+  let total = 0
+  for (const name of names) {
+    const text = props[name]?.description ?? ''
+    expect(text, `${label} 参数 ${name} 的描述是空的`).not.toBe('')
+    total += text.length
+  }
+  expect(total, `${label} 参数描述合计为 0 —— 判据空转`).toBeGreaterThan(0)
 }

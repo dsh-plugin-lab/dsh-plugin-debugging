@@ -15,6 +15,7 @@ import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import {
   createListInstancesTool,
   DSH_UNAUTHORIZED_BODY,
+  LIST_INSTANCES_DESCRIPTION,
   LIST_INSTANCES_TOOL,
   type SignatureFetch,
 } from '../../src/tools/dsh_list_instances.ts'
@@ -29,17 +30,14 @@ import {
   type ListenerCandidate,
   type ListenerScanResult,
 } from '../../src/lib/ports.ts'
-import {
-  composeDescription,
-  DESCRIPTION_MAX_CHARS,
-  DESCRIPTION_MAX_LINES,
-} from '../../src/tools/describe.ts'
+import { composeDescription } from '../../src/tools/describe.ts'
 import {
   cmdResult,
   configFor,
   depsFor,
   expectFail,
   expectOk,
+  expectParameterDescriptionsNotBlank,
   recordingSpawn,
   renderText,
   run,
@@ -845,17 +843,10 @@ describe(`${LIST_INSTANCES_TOOL} · 有界与取消`, () => {
 })
 
 describe(`${LIST_INSTANCES_TOOL} · 形状（SHAPE §2.1 / §4.1）`, () => {
-  it('描述四段骨架：行数 ≤4、字符 ≤240，且**明说给不出 home**', () => {
-    const text = composeDescription({
-      what: 'Lists live DSH hosts on this machine.',
-      useWhen: 'Use to find instances; pass a result to dsh_check_auth.',
-      boundary:
-        'Returns an authority (host:port) only, never a DSH_HOME.\n' +
-        'Loopback only; could not probe is not the same as not DSH.',
-    })
-    expect(text.split('\n').length).toBeLessThanOrEqual(DESCRIPTION_MAX_LINES)
-    expect(text.length).toBeLessThanOrEqual(DESCRIPTION_MAX_CHARS)
+  it('描述明说**给不出 home**（本工具特有的硬要求；骨架形状由红线 B20a 全量覆盖）', () => {
     // 「给不出 home」是维护者的硬要求：描述里必须有这一句，否则就是在骗模型。
+    // （行数 / 字符 / 段非空 / 连接符等骨架判据由 B20a 对闭集全量覆盖，这里不重抄。）
+    const text = composeDescription(LIST_INSTANCES_DESCRIPTION)
     expect(text).toContain('never a DSH_HOME')
   })
 
@@ -863,10 +854,9 @@ describe(`${LIST_INSTANCES_TOOL} · 形状（SHAPE §2.1 / §4.1）`, () => {
     const tool = createListInstancesTool(depsFor(configFor('C:\\fake-home')))
     const params = tool.parameters as { properties?: Record<string, { description?: string }> }
     const names = Object.keys(params.properties ?? {})
+    // 精确闭集是本工具的契约（B20a 只判「个数 > 0 + 非空 + 合计 > 0」的通用下界）。
     expect(names).toEqual(['port'])
-    for (const name of names) {
-      expect(params.properties?.[name]?.description ?? '').not.toBe('')
-    }
+    expectParameterDescriptionsNotBlank(tool)
   })
 
   it('`data` 恰好三键（顶层不许有第四个）', async () => {
