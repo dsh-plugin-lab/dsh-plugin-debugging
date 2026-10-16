@@ -169,7 +169,8 @@ export function snapshotEntry(entry: unknown, index: number): LoaderEntrySnapsho
 }
 
 /**
- * 迭代一个可迭代对象；不可迭代时退化成空。
+ * 迭代一个可迭代对象；不可迭代时退化成空 —— **唯一实现**（2026-10-16 审计 A2 收敛：
+ * `hot-reload.ts` 的写侧遍历同用这一份，import 方向本就单向 hot-reload → loader，无环）。
  *
  * **不能借 `asRecord` 去取 `Symbol.iterator`**：那个帮手刻意拒绝数组
  * （它要的是「纯记录」语义），而 `loader.entries()` 返回的**正是一个数组**。
@@ -181,7 +182,7 @@ export function snapshotEntry(entry: unknown, index: number): LoaderEntrySnapsho
  *
  * @param value 候选可迭代对象。
  */
-function* iterate(value: unknown): Generator<unknown> {
+export function* iterate(value: unknown): Generator<unknown> {
   if (typeof value !== 'object' || value === null) return
   const iteratorFn = (value as { [Symbol.iterator]?: unknown })[Symbol.iterator]
   if (typeof iteratorFn !== 'function') return

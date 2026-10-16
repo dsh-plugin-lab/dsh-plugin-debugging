@@ -74,6 +74,14 @@ export const SUPPORTED_MARKER_VERSIONS: readonly number[] = [1]
 export const RESTART_COOLDOWN_MS = 60_000
 
 /**
+ * 「`dshHome` 为空」这条失败 `detail` 的唯一措辞 —— plan 与 recovery 两道守卫共用。
+ *
+ * 两处此前各写一份逐字字面量（2026-10-16 审计 B7）：同一守卫同一句话，
+ * 改一处必漏另一处。判据：红线 B30 的 FORMAT 闭集钉住这句只许住在这里。
+ */
+export const DSH_HOME_EMPTY_DETAIL = 'dshHome is empty'
+
+/**
  * marker 的**消费状态**。
  *
  * `armed` = 这次重启还没被消费掉（新进程起来后该去恢复、投 notice，然后转成 `consumed`）；
@@ -875,7 +883,7 @@ export async function planRestart(request: RestartRequest, ports: RestartPorts):
         kind: 'failed',
         verdict:
           'the restart was not planned: no $DSH_HOME is known, so the marker has nowhere to go',
-        detail: 'dshHome is empty',
+        detail: DSH_HOME_EMPTY_DETAIL,
       }
     }
     const now = ports.now()

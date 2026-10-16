@@ -37,6 +37,7 @@ import type { ResolvedConfig } from '../contracts.js'
 import type { RenderTable } from '../lib/render.js'
 import { composeDescription, type ToolDescription } from './describe.js'
 import {
+  authorityLine,
   guardKeyLines,
   asAudit,
   assertResolvedDshHome,
@@ -422,7 +423,8 @@ function keyText(key: CheckAuthKey): string[] {
   const fallback = guardKeyLines(key)
   if (fallback !== undefined) return fallback
   const lines: string[] = [resolvedLine(key.resolved)]
-  if (key.authority !== undefined) lines.push(`authority: ${key.authority}`)
+  const authority = authorityLine(key.authority)
+  if (authority !== undefined) lines.push(authority)
   if (key.probe !== undefined) lines.push(probeLine(key.probe))
   if (key.credentials !== undefined) lines.push(credentialsLine(key.credentials))
   return lines

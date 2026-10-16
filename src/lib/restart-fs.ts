@@ -62,6 +62,7 @@
  * 一律 `unreadable`，且把原始 `code` 带进 `reason`。
  */
 import type { RestartFsPort, TextRead } from './restart.js'
+import { systemErrorCode } from './errors.js'
 
 /** 宿主 `fs` 服务在 Cordis 上的注册名（`FileSystem` 的 `super(ctx, 'fs')`）。 */
 const HOST_FS_SERVICE = 'fs'
@@ -161,12 +162,14 @@ export function hostFsUnavailableReason(ctx: ContextLike): string | undefined {
 /**
  * 取一个异常的稳定码（宿主 `FsError` 的 `code`；其它异常没有）。
  *
+ * 实现直接用 `errors.ts` 的正典 `systemErrorCode`（多读 `cause` 那一半 ——
+ * node:fs 的错误常包在 cause 里；本地原有一份只读顶层的弱化副本已删，
+ * 与 2026-10-16 审计 A6 揪出的 `list_instances` 同族）。
+ *
  * @param error 任意异常。
  */
 function errorCodeOf(error: unknown): string | undefined {
-  if (error === null || typeof error !== 'object') return undefined
-  const code = (error as { code?: unknown }).code
-  return typeof code === 'string' ? code : undefined
+  return systemErrorCode(error)
 }
 
 /**
@@ -177,6 +180,10 @@ function errorCodeOf(error: unknown): string | undefined {
 function reasonOf(error: unknown): string {
   const code = errorCodeOf(error)
   const message = error instanceof Error ? error.message : String(error)
+  // ⚠️ 与 restart-recovery.ts 的 describeError 形状相似但**不同义**：
+  // 这里的 message 兜底是 messageOf 语义（Error.message / String），
+  // 那边是多级兜底（message → name → 'unknown error'）—— 最后一行的
+  // `${code}: ${message}` 拼接相同只是巧合，别按同语义收拢（审计 A7 判定）。
   return code === undefined ? message : `${code}: ${message}`
 }
 

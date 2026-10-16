@@ -68,6 +68,7 @@ import { join } from 'node:path'
 
 import { createRestartFsPort, type ContextLike } from './restart-fs.js'
 import { messageOf } from './errors.js'
+import { DSH_HOME_EMPTY_DETAIL } from './restart.js'
 import {
   consumeRestartMarker,
   decideRecovery,
@@ -565,7 +566,7 @@ export async function recoverRestart(
     if (request.dshHome.trim() === '') {
       const outcome = failed(
         'the restart recovery did not run: no $DSH_HOME is known, so the marker cannot be located',
-        'dshHome is empty',
+        DSH_HOME_EMPTY_DETAIL,
         ports,
       )
       await writeReceipt(outcome)
@@ -1012,6 +1013,9 @@ function describeError(error: unknown): string {
       : typeof record.name === 'string'
         ? record.name
         : 'unknown error'
+  // ⚠️ 与 restart-fs.ts 的 reasonOf 形状相似但**不同义**（审计 A7 判定）：
+  // 这边的 message 是多级兜底（message → name → 'unknown error'，入参还先挡了
+  // null/非对象），那边的 message 兜底是 messageOf 语义 —— 最后一行拼接相同只是巧合。
   return code === undefined ? message : `${code}: ${message}`
 }
 

@@ -552,3 +552,16 @@ export function guardKeyLines(key: unknown): string[] | undefined {
   if (!key || typeof key !== 'object') return [GUARD_FALLBACK_LINE]
   return undefined
 }
+
+/**
+ * L2 的 `authority:` 渲染行 —— `keyText` 里可选字段的**条件行**模板。
+ *
+ * `check_auth` 与 `sign_cookie` 的 keyText 各印一行「有才印」的 authority；
+ * 此前是同一模板两份逐字（2026-10-16 审计 B8）。「有才印」的纪律留在调用方
+ * —— 这里只收「印出来长什么样」。
+ *
+ * @param authority 本次的 authority（`undefined` 表示缺席，返回 `undefined` 不印）。
+ */
+export function authorityLine(authority: string | undefined): string | undefined {
+  return authority === undefined ? undefined : `authority: ${authority}`
+}
