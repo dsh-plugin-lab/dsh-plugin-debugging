@@ -27,6 +27,7 @@ import {
 } from '../../src/tools/describe.ts'
 import { ensureToolResult, TOOL_ERROR_KINDS, toolResultProblem } from '../../src/lib/errors.ts'
 import {
+  carrierOf,
   cmdResult,
   configFor,
   depsFor,
@@ -251,6 +252,82 @@ describe('dsh_dump_config', () => {
       }
       // B17：这个值必须在模型看得见的地方出现（L2 的 `resolved:` 行就是它出现的地方）。
       expect(splitRender(renderText(tool, {}, result)).l2.join('\n')).toContain(other)
+    })
+  })
+
+  describe('保留 profile（desktop）：在 spawn 之前拒，且不许换一个 profile 去答', () => {
+    /** 一次「本该成功」的 spawn —— 早拒的那条路一次都不该走到它。 */
+    function wouldSucceed() {
+      return recordingSpawn(() => cmdResult({ stdout: composedConfig() }))
+    }
+
+    it('profile 参数是保留名 ⇒ 结构化失败，且**一次子进程都没起**（下界）', async () => {
+      const dshHome = await tempDshHome()
+      const { spawn, calls } = wouldSucceed()
+      const tool = createDumpConfigTool(
+        depsFor(configFor(dshHome), { spawn, carrier: carrierOf('desktop-host') }),
+      )
+
+      const result = await run(tool, { profile: 'desktop' })
+      const failure = expectFail(result)
+      expectShape(result)
+      // **下界**：判据不是「它失败了」，而是「它一次 dump 都没跑」—— 少了这条，
+      // 「先起进程、再让那次必然失败的 dump 报错」也会让上面那句绿（本仓典型的假绿）。
+      expect(calls, '保留 profile 还去起了子进程 —— 那条路必然失败').toHaveLength(0)
+      expect(failure.kind).toBe('not-configured')
+      // L1 必须说清「任何平台上都 dump 不了」与「所以这棵树从这儿读不出来」。
+      expect(String(failure.data.verdict)).toContain('every platform')
+      expect(String(failure.data.verdict)).toContain('cannot be read from here')
+      // 人要做什么：去桌面应用自己的诊断里看，或**显式**指定一个非保留 profile。
+      expect(failure.nextStep).toEqual({
+        manual: true,
+        why: expect.stringContaining('non-reserved profile'),
+      })
+      // 生效 profile **不许被换掉** —— 换掉就是答了另一个问题。
+      const resolved = failure.data.key['resolved'] as Record<string, unknown>
+      expect(resolved['profile']).toBe('desktop')
+      // audit 带 `profile` 与载体观测（复核者要问的第二件事正是「宿主跑在什么载体上」）。
+      expect(failure.data.audit['profile']).toBe('desktop')
+      const carrierAudit = failure.data.audit['carrier'] as Record<string, unknown>
+      expect(carrierAudit['kind']).toBe('desktop-host')
+      // 一次都没跑 ⇒ 「没读到」是事实：渲染层必须印 unknown，不许印 none。
+      const parts = splitRender(renderText(tool, { profile: 'desktop' }, result))
+      expect(parts.l2).not.toContain('actionable: none')
+      expect(parts.l2.some((line) => line.startsWith('actionable: unknown'))).toBe(true)
+    })
+
+    it('配置里的 profile 是保留名时同样早拒（不只看工具参数）', async () => {
+      const dshHome = await tempDshHome()
+      const { spawn, calls } = wouldSucceed()
+      const tool = createDumpConfigTool(
+        depsFor(configFor(dshHome, { profile: 'desktop' }), { spawn, carrier: carrierOf('cli') }),
+      )
+
+      const failure = expectFail(await run(tool, {}))
+      expect(calls).toHaveLength(0)
+      expect((failure.data.key['resolved'] as Record<string, unknown>)['profile']).toBe('desktop')
+    })
+
+    it('大小写与空白归一（CLI 那一侧的判据不是逐字相等）', async () => {
+      const dshHome = await tempDshHome()
+      const { spawn, calls } = wouldSucceed()
+      const tool = createDumpConfigTool(depsFor(configFor(dshHome), { spawn }))
+
+      expectFail(await run(tool, { profile: ' Desktop ' }))
+      expect(calls).toHaveLength(0)
+    })
+
+    it('显式传别的 profile ⇒ 照旧工作（桌面载体也一样：早拒只看 profile 名）', async () => {
+      const dshHome = await tempDshHome()
+      const { spawn, calls } = dumpSpawn({ exitCode: 0, stdout: schemaOut([]) })
+      const tool = createDumpConfigTool(
+        depsFor(configFor(dshHome), { spawn, carrier: carrierOf('desktop-host') }),
+      )
+
+      const data = expectOk(await run(tool, { profile: 'web' }))
+      // 反面判据：早拒**没有**扩大成「桌面端一律不答」—— 两次 dump 都真的跑了。
+      expect(calls).toHaveLength(2)
+      expect((data.key['resolved'] as Record<string, unknown>)['profile']).toBe('web')
     })
   })
 

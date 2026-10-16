@@ -157,11 +157,18 @@ export function decideEffectMode(input: EffectInput): EffectDecision {
 }
 
 /**
- * SKILL §一 原表的答案。
+ * SKILL §一 原表的答案（**不看 hmr**）。
  *
- * @param input 判定输入。
+ * 为什么导出它（而不是让消费者自己复述那张表）：`dsh_check_effect_mode` 在 hmr
+ * **不可核实**的 profile 上必须按「这次的答案是否依赖 hmr」分岔，而那个判据就是
+ * 「原表答案是不是本来就是 `restart-required`」。表只有这一份 —— 抄第二份迟早漂，
+ * 漂出来的形状是「工具说要重启、判定层说不用」（或反过来）。
+ *
+ * ⚠️ 下面那个 `switch` 是 SKILL §一 的原文，**不是**给消费者改的。
+ *
+ * @param input 判定输入（`hmrUsable` 这一格不参与，它只喂 {@link downgrade}）。
  */
-function baselineMode(input: EffectInput): EffectMode {
+export function baselineMode(input: EffectInput): EffectMode {
   switch (input.change) {
     case 'config':
       return 'hot'

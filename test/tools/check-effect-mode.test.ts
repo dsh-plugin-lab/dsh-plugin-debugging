@@ -27,9 +27,15 @@ import {
   DESCRIPTION_MAX_LINES,
 } from '../../src/tools/describe.ts'
 import { ensureToolResult, TOOL_ERROR_KINDS, toolResultProblem } from '../../src/lib/errors.ts'
-import { decideEffectMode, type EffectChangeKind, type EffectInput } from '../../src/lib/effect.ts'
+import {
+  baselineMode,
+  decideEffectMode,
+  type EffectChangeKind,
+  type EffectInput,
+} from '../../src/lib/effect.ts'
 import { toolBudgetMs, TRANSPORT_MARGIN_MS } from '../../src/lib/timeouts.ts'
 import {
+  carrierOf,
   cmdResult,
   configFor,
   depsFor,
@@ -83,17 +89,27 @@ function expectSubstantiveVerdict(verdict: string): void {
   expect(verdict).toMatch(/\s[\w]/u)
 }
 
-/** 一个「文件层就能看到 hmr」的 profile fixture。 */
+/**
+ * 一个「文件层就能看到 hmr」的 profile fixture。
+ *
+ * ⚠️ **显式给载体**（`carrierOf('cli')`，平台默认 `win32`）：`restart-required` 那一支的
+ * `nextStep` 现在**按载体分岔**，而 `depsFor` 不注入时落的是 `UNKNOWN_CARRIER`（fail-closed，
+ * 回归路线也是 `none`）。本文件的既有断言说的是「**cli × win32** 上那句原话」，
+ * 所以必须把它显式钉出来（坑 25：平台 / 上下文相关判据要声明测哪条分支）。
+ */
 async function hmrProfileFixture(): Promise<{
   tool: ReturnType<typeof createEffectModeTool>
   dshHome: string
 }> {
   const dshHome = await tempDshHome()
   await writeProfile(dshHome, 'web', { bundles: [HMR_BUNDLE] })
-  return { tool: createEffectModeTool(depsFor(configFor(dshHome))), dshHome }
+  return {
+    tool: createEffectModeTool(depsFor(configFor(dshHome), { carrier: carrierOf('cli') })),
+    dshHome,
+  }
 }
 
-/** 一个「文件层看不到 hmr、dump 复核也不带 hmr」的 fixture（降级路径）。 */
+/** 一个「文件层看不到 hmr、dump 复核也不带 hmr」的 fixture（降级路径）。载体同 {@link hmrProfileFixture}。 */
 async function noHmrFixture(): Promise<{
   tool: ReturnType<typeof createEffectModeTool>
   calls: ReturnType<typeof recordingSpawn>['calls']
@@ -101,7 +117,10 @@ async function noHmrFixture(): Promise<{
   const dshHome = await tempDshHome()
   await writeProfile(dshHome, 'web', { bundles: [] })
   const { spawn, calls } = recordingSpawn(() => cmdResult({ stdout: CONFIG_WITHOUT_HMR }))
-  return { tool: createEffectModeTool(depsFor(configFor(dshHome), { spawn })), calls }
+  return {
+    tool: createEffectModeTool(depsFor(configFor(dshHome), { spawn, carrier: carrierOf('cli') })),
+    calls,
+  }
 }
 
 describe('dsh_check_effect_mode', () => {
@@ -391,6 +410,210 @@ describe('dsh_check_effect_mode', () => {
       expect(resolved['portSource']).toBe('not-used')
       // 而且它确实真读了这个目录 —— hmr 是从 profiles/tui 里探到的（不是 dump 出来的）。
       expect(data.key['mode']).toBe('hot')
+    })
+  })
+
+  /**
+   * 保留 profile（`desktop`）上 **hmr 不可核实** —— 分岔判据是「这次的答案是否依赖 hmr」。
+   *
+   * ## 这一块为什么长这样（2026-10-16 复议，原实现是错的）
+   *
+   * 原实现把「文件层没看到 hmr」直接压成 `present:false` ⇒ `absent` ⇒ `restart-required`，
+   * 于是桌面用户从「配置改动大概率热生效」被改判成「必须重启」，而桌面端**根本重启不了**
+   * （闸④拒绝）—— 比改前更坏，因为它把人指向一条走不通的路。
+   *
+   * 被推翻的前提：「桌面 profile 里没有 hmr」。真相是 `- id: hmr` 那一行由
+   * `@deepseek-ai/dsh-base` 的 `cordis.patch.yml` 插入，而桌面 profile 的第一个 bundle
+   * 就是 `dsh-base`（证据见 task-2b 的描述）。所以两件事必须分开：
+   * **「问不到」（unverified）** 与 **「确认没有」（absent）**。
+   */
+  describe('保留 profile（desktop）：hmr 不可核实，按「答案是否依赖 hmr」分岔', () => {
+    /** 一个保留 profile 的 fixture：文件里没有 hmr，而复核那次 dump **不该**被跑。 */
+    async function reservedProfileFixture(): Promise<{
+      tool: ReturnType<typeof createEffectModeTool>
+      calls: ReturnType<typeof recordingSpawn>['calls']
+    }> {
+      const dshHome = await tempDshHome()
+      await writeProfile(dshHome, 'desktop', { bundles: [] })
+      // 替身**故意会答出 hmr**：万一有人把早退删掉、真去跑了那次复核，`hmr` 就会变成
+      // `present`，下面关于 `unverified` / 失败的断言会当场红（判据两面都封住）。
+      const { spawn, calls } = recordingSpawn(() => cmdResult({ stdout: CONFIG_WITH_HMR }))
+      return {
+        tool: createEffectModeTool(
+          depsFor(configFor(dshHome, { profile: 'desktop' }), {
+            spawn,
+            carrier: carrierOf('desktop-host'),
+          }),
+        ),
+        calls,
+      }
+    }
+
+    /** 那句「组合树复核不可用」的事实（note 与 evidence 都必须说清它）。 */
+    const RECHECK_UNAVAILABLE =
+      'the composed-tree re-check is unavailable for a reserved profile name (the dsh command line refuses it on every platform)'
+
+    it('判据 1：`host-code`（原表本来就要求重启）⇒ 照常回答，答案不依赖 hmr', async () => {
+      const { tool, calls } = await reservedProfileFixture()
+
+      const result = await run(tool, { change: 'host-code' })
+      const data = expectOk(result)
+      // **下界**：`dsh --profile desktop --dump-config` 被 CLI 在任何载体上拒绝（真机实测）
+      // ⇒ 那次复核必然失败，一次子进程都不许起。
+      expect(calls, '保留 profile 上还去跑了那次必然失败的 dump').toHaveLength(0)
+      expect(data.key['stage']).toBe('answered')
+      expect(data.key['mode']).toBe('restart-required')
+      expect(data.key['baseline']).toBe('restart-required')
+      // **不是降级**：原表本来就要求重启，与 hmr 在不在无关 —— 这正是「答案不依赖 hmr」。
+      expect(data.key['downgraded']).toBe(false)
+      // 第四值：**不可核实**，不许并进 `absent`（本次复议的核心）。
+      expect(data.key['hmr']).toBe('unverified')
+      // `audit` 的 `hmrUsable` 是 `null`（拿不到证据），不许印成 `false`（= 确认没有）。
+      expect((data.audit['decision'] as Record<string, unknown>)['hmrUsable']).toBe(null)
+      const probe = data.audit['hmrProbe'] as Record<string, unknown>
+      expect(String(probe['note'])).toContain(RECHECK_UNAVAILABLE)
+      expect((probe['evidence'] as unknown[]).map(String)).toContain(RECHECK_UNAVAILABLE)
+      expect(data.audit['hmrSources']).toEqual(['profile-files'])
+      // L2 必须让模型看见「这次没核实过」——audit 它读不到。
+      const parts = splitRender(renderText(tool, { change: 'host-code' }, result))
+      expect(
+        parts.l2.some((line) => line.startsWith('hmr: unverified')),
+        `L2 没把「不可核实」印出来：${parts.l2.join(' | ')}`,
+      ).toBe(true)
+      // 桌面端：`dsh_restart` 在闸④上就会拒绝（插件没有重启 Electron 的通道）⇒
+      // 下一步是人，且必须点名「从托盘退出 App」。
+      expect(result.nextStep).toEqual({ manual: true, why: expect.stringContaining('tray') })
+      expect(result.nextStep?.why).toContain('quit the application')
+    })
+
+    it('判据 2：`config`（答案依赖 hmr）⇒ 诚实失败 `hmr-unverified`，两个断言都不下', async () => {
+      const { tool, calls } = await reservedProfileFixture()
+
+      const result = await run(tool, { change: 'config' })
+      const failure = expectFail(result)
+      expect(calls, '保留 profile 上还去跑了那次必然失败的 dump').toHaveLength(0)
+      expect(failure.data.key['stage']).toBe('hmr-unverified')
+      const verdict = String(failure.data.verdict)
+      // 要害：**同时**否认「热生效」与「必须重启」两个断言。
+      expect(verdict, 'verdict 没有同时否认两个断言').toContain(
+        'neither "live" nor "restart required" can be claimed',
+      )
+      expect(verdict).toContain('desktop')
+      // 文件层的证据也要留下（它是「为什么文件层判不了」的唯一线索）。
+      expect((failure.data.audit['hmrFileEvidence'] as unknown[]).map(String)).toContain(
+        RECHECK_UNAVAILABLE,
+      )
+      // ⚠️ `NextStep` 是**联合类型**，直接点 `.manual` 会让 `tsc -p tsconfig.test.json`
+      // 报 TS2339（`tsc --noEmit` 跑的是另一份配置，照不到这里）——按本仓既有写法就地收窄。
+      const step = failure.nextStep as { manual?: unknown; why?: string } | undefined
+      expect(step?.manual).toBe(true)
+      // ⚠️ **不许**指 `dsh_dump_config`：保留 profile 上它自己也会早拒
+      // （`dsh_dump_config.ts` 的 `reservedProfileFailure`），指过去只是一次空转。
+      expect(String(step?.why)).not.toContain('dsh_dump_config')
+      // 桌面载体没有已实测的回归路线 ⇒ why 用载体层那句 remedy（点名托盘）。
+      expect(String(step?.why)).toContain('tray')
+    })
+
+    it('判据 3：`bundle-added` 已在 dependencies ⇒ 照常回答；缺省 / false ⇒ 走不可核实那一支', async () => {
+      const already = await reservedProfileFixture()
+      const alreadyResult = await run(already.tool, {
+        change: 'bundle-added',
+        alreadyInDependencies: true,
+      })
+      const data = expectOk(alreadyResult)
+      expect(already.calls).toHaveLength(0)
+      expect(data.key['baseline']).toBe('restart-required')
+      expect(data.key['mode']).toBe('restart-required')
+      expect(data.key['downgraded']).toBe(false)
+      expect(data.key['hmr']).toBe('unverified')
+
+      // 反面：另外两种取值（缺省 / 显式 false）的原表答案是 `hot` —— 它**依赖** hmr。
+      for (const alreadyInDependencies of [undefined, false]) {
+        const fresh = await reservedProfileFixture()
+        const failure = expectFail(
+          await run(fresh.tool, {
+            change: 'bundle-added',
+            ...(alreadyInDependencies === undefined ? {} : { alreadyInDependencies }),
+          }),
+        )
+        expect(
+          failure.data.key['stage'],
+          `alreadyInDependencies=${String(alreadyInDependencies)} 不该拿到结论`,
+        ).toBe('hmr-unverified')
+        expect(fresh.calls).toHaveLength(0)
+      }
+    })
+
+    it('判据 4：cli × win32 的既有路径**仍然跑 dump**（次数 = 1）且结论不变（反空转）', async () => {
+      const { tool, calls } = await noHmrFixture()
+
+      const data = expectOk(await run(tool, { change: 'config' }))
+      // 早退**只**发生在保留 profile 上：非保留 profile 照旧补跑那次复核。
+      expect(calls).toHaveLength(1)
+      expect(calls[0]?.args).toContain('--dump-config')
+      expect(data.key['mode']).toBe('restart-required')
+      expect(data.key['baseline']).toBe('hot')
+      expect(data.key['downgraded']).toBe(true)
+      expect(data.key['hmr']).toBe('absent')
+      expect(data.audit['hmrSources']).toEqual(['profile-files', 'dump-config'])
+    })
+
+    it('分岔判据与判定层**同源**：`baselineMode` 就是那张表（导出时判据没被改）', () => {
+      // 工具只在 hmr 不可核实时才用 `baselineMode` 分岔 ⇒ 它的取值必须与 SKILL §一 逐格相同，
+      // 否则会出现「工具说不用重启、判定层说要重启」这种自相矛盾。
+      expect(baselineMode({ change: 'config', hmrUsable: false })).toBe('hot')
+      expect(baselineMode({ change: 'client-code', hmrUsable: false })).toBe('hmr')
+      expect(baselineMode({ change: 'host-code', hmrUsable: false })).toBe('restart-required')
+      expect(baselineMode({ change: 'bundle-added', hmrUsable: false })).toBe('hot')
+      expect(
+        baselineMode({ change: 'bundle-added', alreadyInDependencies: true, hmrUsable: false }),
+      ).toBe('restart-required')
+    })
+
+    it('保留 profile 但文件层看到 hmr ⇒ 不受影响（早退在文件层之后）', async () => {
+      const dshHome = await tempDshHome()
+      await writeProfile(dshHome, 'desktop', { bundles: [HMR_BUNDLE] })
+      const { spawn, calls } = recordingSpawn(() => cmdResult({ stdout: CONFIG_WITHOUT_HMR }))
+      const tool = createEffectModeTool(
+        depsFor(configFor(dshHome, { profile: 'desktop' }), {
+          spawn,
+          carrier: carrierOf('desktop-host'),
+        }),
+      )
+
+      const data = expectOk(await run(tool, { change: 'config' }))
+      expect(data.key['mode']).toBe('hot')
+      expect(data.key['hmr']).toBe('present')
+      expect(calls).toHaveLength(0)
+    })
+
+    it('cli × win32 上 path 仍逐字是原话（新分支不许把既有那句换掉）', async () => {
+      const { tool } = await noHmrFixture()
+
+      const result = await run(tool, { change: 'config' })
+      expect(result.nextStep).toEqual({
+        manual: true,
+        why: expect.stringContaining('restart the host process'),
+      })
+      expect(result.nextStep?.why).toContain('dsh_restart')
+      expect(result.nextStep?.why).toContain('irreversible')
+      // 反面：cli × win32 有已实测的路线（计划任务）⇒ 那句 remedy 一个字都不该出现。
+      expect(result.nextStep?.why).not.toContain('tray')
+    })
+
+    it('认不出载体（UNKNOWN）同样是 `none` —— 不把「不知道」印成「有路线」', async () => {
+      const dshHome = await tempDshHome()
+      await writeProfile(dshHome, 'web', { bundles: [] })
+      const { spawn } = recordingSpawn(() => cmdResult({ stdout: CONFIG_WITHOUT_HMR }))
+      // 不注入载体 ⇒ `depsFor` 落 `UNKNOWN_CARRIER`（fail-closed 那一端）。
+      const tool = createEffectModeTool(depsFor(configFor(dshHome), { spawn }))
+
+      const result = await run(tool, { change: 'config' })
+      expect(result.nextStep).toEqual({
+        manual: true,
+        why: expect.stringContaining('unidentifiable'),
+      })
+      expect(result.nextStep?.why).not.toContain('dsh_restart')
     })
   })
 
