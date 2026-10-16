@@ -5231,6 +5231,11 @@ const FORMAT_OWNED_BY_SHARED: ReadonlyArray<readonly [fragment: string, home: st
   ['the guard synthesized this result', 'shared.ts'],
   // 「没有已实测回归路线」的正典在 lib/carrier.ts 的 unverifiedRelaunchReason。
   ['no relaunch route has been verified on', 'carrier.ts'],
+  // 起不了 dsh 的 message 模板正典在 shared.ts 的 spawnFailureMessage。
+  // ⚠️ 取消语义（CANCELLED_MESSAGE / CANCELLED_WHY）**不进 FORMAT 闭集**：
+  // 各工具 verdict 句里内嵌同一短语是合法的（各自判定句，不是模板），
+  // 而常量的「重复定义」由 NAME 闭集下面两条抓。
+  ['cannot start dsh: ', 'shared.ts'],
 ] as const
 
 /**
@@ -5246,6 +5251,12 @@ const NAME_OWNED_BY_SHARED: ReadonlyArray<readonly [helper: string, home: string
   // 取异常 code 的唯一实现是 lib/errors.ts 的 systemErrorCode（带 cause 那一半）。
   ['systemErrorCodeOf', 'errors.ts'],
   ['effectiveConfig', 'shared.ts'],
+  // 取消语义的一对常量（message / nextStep.why）正典在 shared.ts。
+  ['CANCELLED_MESSAGE', 'shared.ts'],
+  ['CANCELLED_WHY', 'shared.ts'],
+  // spawn 失败的 kind 映射与 message 模板正典在 shared.ts。
+  ['spawnFailureOf', 'shared.ts'],
+  ['spawnFailureMessage', 'shared.ts'],
 ] as const
 
 describe('B30 跨工具共享语义只有一个实现', () => {

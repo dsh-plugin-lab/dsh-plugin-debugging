@@ -77,11 +77,15 @@ import { composeDescription, type ToolDescription } from './describe.js'
 import {
   asAudit,
   assertResolvedDshHome,
+  CANCELLED_MESSAGE,
+  CANCELLED_WHY,
   childEnvFor,
   effectiveConfig,
   guardFallbackLine,
   oneLine,
   resolvedLine as sharedResolvedLine,
+  spawnFailureMessage,
+  spawnFailureOf,
   spawnWithHome,
   toOutput,
   toolOutput,
@@ -449,12 +453,12 @@ function failureOf(invocation: DumpInvocation, resolved: ResolvedKey): FailureHe
     return {
       error: {
         kind: 'cancelled',
-        message: 'the caller cancelled this execution',
+        message: CANCELLED_MESSAGE,
       },
       verdict: `nothing could be judged: ${invocation.flag} was cancelled by the caller, so no dump was completed`,
       nextStep: {
         manual: true,
-        why: 'cancellation is up to the caller; retrying the same call is pointless',
+        why: CANCELLED_WHY,
       },
     }
   }
@@ -483,11 +487,11 @@ function failureOf(invocation: DumpInvocation, resolved: ResolvedKey): FailureHe
     }
   }
   if (invocation.spawnError !== undefined) {
-    const notFound = invocation.spawnError.includes('ENOENT')
+    const { kind, notFound } = spawnFailureOf(invocation.spawnError)
     const head: FailureHead = {
       error: {
-        kind: notFound ? 'not-configured' : 'internal',
-        message: `cannot start dsh: ${invocation.spawnError}`,
+        kind,
+        message: spawnFailureMessage(invocation.spawnError),
       },
       verdict: notFound
         ? 'nothing could be dumped: dsh could not be started at all, so this plugin has no way to see what the profile composes to'

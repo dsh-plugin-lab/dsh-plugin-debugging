@@ -58,6 +58,8 @@ import { composeDescription, type ToolDescription } from './describe.js'
 import {
   asAudit,
   assertResolvedDshHome,
+  CANCELLED_MESSAGE,
+  CANCELLED_WHY,
   effectiveConfig,
   guardFallbackLine,
   oneLine,
@@ -527,7 +529,7 @@ export function createDiagnosePluginLoadTool(deps: ToolDeps): ToolDefinition {
         if (exec.signal.aborted) {
           return toOutput(
             fail(
-              { kind: 'cancelled', message: 'the caller cancelled this execution' },
+              { kind: 'cancelled', message: CANCELLED_MESSAGE },
               {
                 verdict: 'the diagnosis is incomplete: the caller cancelled this execution',
                 key: { resolved: keyResolved, packages: [] },
@@ -535,7 +537,7 @@ export function createDiagnosePluginLoadTool(deps: ToolDeps): ToolDefinition {
               },
               {
                 manual: true,
-                why: 'cancellation is up to the caller; retrying the same call is pointless',
+                why: CANCELLED_WHY,
               },
             ),
           )

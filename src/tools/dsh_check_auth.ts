@@ -39,6 +39,7 @@ import { composeDescription, type ToolDescription } from './describe.js'
 import {
   asAudit,
   assertResolvedDshHome,
+  CANCELLED_WHY,
   effectiveConfig,
   guardFallbackLine,
   resolvePort,
@@ -310,7 +311,7 @@ async function probeAuthentication(
         { verdict, key, audit },
         {
           manual: true,
-          why: 'cancellation is up to the caller; retrying the same call is pointless',
+          why: CANCELLED_WHY,
         },
       ),
     )

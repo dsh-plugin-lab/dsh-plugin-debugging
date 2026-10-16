@@ -488,3 +488,31 @@ export function asAudit(value: unknown): JsonValue {
 export function oneLine(text: string): string {
   return text.replace(/\s+/gu, ' ').trim()
 }
+
+/**
+ * 起不了 `dsh` 子进程时的错误判定 —— **错误 kind 与 message 模板的唯一落点**。
+ *
+ * 判据：`ENOENT` ⇒ `not-configured`（dsh 不在 PATH，是环境问题，模型该指给用户）；
+ * 其它 ⇒ `internal`（本插件自己的问题，模型不该去改配置重试）。这条 kind 映射此前
+ * 在两个 spawn 型工具（`dump_config` / `check_effect_mode`）里各写一遍。
+ *
+ * @param spawnError `spawn` 抛出或返回的原始错误文本。
+ */
+export function spawnFailureOf(spawnError: string): {
+  kind: 'not-configured' | 'internal'
+  notFound: boolean
+} {
+  const notFound = spawnError.includes('ENOENT')
+  return { kind: notFound ? 'not-configured' : 'internal', notFound }
+}
+
+/** `cannot start dsh: …` 的 message 模板 —— 两个 spawn 型工具共用一句。 */
+export function spawnFailureMessage(spawnError: string): string {
+  return `cannot start dsh: ${spawnError}`
+}
+
+/** 取消语义的 `error.message`：重试同一个调用对 `cancelled` 不成立。 */
+export const CANCELLED_MESSAGE = 'the caller cancelled this execution'
+
+/** 取消语义的 `nextStep.why`：重试的判据按 `kind` 走，`cancelled` 不在其中。 */
+export const CANCELLED_WHY = 'cancellation is up to the caller; retrying the same call is pointless'

@@ -50,6 +50,8 @@ import type { RenderTable } from '../lib/render.js'
 import { composeDescription, type ToolDescription } from './describe.js'
 import {
   asAudit,
+  CANCELLED_MESSAGE,
+  CANCELLED_WHY,
   guardFallbackLine,
   oneLine,
   toOutput,
@@ -284,7 +286,7 @@ async function discover(
   if (signal.aborted) {
     return toOutput(
       fail(
-        { kind: 'cancelled', message: 'the caller cancelled this execution' },
+        { kind: 'cancelled', message: CANCELLED_MESSAGE },
         {
           verdict:
             'nothing was listed: the caller cancelled this execution, so no candidate was probed',
@@ -293,7 +295,7 @@ async function discover(
         },
         {
           manual: true,
-          why: 'cancellation is up to the caller; retrying the same call is pointless',
+          why: CANCELLED_WHY,
         } satisfies NextStep,
       ),
     )
@@ -347,7 +349,7 @@ async function discover(
   if (signal.aborted) {
     return toOutput(
       fail(
-        { kind: 'cancelled', message: 'the caller cancelled this execution' },
+        { kind: 'cancelled', message: CANCELLED_MESSAGE },
         {
           verdict: `nothing was concluded: the caller cancelled while ${String(instances.length)} of ${String(scan.candidates.length)} candidate(s) had been probed`,
           key: toKey(scan.status, scan.unidentified, scan.truncated, scan.detail, instances),
@@ -355,7 +357,7 @@ async function discover(
         },
         {
           manual: true,
-          why: 'cancellation is up to the caller; retrying the same call is pointless',
+          why: CANCELLED_WHY,
         } satisfies NextStep,
       ),
     )
