@@ -60,6 +60,7 @@ import {
 } from '../lib/carrier.js'
 import {
   fail,
+  messageOf,
   ok,
   type JsonValue,
   type NextStep,
@@ -732,7 +733,7 @@ function failureFor(
  * @param config 生效配置（能给出 profile 与目录来源）。
  */
 function unexpectedFailure(error: unknown, config: ResolvedConfig): ToolFail {
-  const message = error instanceof Error ? error.message : String(error)
+  const message = messageOf(error)
   return fail(
     { kind: 'internal', message: `dsh_check_effect_mode failed unexpectedly: ${message}` },
     {

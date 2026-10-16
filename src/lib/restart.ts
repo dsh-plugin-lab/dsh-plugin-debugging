@@ -47,6 +47,7 @@ import { join } from 'node:path'
 
 import type { CarrierObservation } from './carrier.js'
 import { relaunchRefusalFor, relaunchRouteFor } from './carrier.js'
+import { isString, messageOf } from './errors.js'
 
 /** marker 的格式版本（写出去的那一个）。**只许加字段，不许改语义** —— 改语义等于把版本门推倒。 */
 export const MARKER_VERSION = 1
@@ -1145,20 +1146,5 @@ function blockingSessions(decision: GatePass, callingSession: string): readonly 
   return (decision.blockedSessions ?? []).filter((id) => id !== '' && id !== self)
 }
 
-/**
- * 判断一个值是不是字符串（数组字段过滤用）。
- *
- * @param value 任意值。
- */
-function isString(value: unknown): value is string {
-  return typeof value === 'string'
-}
-
-/**
- * 取一句话错误描述（**绝不抛**）。
- *
- * @param error 任意异常。
- */
-function messageOf(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
-}
+// `isString` / `messageOf` 的唯一实现在 errors.ts（2026-10-16 审计 A1 / A3 收敛，
+// 本文件原有两份已删）。

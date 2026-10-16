@@ -7,6 +7,7 @@
 import { lstat, readFile, readdir, readlink, stat } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
+import { asRecord, isString, messageOf } from './errors.js'
 
 /** `<dshHome>/profiles/<profile>`。 */
 export function profileDir(dshHome: string, profile: string): string {
@@ -488,13 +489,6 @@ function codeOf(error: unknown): string | undefined {
 }
 
 /**
- * 把任意抛出的值变成一句话（**绝不抛**）。
- *
- * @param error 任意值。
- */
-function messageOf(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
-}
 
 /** 从 profile 的**文件**里探测 hmr 的结果。 */
 export interface HmrFileProbe {
@@ -584,21 +578,14 @@ function resolveEntry(record: Record<string, unknown>): string | undefined {
   return undefined
 }
 
-/**
- * 取一个值的「记录」视图。
- *
- * @param value 任意值。
- */
-export function asRecord(value: unknown): Record<string, unknown> | undefined {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
-  return value as Record<string, unknown>
-}
+// `asRecord` 的唯一实现在 errors.ts（2026-10-16 审计 A3 收敛，本文件原有一份已删）。
 
 /**
  * 取一个值的字符串字典视图（丢掉非字符串项）。
  *
  * @param value 任意值。
  */
+// `isString` 的唯一实现同样在 errors.ts（审计 A3）。
 function asStringRecord(value: unknown): Record<string, string> {
   const record = asRecord(value)
   if (record === undefined) return {}
@@ -607,13 +594,4 @@ function asStringRecord(value: unknown): Record<string, string> {
     if (isString(item)) result[key] = item
   }
   return result
-}
-
-/**
- * 是不是字符串。
- *
- * @param value 任意值。
- */
-function isString(value: unknown): value is string {
-  return typeof value === 'string'
 }

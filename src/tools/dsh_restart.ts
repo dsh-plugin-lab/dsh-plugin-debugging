@@ -59,7 +59,14 @@
  */
 import { defineTool, type ToolDefinition, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 
-import { fail, ok, type NextStep, type ToolFail, type ToolResult } from '../lib/errors.js'
+import {
+  fail,
+  messageOf,
+  ok,
+  type NextStep,
+  type ToolFail,
+  type ToolResult,
+} from '../lib/errors.js'
 import { budgetFor, createDeadline, toolBudgetMs, type Workload } from '../lib/timeouts.js'
 import {
   carrierAuditOf,
@@ -1824,14 +1831,7 @@ function stringOf(value: unknown): string {
   return typeof value === 'string' ? value : ''
 }
 
-/**
- * 取一句话错误描述（**绝不抛**）。
- *
- * @param error 任意异常。
- */
-function messageOf(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
-}
+// `messageOf` 的唯一实现在 lib/errors.ts（2026-10-16 审计 A1 收敛，本文件原有一份已删）。
 
 // ── L2 ─────────────────────────────────────────────────────────────────────
 

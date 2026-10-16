@@ -5264,6 +5264,13 @@ const NAME_OWNED_BY_SHARED: ReadonlyArray<readonly [helper: string, home: string
   // 守卫兜底 keyText 的判定与跨实例重试参数的判定，正典都在 shared.ts。
   ['guardKeyLines', 'shared.ts'],
   ['homeRetryArg', 'shared.ts'],
+  // A1 / A3 / A4 收敛：异常取词与类型守卫的正典在 lib/errors.ts。
+  ['messageOf', 'errors.ts'],
+  ['asRecord', 'errors.ts'],
+  ['asFunction', 'errors.ts'],
+  ['asString', 'errors.ts'],
+  ['isString', 'errors.ts'],
+  ['isAborted', 'errors.ts'],
 ] as const
 
 describe('B30 跨工具共享语义只有一个实现', () => {

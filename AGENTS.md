@@ -144,7 +144,7 @@ git diff --check
   GitHub 会把 `.github/README.md` 渲染到**仓库首页**，那份版面属于访客，不属于 CI 内部约定。
   工作流改动的约束见 [.github/AGENTS.md](.github/AGENTS.md) 与 [workflows/AGENTS.md](.github/workflows/AGENTS.md)。
 - 发布态检查脚本 → [scripts/](scripts/README.md)
-- 目录级规则与手册的分工见根 [AGENTS.md](AGENTS.md) 的「上下文注入」那一节；门面与子目录双件**不是**同一套设计，理由同样在里面。
+- 目录级规则与手册的分工见本文件「[文档地图](#文档地图)」开篇的「两层职责互斥」那两条；门面与子目录双件**不是**同一套设计，理由同样在那里。
 
 ## 待办
 
@@ -171,7 +171,8 @@ git diff --check
 ## 活跃坑
 
 **每条都是踩过的，按「错了会不会静默坏」排序。这里只留规则；证据（实测、复现、被否掉的方案）在
-[.agents/notes/2026-10-15-pitfall-evidence.md](.agents/notes/2026-10-15-pitfall-evidence.md)，编号一一对应。**
+[.agents/notes/2026-10-15-pitfall-evidence.md](.agents/notes/2026-10-15-pitfall-evidence.md)，编号 1–40 一一对应
+（坑 41 的证据在 [.agents/notes/2026-10-16-desktop-carrier-decision.md](.agents/notes/2026-10-16-desktop-carrier-decision.md)）。**
 ⚠️ = 静默坏 —— 错了不报错，最费人。
 
 1. `engines.dsh` **没有任何读取者**；兼容性门是 `peerDependencies`（带 `includePrerelease`）。⚠️ 冲突被 `catch` 进 `skippedBundles`，插件像没装。**改依赖范围时 peer 与 dev 同批改。**

@@ -553,3 +553,66 @@ export function systemErrorCode(error: unknown): string | undefined {
   }
   return undefined
 }
+
+/**
+ * 取异常的 `message`（非 Error 就转字符串）。`messageOf` 的唯一实现。
+ *
+ * 此前 `restart.ts` 一份函数 + `list_instances` / `check_effect_mode` 各一处内联同式 ——
+ * 改一处必漏另一处（2026-10-16 审计 A1）。
+ *
+ * @param error 任意异常。
+ */
+export function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+/**
+ * 取一个值的「记录」视图（非普通对象返回 `undefined`）。`asRecord` 的唯一实现。
+ *
+ * 此前 `profile.ts`（导出）+ `hot-reload.ts` / `loader.ts`（各一份逐字私有）三处
+ * —— 2026-10-16 审计 A3 收敛于此，三个文件都改从这里 import。
+ *
+ * @param value 任意值。
+ */
+export function asRecord(value: unknown): Record<string, unknown> | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  return value as Record<string, unknown>
+}
+
+/**
+ * 取一个值的函数视图（非函数返回 `undefined`）。`asFunction` 的唯一实现。
+ *
+ * @param value 任意值。
+ */
+export function asFunction(value: unknown): ((...args: unknown[]) => unknown) | undefined {
+  return typeof value === 'function' ? (value as (...args: unknown[]) => unknown) : undefined
+}
+
+/**
+ * 取一个值的字符串视图（非字符串返回 `undefined`）。`asString` 的唯一实现。
+ *
+ * @param value 任意值。
+ */
+export function asString(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined
+}
+
+/**
+ * 是不是字符串（类型守卫）。`isString` 的唯一实现。
+ *
+ * @param value 任意值。
+ */
+export function isString(value: unknown): value is string {
+  return typeof value === 'string'
+}
+
+/**
+ * 调用方信号是不是已取消（`undefined` 视为未取消）。`isAborted` 的唯一实现。
+ *
+ * 此前 `http.ts` 与 `hot-reload.ts` 各一份逐字私有 —— 2026-10-16 审计 A4 收敛于此。
+ *
+ * @param signal 调用方信号。
+ */
+export function isAborted(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true
+}
