@@ -29,7 +29,14 @@
  */
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools'
 
-import { fail, ok, toToolError, type JsonValue, type NextStep } from '../lib/errors.js'
+import {
+  fail,
+  ok,
+  systemErrorCode,
+  toToolError,
+  type JsonValue,
+  type NextStep,
+} from '../lib/errors.js'
 import {
   budgetFor,
   createDeadline,
@@ -519,18 +526,16 @@ async function probeSignature(
 
 /** 把抛出的异常压成一句（模型可见，所以英文）。 */
 function describeThrown(error: unknown): string {
-  const code = systemErrorCodeOf(error)
+  const code = systemErrorCode(error)
   if (code !== undefined) return code
   const message = error instanceof Error ? error.message : String(error)
   return message.includes('transport-timeout') ? 'transport timed out' : message
 }
 
-/** 从异常里取 `code`（`ECONNREFUSED` 这类）；取不到返回 `undefined`。 */
-function systemErrorCodeOf(error: unknown): string | undefined {
-  if (typeof error !== 'object' || error === null) return undefined
-  const code = (error as { code?: unknown }).code
-  return typeof code === 'string' ? code : undefined
-}
+// 取异常的 `code` 直接用 `lib/errors.ts` 的正典 `systemErrorCode`：它的 `cause`
+// 那一半是必需的 —— 本工具的探测走全局 `fetch`/undici，`ECONNREFUSED` 包在
+// `TypeError` 的 `cause` 上，只读顶层会把它当成普通错误（此前是弱化副本 ⇒
+// 同仓两种行为，2026-10-16 审计 A6）。调用点原用本地名 `systemErrorCodeOf`。
 
 /** 把扫描与结论投影进 `key`。 */
 function toKey(

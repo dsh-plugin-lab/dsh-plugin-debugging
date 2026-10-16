@@ -5220,28 +5220,41 @@ describe('B25 守卫合成的兜底必须可渲染', () => {
  *
  * ⚠️ 闭集写死在这里，加共享助手时同批加。
  */
-const FORMAT_OWNED_BY_SHARED = [
-  'resolved: profile=',
-  'resolved: dshHome=',
-  'the guard synthesized this result',
+/**
+ * 「格式模板 → 它的唯一落点」。**落点不一定是 `shared.ts`** —— 每个「格式」声明自己的家，
+ * 家以外出现同一句话即违规（2026-10-16 实测：relaunch 措辞的正典在 `lib/carrier.ts`，
+ * 一刀切「只许在 shared.ts」会把正典自己也判红）。
+ */
+const FORMAT_OWNED_BY_SHARED: ReadonlyArray<readonly [fragment: string, home: string]> = [
+  ['resolved: profile=', 'shared.ts'],
+  ['resolved: dshHome=', 'shared.ts'],
+  ['the guard synthesized this result', 'shared.ts'],
+  // 「没有已实测回归路线」的正典在 lib/carrier.ts 的 unverifiedRelaunchReason。
+  ['no relaunch route has been verified on', 'carrier.ts'],
 ] as const
 
-const NAME_OWNED_BY_SHARED = [
-  'asAudit',
-  'oneLine',
-  'withCallHome',
-  'withHomeOverride',
-  'spawnWithHome',
-  'childEnvFor',
-  'effectiveConfig',
+/**
+ * 「助手名 → 它的唯一落点」。定义形态认 `function x(` 与 `const x =`。
+ */
+const NAME_OWNED_BY_SHARED: ReadonlyArray<readonly [helper: string, home: string]> = [
+  ['asAudit', 'shared.ts'],
+  ['oneLine', 'shared.ts'],
+  ['withCallHome', 'shared.ts'],
+  ['withHomeOverride', 'shared.ts'],
+  ['spawnWithHome', 'shared.ts'],
+  ['childEnvFor', 'shared.ts'],
+  // 取异常 code 的唯一实现是 lib/errors.ts 的 systemErrorCode（带 cause 那一半）。
+  ['systemErrorCodeOf', 'errors.ts'],
+  ['effectiveConfig', 'shared.ts'],
 ] as const
 
-describe('B30 跨工具共享语义只在 shared.ts 实现', () => {
+describe('B30 跨工具共享语义只有一个实现', () => {
   it('`src` 下没有第二份格式模板，也没有第二份助手定义', () => {
     // ⚠️ **扫描面是整个 `src`**，不是 `src/tools`（2026-10-16 审计实测的盲区）：
     // 曾只扫 `src/tools` 下文件名含 `dsh_` 的文件 ⇒ `src/lib` 整层与
     // `src/tools/{index,describe}.ts` **全在门外**，而重复最多的恰是 `src/lib`。
     // `src/client` 除外：它是另一半边（B14 同此分法）。
+    // shared.ts 本身是多数助手的唯一落点，同样从扫描面排除。
     const sources = readSourcesUnder('src').filter(
       (source) => !source.path.endsWith('/shared.ts') && !source.path.startsWith('src/client/'),
     )
@@ -5251,10 +5264,14 @@ describe('B30 跨工具共享语义只在 shared.ts 实现', () => {
     const offenders: string[] = []
     for (const source of sources) {
       const text = stripComments(source.text)
-      for (const fragment of FORMAT_OWNED_BY_SHARED) {
+      for (const [fragment, home] of FORMAT_OWNED_BY_SHARED) {
+        // 唯一落点不一定是 shared.ts（如 relaunch 措辞住在 lib/carrier.ts）：
+        // 每个「格式」声明自己的家，家以外出现即违规。
+        if (source.path.endsWith(home)) continue
         if (text.includes(fragment)) offenders.push(`${source.path} 又自己拼了一份「${fragment}」`)
       }
-      for (const helper of NAME_OWNED_BY_SHARED) {
+      for (const [helper, home] of NAME_OWNED_BY_SHARED) {
+        if (source.path.endsWith(home)) continue
         if (
           new RegExp(`\\bfunction\\s+${helper}\\s*\\(`, 'u').test(text) ||
           new RegExp(`\\bconst\\s+${helper}\\s*=`, 'u').test(text)

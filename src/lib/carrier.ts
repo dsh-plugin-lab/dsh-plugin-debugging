@@ -235,7 +235,7 @@ export function relaunchRefusalFor(observation: CarrierObservation): RelaunchRef
       }
     case 'cli':
       return {
-        reason: `no relaunch route has been verified on ${observation.platform}; only the Windows task scheduler was measured`,
+        reason: unverifiedRelaunchReason(observation.platform),
         remedy:
           'start the host again yourself, or run this where the relaunch route has been measured (Windows)',
       }
@@ -247,6 +247,19 @@ export function relaunchRefusalFor(observation: CarrierObservation): RelaunchRef
           'start the host again yourself; this tool does not guess how to bring an unidentifiable host back',
       }
   }
+}
+
+/**
+ * 非 Windows 平台上「没有已实测回归路线」的措辞 —— **唯一落点**。
+ *
+ * 这句话此前有三处：本函数、`dsh_restart.ts` 的 `launchCommandFrom`（逐字第二份）与
+ * `relaunchViaTaskScheduler`（截断第三份）。而 `restart.ts` 的注释声称「三档措辞
+ * 只写在这里一处」—— 那是一句假话。现在两个调用方都改调这里，注释重新为真。
+ *
+ * @param platform 当前平台（进程实测值）。
+ */
+export function unverifiedRelaunchReason(platform: string): string {
+  return `no relaunch route has been verified on ${platform}; only the Windows task scheduler was measured`
 }
 
 /**

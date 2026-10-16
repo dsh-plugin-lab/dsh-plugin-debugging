@@ -64,6 +64,7 @@ import { budgetFor, createDeadline, toolBudgetMs, type Workload } from '../lib/t
 import {
   carrierAuditOf,
   relaunchRefusalFor,
+  unverifiedRelaunchReason,
   type CarrierKind,
   type CarrierObservation,
 } from '../lib/carrier.js'
@@ -1527,7 +1528,7 @@ export function launchCommandFrom(
   if (process.platform !== 'win32') {
     return {
       known: false,
-      reason: `no relaunch route has been verified on ${process.platform}; only the Windows task scheduler was measured`,
+      reason: unverifiedRelaunchReason(process.platform),
     }
   }
   const launch = resolveDshLaunch()
@@ -1559,7 +1560,7 @@ export async function relaunchViaTaskScheduler(
   request: RelaunchRequest,
 ): Promise<RelaunchResult> {
   if (process.platform !== 'win32') {
-    return { ok: false, reason: `no relaunch route has been verified on ${process.platform}` }
+    return { ok: false, reason: unverifiedRelaunchReason(process.platform) }
   }
   if (request.budgetMs <= 0) {
     return { ok: false, reason: 'the tool budget was exhausted before the relaunch' }
