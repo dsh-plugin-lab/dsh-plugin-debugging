@@ -7,7 +7,7 @@
 tools/ 特有约束：
 
 - 每个工具一个文件，命名 `dsh_*.ts`；注册处是本目录的聚合入口，工具清单以它为准。
-- **同一种语义只许有一个实现**：装配、投影、渲染三类助手一律住在 `shared.ts`，工具文件里**不许出现第二份**。三类落点见 [README.md](README.md) 的「共享助手住在哪」。理由：同一件事在多个工具里印出两种说法时，**没有任何判据照得出来**（红线 B25 只断言「兜底可渲染」，不断言措辞与字段顺序）。
+- **同一种语义只许有一个实现**：共享助手一律住在 `shared.ts`，工具文件里**不许出现第二份**。落点索引见 [README.md](README.md) 的「共享助手住在哪」。**这条由机器判据守着**（[../../test/redlines.test.ts](../../test/redlines.test.ts) 的 B30：格式模板与助手定义都只许在 `shared.ts`，扫描面是整个 `src`）。
 - 输出 schema 用作者层字面量（`{ type: 'json' } as const`），结构强制挪到返回前的 `ensureToolResult()`。喂已标注的 schema 对象会把编译前后两层混了，报错方向还是反的（坑 11）。
 - 工具**只声明工作量档**（`const WORKLOAD: Workload = 'quick' | 'schemaDump'`），预算一律经 `lib/timeouts.ts` 的 `toolBudgetMs(WORKLOAD, deps.config)` 取。**工具里不许出现毫秒字面量，也不许直接读配置的预算字段** —— 判据是 `test/tools/timeout-budgets.test.ts`（它扫描本目录的源码，不靠跑一遍）。
 - `timeoutMs`（`defineTool` 声明）必须为正有限值，非正会被直接拒（坑 15）—— 所以走 `toolBudgetMs` 而不是自己算。

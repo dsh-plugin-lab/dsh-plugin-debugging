@@ -13,7 +13,10 @@
 
 ### 一、`resolvedLine` 在 6 个工具里各写一份，正常路径无判据覆盖
 
-| 文件:行 | 形状 | 兜底 |
+⚠️ 下表「文件:行」是**改动前**的快照；改动已把六份收进 `shared.ts` 的 `resolvedLine`（检索串
+`resolvedLine(` / `resolved: profile=`）。保留行号只为记录当时形状，**不要按它现查**。
+
+| 文件:行（改动前） | 形状 | 兜底 |
 |---|---|---|
 | `dsh_check_effect_mode.ts:930` | `profile=… dshHome=… (src)[ dir=…]` | 逐字段 `'unknown'` |
 | `dsh_check_auth.ts:466` | `profile=… dshHome=… (src)[ port]` | `GUARD_FALLBACK_LINE` |
@@ -48,14 +51,14 @@
 
 它只有 9 行（职责 / 契约 / 入口 / 变更路由）。
 本轮反复「找不到」的四处知识，全部只存在于源码注释里：
-`withCallHome` 是唯一装配点、`effectiveConfig` 是唯一投影点、`scope: 'cross-instance'` 是既有记号、`check_auth:450` 的同形要求。
+`withCallHome` 是唯一装配点、`effectiveConfig` 是唯一投影点、`scope: 'cross-instance'` 是既有记号、`check_auth` 里那句「模型在两个工具之间读的是同一张脸」的同形要求。
 
 ## 支撑的决策
 
-暂无（本文只记事实）。
+同批已落地（检索串 `refactor(tools)`）：六处渲染收进 `src/tools/shared.ts`，新红线 **B30** 守住同形 —— 下游决策见那批提交。
 
 ## 影响
 
-- 本仓有一条真实缺陷待修（`restart` 无兜底），属**行为变化** ⇒ 走 PR。
-- 「同形」要不要落成判据（新红线）与要不要收成一处渲染，待维护者拍板。
-- 若收成一处，`resolved:` 那一行的逐字形状会变 ⇒ 与 `GUARD_FALLBACK_LINE` 的逐字断言（`check-auth.test.ts:608` / `dump-config.test.ts:803` / `diagnose-plugin-load.test.ts:1006`）同批核。
+- 本文 §一 ~ §五 所述缺陷**已修**（改动把六份收成一处、修掉 `restart` 的字段顺序反置）；
+  §五 的「README 缺索引」也已补（「共享助手住在哪」一节）—— 本篇保留为**当时为什么**的依据。
+- 逐字断言的连带：`GUARD_FALLBACK_LINE` 的断言在 `check-auth` / `dump-config` / `diagnose-plugin-load` 各自的测试里，改动后仍逐字成立（检索串 `the guard synthesized this result`）。
