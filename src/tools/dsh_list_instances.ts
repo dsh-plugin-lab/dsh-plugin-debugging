@@ -41,7 +41,14 @@ import {
 import { listListeners, type ListenerCandidate } from '../lib/ports.js'
 import type { RenderTable } from '../lib/render.js'
 import { composeDescription, type ToolDescription } from './describe.js'
-import { toOutput, toolOutput, type ToolDeps } from './shared.js'
+import {
+  asAudit,
+  guardFallbackLine,
+  oneLine,
+  toOutput,
+  toolOutput,
+  type ToolDeps,
+} from './shared.js'
 
 /** 工具名。加工具时同步改：注册处 / B9 闭集 / 两份 README 的工具清单。 */
 export const LIST_INSTANCES_TOOL = 'dsh_list_instances'
@@ -651,7 +658,7 @@ function keyText(key: ListInstancesKey): string[] {
   if (!key || typeof key !== 'object') return [GUARD_FALLBACK_LINE]
   const lines: string[] = [scanLine(key.scan)]
   if (!Array.isArray(key.instances)) {
-    lines.push('instances: unknown (the guard synthesized this result)')
+    lines.push(guardFallbackLine('instances'))
     return lines
   }
   for (const item of key.instances) lines.push(instanceLine(item))
@@ -669,7 +676,7 @@ function keyText(key: ListInstancesKey): string[] {
  */
 function scanLine(scan: ListInstancesKey['scan'] | undefined): string {
   if (!scan || typeof scan !== 'object') {
-    return 'scan: unknown (the guard synthesized this result)'
+    return guardFallbackLine('scan')
   }
   const extra = scan.truncated === true ? ' truncated=yes' : ''
   return `scan: ${scan.status} unidentified=${String(scan.unidentified)}${extra}`
@@ -692,15 +699,5 @@ function instanceLine(item: InstanceKey): string {
   return `instance: ${item.authority} ${item.verdict}${pid}${name}${status}${detail}`
 }
 
-/** 把可能含换行的 `detail` 压成一行（L2 是一行一条，换行会把一条拆成两条）。 */
-function oneLine(text: string): string {
-  return text.replace(/\s+/gu, ' ').trim()
-}
-
 /** 兜底行：`ensureToolResult` 合成的结果里 `key` 是 `{}`。 */
-const GUARD_FALLBACK_LINE = 'scan: unknown (the guard synthesized this result)'
-
-/** 把一个只读记录转成 `audit` 的契约类型 `JsonValue`（同 `shared.ts` 的 `toOutput` 理由）。 */
-function asAudit(value: unknown): JsonValue {
-  return value as JsonValue
-}
+const GUARD_FALLBACK_LINE = guardFallbackLine('scan')

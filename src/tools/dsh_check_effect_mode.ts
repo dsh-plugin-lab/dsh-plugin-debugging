@@ -82,8 +82,10 @@ import { resolveDshLaunch, runDump } from '../lib/dump.js'
 import type { RenderTable } from '../lib/render.js'
 import { composeDescription, type ToolDescription } from './describe.js'
 import {
+  asAudit,
   assertResolvedDshHome,
   effectiveConfig,
+  resolvedLine as sharedResolvedLine,
   toOutput,
   toolOutput,
   withCallHome,
@@ -922,24 +924,6 @@ function hmrLine(hmr: HmrAvailability): string {
  * @param dir profile 目录（失败路径上才有）。
  */
 function resolvedLine(resolved: EffectiveConfigBlock | undefined, dir: string | undefined): string {
-  // 同上：字段缺失也要印得出来（兜底合成的失败里 `key` 就是 `{}`）。
-  const profile = typeof resolved?.profile === 'string' ? resolved.profile : 'unknown'
-  const dshHome = typeof resolved?.dshHome === 'string' ? resolved.dshHome : 'unknown'
-  const source = resolved?.dshHomeSource ?? 'unknown'
-  const at = typeof dir === 'string' && dir !== '' ? ` dir=${dir}` : ''
-  return `resolved: profile=${profile} dshHome=${dshHome} (${String(source)})${at}`
-}
-
-/**
- * 把一个只读记录转成 `audit` 的契约类型 `JsonValue`。
- *
- * 为什么要这个函数：`JsonValue` 是**带索引签名**的递归联合，而本仓的记录是 `interface`
- * —— interface **不带隐式索引签名**，结构上合法的对象也通不过赋值检查（同一条 TS 规则，
- * 见 `shared.ts` 的 `toOutput`）。与其为一个 TS 规则把冻结的契约层改成类型别名，
- * 不如在**唯一一处**边界上显式转型；`audit` 必须是无损 JSON 这条要求由契约本身承担。
- *
- * @param value 任一可无损落 JSON 的只读记录。
- */
-function asAudit(value: unknown): JsonValue {
-  return value as JsonValue
+  // 格式、字段顺序与兜底由 `shared.ts` 的唯一渲染点定；本工具不涉及端口、读 profile 目录。
+  return sharedResolvedLine(resolved, 'omit', dir)
 }
