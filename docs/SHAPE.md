@@ -744,7 +744,7 @@ interface ToolResult { content: ContentBlock[]; isError: boolean; meta?: JsonVal
 | **输出三层** | L1 判定 / L2 事实 / L3 指路（`nextStep` 两分支） | §3.1 + `src/lib/render.ts` |
 | **描述四段骨架** | 做什么 / 什么时候用我 / 边界 / 代价，段序不许换 | §2.1 + B20a / B20b |
 | **工具清单** | 四类角色的划分见 §1；**具体有哪几个、叫什么，真源是注册处**（本文不抄清单、也不抄个数）；**名字闭集由 B9 钉住** | `src/tools/index.ts` 注册处 |
-| **技能半边** | `SKILL.md` 已**冻结**（维护者 2026-10-15 拍板，冻在 0.4.0 那一版，不再跟着插件演化）；已补「干预」一节（写侧 `hot_reload` + 派生 `sign_cookie` + 行动 `restart`） | 冻结声明见根 [AGENTS.md](../AGENTS.md) 的待办与 [docs/ARCHITECTURE.md](ARCHITECTURE.md) 开篇；连带同步点见 §9.3 |
+| **技能半边** | `SKILL.md` 是运行时载荷；冻结状态与「干预」一节的覆盖见 §9.3 | 冻结真源 = 根 [AGENTS.md](../AGENTS.md) 待办（本文不复述） |
 | **超时预算** | 工具**只声明工作量档**（`quick` / `schemaDump`），预算收在 `src/lib/timeouts.ts` 的**唯一映射点**；工具里不许有毫秒字面量 | `test/tools/timeout-budgets.test.ts`（**扫源码**） |
 | **只读纪律** | 是**机器判据**：B10（杀进程 / fs 写入 / **写宿主数据路径** / 安装面，作用域**整个 `src/**`**）+ B15（写侧窄作用域、更严记号） | §10.3 与 `test/redlines.test.ts` |
 | **大 `audit` 的去处** | `spillStore` 可达性**已实测**（§5.1）；但它**不跨重启**（每进程临时目录 + 启动清扫）⇒ 只适合「这次会话里的大 `audit`」 | §5 / §5.1 |
@@ -763,8 +763,9 @@ interface ToolResult { content: ContentBlock[]; isError: boolean; meta?: JsonVal
 
 ### 9.3 连带同步点（改上面任何一项都要同批看）
 
-- **`SKILL.md`**：它是**运行时载荷**，不是文档；它**已冻结**（维护者 2026-10-15 拍板，冻在 0.4.0 那一版，**不再**跟着插件一起演化）。⚠️ 下面两条是**解冻期遗留的连带机制**——它们**仍然生效**，但现在退化成「正文不动时的例行核对」，不再是「每次改代码都要改正文」。（冻结声明与取代关系见 [ARCHITECTURE.md](ARCHITECTURE.md) 开篇与根 [AGENTS.md](../AGENTS.md) 的待办。）⚠️ **冻结不等于正文永远正确**：B12 只查 frontmatter 与正文长度、B9 只钉工具名闭集，两条都**抓不到正文里不带工具名的假话**（例：一句「本插件不提供 X」）—— 正文真要动时，那只能靠人工通读。
-- **`AGENTS.md` 的待办**：`SKILL.md` 的状态**已冻结**（2026-10-13 拍板解冻、**2026-10-15 拍板收回**，以冻结为准）；配套的 **B12 断言对象**已从「与原件逐字一致」改成**结构约束**（见 §10 的 B12 修订注），这条与冻结与否无关。
+- **`SKILL.md`**：它是**运行时载荷**，不是文档；状态**已冻结**（2026-10-13 拍板解冻、**2026-10-15 拍板收回**）。
+  冻结的理由、取代关系与连带机制都以根 [AGENTS.md](../AGENTS.md) 待办那一条为真源，本文不复述。
+  ⚠️ **冻结不等于正文永远正确**：B12 只查 frontmatter 与正文长度、B9 只钉工具名闭集，两条都**抓不到正文里不带工具名的假话**（例：一句「本插件不提供 X」）—— 正文真要动时，那只能靠人工通读。
 - **两份门面**（[README.md](../README.md) / [README_zh.md](../README_zh.md)）：配置表、工具清单、只读纪律的措辞**成对改**。
 - **载体这一维（闸④ / 拒绝码）**：拒绝码闭集在 §6.1 那张表与 `src/lib/restart.ts` 的 `RefusalCode`；**模型可见的措辞**在 `src/tools/dsh_restart.ts` 的 `RESTART_DESCRIPTION` 与 `src/lib/carrier.ts` 的 `relaunchRefusalFor`；宿主事实在 [HOST-CONTRACTS.md](HOST-CONTRACTS.md) §2.7；两份门面的 `dsh_restart` 那一节与平台支持那一节也引用了它。**改任一处都要同批看其余几处。**
 - **描述预算（§2）**：**加一个工具 = 系统提示多占一段** —— 那个字符数是**实测值、会漂**，别抄；加工具时同批复核 §2 的结论是否还成立。
