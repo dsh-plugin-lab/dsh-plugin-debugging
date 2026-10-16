@@ -12,7 +12,7 @@
  * **带 cookie 的浏览器页面**（人去看一眼是不是也 401）。
  * ⇒ 这一层与它的调用方**都不许**由 401 推出任何关于凭据 / authority 的结论。
  */
-import { systemErrorCode } from './errors.js'
+import { isAborted, systemErrorCode } from './errors.js'
 
 /** 探测结论。 */
 export type HttpProbeKind =
@@ -129,9 +129,7 @@ export async function probeHttp(
  *
  * @param signal 调用方信号。
  */
-function isAborted(signal: AbortSignal | undefined): boolean {
-  return signal?.aborted === true
-}
+// `isAborted` 的唯一实现在 errors.ts（2026-10-16 审计 A4 收敛，本文件原有一份已删）。
 
 /**
  * 把状态码映射成结论。

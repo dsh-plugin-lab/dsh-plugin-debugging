@@ -45,7 +45,7 @@
  * 所以本文件里每条失败都必须写一句实质 `verdict` —— 模型看不到 `error.message`
  * （渲染不打印它），失败的「所以呢」只能由 `verdict` 承载。
  */
-import { fail, ok, toToolError, type JsonValue, type NextStep, type ToolResult } from './errors.js'
+import { fail, messageOf, ok, asRecord, asFunction, asString, isAborted, toToolError, type JsonValue, type NextStep, type ToolResult } from './errors.js'
 import { loaderFrom } from './loader.js'
 
 /** 定位 entry 的三种方式（§2.3；三者择一）。 */
@@ -908,18 +908,10 @@ function dryRunVerdict(entry: ReloadEntryPort, count: number): string {
  *
  * @param signal 调用方信号。
  */
-function isAborted(signal: AbortSignal | undefined): boolean {
-  return signal?.aborted === true
-}
+// `isAborted` / `asRecord` / `asFunction` / `asString` 的唯一实现在 errors.ts
+// （2026-10-16 审计 A3 / A4 收敛，本文件原有四份已删）。
 
 /**
- * 取异常的 message。
- *
- * @param error 任意异常。
- */
-function messageOf(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
-}
 
 /**
  * 把机制的失败原因映射成工具的闭枚举 `kind`。
@@ -1094,20 +1086,7 @@ interface BoundEntry extends ReloadEntryPort {
 }
 
 /** 取一个对象的记录视图；数组/函数/null 都算不合格。 */
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
-  return value as Record<string, unknown>
-}
-
-/** 取函数字段。 */
-function asFunction(value: unknown): ((...args: unknown[]) => unknown) | undefined {
-  return typeof value === 'function' ? (value as (...args: unknown[]) => unknown) : undefined
-}
-
-/** 取字符串字段。 */
-function asString(value: unknown): string | undefined {
-  return typeof value === 'string' ? value : undefined
-}
+// （isAborted 等类型守卫的正典在 errors.ts，见上文记号。）
 
 /**
  * 迭代一个可迭代对象（数组与自定义迭代器通吃）。

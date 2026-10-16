@@ -31,6 +31,7 @@ import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools'
 
 import {
   fail,
+  messageOf,
   ok,
   systemErrorCode,
   toToolError,
@@ -531,7 +532,7 @@ async function probeSignature(
 function describeThrown(error: unknown): string {
   const code = systemErrorCode(error)
   if (code !== undefined) return code
-  const message = error instanceof Error ? error.message : String(error)
+  const message = messageOf(error)
   return message.includes('transport-timeout') ? 'transport timed out' : message
 }
 

@@ -67,6 +67,7 @@ import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 
 import { createRestartFsPort, type ContextLike } from './restart-fs.js'
+import { messageOf } from './errors.js'
 import {
   consumeRestartMarker,
   decideRecovery,
@@ -1014,11 +1015,5 @@ function describeError(error: unknown): string {
   return code === undefined ? message : `${code}: ${message}`
 }
 
-/**
- * 取一句话错误描述（**绝不抛**）。
- *
- * @param error 任意异常。
- */
-function messageOf(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
-}
+// `messageOf` 的唯一实现在 errors.ts（2026-10-16 审计 A1 收敛，本文件原有一份已删）。
+

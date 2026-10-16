@@ -25,23 +25,19 @@
 
 | id | 内容 | 份数 | 判定 |
 |---|---|---|---|
-| **B5** | `no relaunch route has been verified on …` | 2 + 1 截断版 | **缺陷**，见下 |
-| **A6** | 取 `error.code`：正典 + 3 份**弱化**副本 | 4 | **缺陷**，见下 |
-| **B4** | `ENOENT ⇒ not-configured / 其它 ⇒ internal` + `cannot start dsh: ` | 2 | 缺陷 |
-| **B1** | 取消语义 `nextStep.why` | 7 | 缺陷 |
-| **B2** | 取消语义 `error.message` | 5 | 缺陷 |
-| **B3** | `if (!key \|\| typeof key !== 'object') return [GUARD_FALLBACK_LINE]` | 5 + **1 走样** | 缺陷 |
-| **B6** | `retryArgs` 同名同规则两份 | 2 | 缺陷 |
-| A1 | `messageOf` | 5 逐字 + 6 内联 | 缺陷 |
-| A2 | `iterate`（21 行生成器） | 2 | 缺陷 |
-| A3 | `asRecord`×3 / `asFunction`×2 / `asString`×2 / `isString`×2 | 9 | 缺陷 |
-| A4 | `isAborted` | 2 | 缺陷 |
-| A7 | `${code}: ${message}` 形状 | 2 | 缺陷·轻度 |
-| B7 / B8 | `'dshHome is empty'` / `` `authority: ` `` | 2 / 2 | 缺陷·轻度 |
-| B10 | `dshHome` 参数描述收尾句 `Omit to use…` vs `Omit for…` | 3 / 1 | 主体有意，收尾**缺陷** |
-| D1 | 描述骨架断言在 4 个工具测试里逐字重复 | 4 + 3 变体 | 缺陷（红线 B20a 已有更全实现） |
-| D4 | `diagnose-plugin-load.test.ts` 内重夹具 | 14 + 3 | 缺陷 |
-| D5 | `redlines.test.ts` 内清单两份 | 2 + 2 | 缺陷·轻度 |
+| ~~**B5**~~ | ~~`no relaunch route has been verified on …`~~ | — | ✅ **已修**（PR #52，正典 `carrier.ts`） |
+| ~~**A6**~~ | ~~取 `error.code` 弱化副本~~ | — | ✅ **已修**（PR #52，改用正典） |
+| ~~**B4**~~ / ~~**B1**~~ / ~~**B2**~~ | ~~spawn kind 映射~~ / ~~取消 why~~ / ~~取消 message~~ | — | ✅ **已修**（PR #53，正典 `shared.ts`） |
+| ~~**B3**~~ / ~~**B6**~~ | ~~兜底 keyText~~ / ~~retryArgs 规则~~ | — | ✅ **已修**（PR #54，正典 `shared.ts`；effect_mode 的 `return []` 违约同批修正） |
+| ~~A1~~ | ~~`messageOf`~~ | ~~5+6~~ | ✅ **已修**（正典 `errors.ts`；B30 揪出审计漏数的 lib 侧 4 份，一并收敛） |
+| ~~A3~~ / ~~A4~~ | ~~`asRecord` 族 / `isAborted`~~ | — | ✅ **已修**（正典 `errors.ts`） |
+| A2 | `iterate`（21 行生成器） | 2 | 缺陷（未修：两份在不同宿主上下文，收拢需先解 import 方向，见 §五 限度） |
+| A7 | `${code}: ${message}` 形状 | 2 | 缺陷·轻度（未修） |
+| B7 / B8 | `'dshHome is empty'` / `` `authority: ` `` | 2 / 2 | 缺陷·轻度（未修） |
+| B10 | `dshHome` 参数描述收尾句 `Omit to use…` vs `Omit for…` | 3 / 1 | 主体有意，收尾**缺陷**（未修） |
+| D1 | 描述骨架断言在 4 个工具测试里逐字重复 | 4 + 3 变体 | 缺陷（红线 B20a 已有更全实现；未修） |
+| D4 | `diagnose-plugin-load.test.ts` 内重夹具 | 14 + 3 | 缺陷（未修） |
+| D5 | `redlines.test.ts` 内清单两份 | 2 + 2 | 缺陷·轻度（未修） |
 
 ### 三、B5 与 A6 为什么排最前
 
@@ -75,12 +71,13 @@
 
 ## 支撑的决策
 
-暂无（本文只记清点结果与优先级）。
+- 高优先级批（B5/A6/B4/B1/B2）→ PR #52、#53；B3/B6 → PR #54；A1/A3/A4 → 正典 `errors.ts` 的收敛批。
+- B30 的两轮设计修正（落点映射、FORMAT/NAME 边界）由本清单的修复批逼出，见红线文件 B30 注释。
 
 ## 影响
 
-- 本仓还有一批「同一语义多落点」未修，**优先级 B5 > A6 > B4 > B1/B2 > B3 > B6**。
-- 每修一批，把对应名字/片段加进 B30 的两个闭集 —— 否则修完还会再长回来。
+- **未修的剩余项**：A2（需先解 import 方向）、A7 / B7 / B8 / B10（轻度）、D1 / D4 / D5（测试侧重构）—— 都已定性，无未知数；下次要清就按这张表开工。
+- ~~每修一批，把对应名字/片段加进 B30 的两个闭集~~ —— 已执行三批（#52/#53/#54 + 本批），B30 现有闭集覆盖本清单全部已修项。
 - 限度（如实记）：`src/lib/ports.ts`（1199 行）/ `startup-log.ts`（853）/ `hot-reload.ts`（1507）
-  是分段人工读 + 机器扫描交叉验证，**未逐行通读** ⇒ 那三个文件里「换一种说法的同一件事」可能仍有漏。
-  机器扫描对**语义级重复**（同一断言换写法）同样照不到。
+  是分段人工读 + 机器扫描交叉验证，**未逐行通读** ⇒ 那三个文件里「换一种说法的同一件事」可能仍有漏
+  （A1 的 lib 侧 4 份就是 B30 落地后才揪出来的实证）。机器扫描对**语义级重复**（同一断言换写法）同样照不到。

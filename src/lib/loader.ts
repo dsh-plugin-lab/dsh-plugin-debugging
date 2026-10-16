@@ -24,6 +24,7 @@
  * 所以这里自己投影，只取判定要用的几行。
  */
 import { FIBER_STATE, type LoaderEntrySnapshot } from './fiber.js'
+import { asFunction, asRecord, asString, messageOf } from './errors.js'
 
 /** 读 Loader 的结果：要么拿到快照，要么带一个**可展示的原因**降级。 */
 export interface LoaderReadResult {
@@ -225,30 +226,10 @@ function errorTextOf(value: unknown): string | undefined {
 }
 
 /**
- * 取异常的可读信息。
- *
- * @param error 任意值。
- */
-function messageOf(error: unknown): string {
-  if (error instanceof Error) return error.message
-  return String(error)
 }
 
 /** 是不是对象（非数组、非 null）。 */
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
-  return value as Record<string, unknown>
-}
-
-/** 取函数值。 */
-function asFunction(value: unknown): ((...args: unknown[]) => unknown) | undefined {
-  return typeof value === 'function' ? (value as (...args: unknown[]) => unknown) : undefined
-}
-
-/** 取字符串值。 */
-function asString(value: unknown): string | undefined {
-  return typeof value === 'string' ? value : undefined
-}
+// `asRecord` / `asFunction` / `asString` 的唯一实现在 errors.ts（2026-10-16 审计 A3 收敛）。
 
 /** 取数值。 */
 function asNumber(value: unknown): number | undefined {
