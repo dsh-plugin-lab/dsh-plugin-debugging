@@ -30,7 +30,7 @@
 - 本仓的行动工具改的是**运行中的树**（`hot_reload`，失败必须回滚）与**宿主进程**（`restart`，**不可逆**）→ 它们必须与判断**分开**：合起来会让「先判断再动手」这个决策点消失，而**错一次的代价不可撤销**。
 - 这条同时解释了 `sign_cookie` 为什么独立 —— 它可重试、可撤销，**不同在可逆性**，而在**输出里带凭证**。判据是第二条：**有没有秘密要经手**。
 
-**跨实例观察：做（D′）** —— 维护者 2026-10-14 拍板。原设想「观察层四个工具各加一个 `dshHome` 参数」**按字面核不上**（三条理由见 §1.2），所以改为**两块一起做**：**① 新增一个「列出活着的 DSH 宿主」的发现工具**；**② 给文件型工具加 `dshHome`（含把 `DSH_HOME` 注进子进程环境）**。`check_auth` 用 **authority**、`hot_reload` **不加**（跨不了，描述里诚实标注）。
+**跨实例观察：做（D′）** —— 维护者 2026-10-14 拍板。原设想「观察层四个工具各加一个 `dshHome` 参数」**按字面核不上**（三条理由见 §1.2），所以改为**两块一起做**：**① 新增一个「列出活着的 DSH 宿主」的发现工具**；**② 给文件型工具加 `dshHome`（含把 `DSH_HOME` 注进子进程环境）**。`check_auth` 用 **authority**、`hot_reload` **不加**（跨不了，描述里诚实标注）、`restart` **不加**（行动类只能作用于本宿主，§1.2 第 3 条）。
 ⚠️ **硬边界**：**发现只能给 authority，给不出 home** ⇒ 「让文件型工具指向别的实例」**只能调用方手填路径**，**不得承诺自动配对**。识别 DSH 靠**专有签名**（未认证 `GET /` → 401 且 body 逐字是那句），**不是「401 就是 DSH」**。细节与代价见 §1.2。
 **特例**：**「列」进本仓，「建 / 销毁」不进** —— 分界是**动不动手**（§1 实例类判据）。
 
@@ -105,6 +105,7 @@
 
 1. **新增一个发现工具**：**列出活着的 DSH 宿主**。做法 = 扫本机监听者 + 用 DSH 的**专有签名**认领（不是「401 就是 DSH」——见下面的硬边界）。
 2. **给「文件型」工具加 `dshHome` 参数**（`dump_config` / `check_effect_mode` / `sign_cookie` / `diagnose`），**含把 `DSH_HOME` 注进子进程环境**这一层。`check_auth` 不加（它要的是 **authority**，本来就收 `host:port`）。`hot_reload` **不加** —— 它换的是**本进程内存**里的模块，跨实例**做不到**，描述里必须**诚实标注**。
+3. **`dsh_restart` 两个都不加**（`dshHome` 与 `port`）：它是**行动类**，作用对象**只能是本宿主**；跨实例重启不在边界内（§1 的行动类判据）。理由与前两条不同 —— `check_auth` / `hot_reload` 是「**做不到**」，`restart` 是「**不该做**」。
 
 #### D′ 的硬边界（**必须写进工具描述，否则就是骗模型**）
 
@@ -743,7 +744,7 @@ interface ToolResult { content: ContentBlock[]; isError: boolean; meta?: JsonVal
 | **输出三层** | L1 判定 / L2 事实 / L3 指路（`nextStep` 两分支） | §3.1 + `src/lib/render.ts` |
 | **描述四段骨架** | 做什么 / 什么时候用我 / 边界 / 代价，段序不许换 | §2.1 + B20a / B20b |
 | **工具清单** | 四类角色的划分见 §1；**具体有哪几个、叫什么，真源是注册处**（本文不抄清单、也不抄个数）；**名字闭集由 B9 钉住** | `src/tools/index.ts` 注册处 |
-| **技能半边** | `SKILL.md` 已**解冻**（跟着插件演化），并已补「干预」一节（写侧 `hot_reload` + 派生 `sign_cookie` + 行动 `restart`） | §9.3 的连带同步点 |
+| **技能半边** | `SKILL.md` 已**冻结**（维护者 2026-10-15 拍板，冻在 0.4.0 那一版，不再跟着插件演化）；已补「干预」一节（写侧 `hot_reload` + 派生 `sign_cookie` + 行动 `restart`） | 冻结声明见根 [AGENTS.md](../AGENTS.md) 的待办与 [docs/ARCHITECTURE.md](ARCHITECTURE.md) 开篇；连带同步点见 §9.3 |
 | **超时预算** | 工具**只声明工作量档**（`quick` / `schemaDump`），预算收在 `src/lib/timeouts.ts` 的**唯一映射点**；工具里不许有毫秒字面量 | `test/tools/timeout-budgets.test.ts`（**扫源码**） |
 | **只读纪律** | 是**机器判据**：B10（杀进程 / fs 写入 / **写宿主数据路径** / 安装面，作用域**整个 `src/**`**）+ B15（写侧窄作用域、更严记号） | §10.3 与 `test/redlines.test.ts` |
 | **大 `audit` 的去处** | `spillStore` 可达性**已实测**（§5.1）；但它**不跨重启**（每进程临时目录 + 启动清扫）⇒ 只适合「这次会话里的大 `audit`」 | §5 / §5.1 |
@@ -762,8 +763,8 @@ interface ToolResult { content: ContentBlock[]; isError: boolean; meta?: JsonVal
 
 ### 9.3 连带同步点（改上面任何一项都要同批看）
 
-- **`SKILL.md`**：它是**运行时载荷**，不是文档；但它**跟着插件一起演化**。**新增/改名工具、改动写侧语义、改动「干预」范围时，同批改它** —— 漏改是**静默**的（B12 只查 frontmatter 与正文长度，**不比对原件**；B9 只钉工具名闭集）。⇒ 正文里**不带工具名**的假话（例：一句「本插件不提供 X」）两条红线都抓不到，只能靠人工通读。
-- **`AGENTS.md` 的待办**：`SKILL.md` **已解冻**（2026-10-13 拍板，待办里已改成「跟着插件一起演化」）；配套的 **B12 断言对象**也已从「与原件逐字一致」改成**结构约束**（见 §10 的 B12 修订注）。**再改技能正文时，同批核那两条待办是否要跟着动。**
+- **`SKILL.md`**：它是**运行时载荷**，不是文档；它**已冻结**（维护者 2026-10-15 拍板，冻在 0.4.0 那一版，**不再**跟着插件一起演化）。⚠️ 下面两条是**解冻期遗留的连带机制**——它们**仍然生效**，但现在退化成「正文不动时的例行核对」，不再是「每次改代码都要改正文」。（冻结声明与取代关系见 [ARCHITECTURE.md](ARCHITECTURE.md) 开篇与根 [AGENTS.md](../AGENTS.md) 的待办。）⚠️ **冻结不等于正文永远正确**：B12 只查 frontmatter 与正文长度、B9 只钉工具名闭集，两条都**抓不到正文里不带工具名的假话**（例：一句「本插件不提供 X」）—— 正文真要动时，那只能靠人工通读。
+- **`AGENTS.md` 的待办**：`SKILL.md` 的状态**已冻结**（2026-10-13 拍板解冻、**2026-10-15 拍板收回**，以冻结为准）；配套的 **B12 断言对象**已从「与原件逐字一致」改成**结构约束**（见 §10 的 B12 修订注），这条与冻结与否无关。
 - **两份门面**（[README.md](../README.md) / [README_zh.md](../README_zh.md)）：配置表、工具清单、只读纪律的措辞**成对改**。
 - **载体这一维（闸④ / 拒绝码）**：拒绝码闭集在 §6.1 那张表与 `src/lib/restart.ts` 的 `RefusalCode`；**模型可见的措辞**在 `src/tools/dsh_restart.ts` 的 `RESTART_DESCRIPTION` 与 `src/lib/carrier.ts` 的 `relaunchRefusalFor`；宿主事实在 [HOST-CONTRACTS.md](HOST-CONTRACTS.md) §2.7；两份门面的 `dsh_restart` 那一节与平台支持那一节也引用了它。**改任一处都要同批看其余几处。**
 - **描述预算（§2）**：**加一个工具 = 系统提示多占一段** —— 那个字符数是**实测值、会漂**，别抄；加工具时同批复核 §2 的结论是否还成立。
@@ -778,7 +779,7 @@ interface ToolResult { content: ContentBlock[]; isError: boolean; meta?: JsonVal
 **新增两条由本轮拍板/复查产生**：
 
 - **B24（拍板加）`execute` 全路径不抛** —— 见下表与下方说明。
-- **B12 修订（解冻的连带）**：现有 B12 断言的是「技能文件本体」的**结构**（frontmatter 合规 + 正文长度下界；`test/redlines.test.ts`，检索串 `describe('B12 技能文件本体'`），**并不断言与 v2.1.4 逐字一致** → `SKILL.md` 解冻后 **B12 无需改动**。反而要**补一条**：新增的「干预」一节必须**真的存在**（否则「解冻了但没写」是静默的）→ 归入 **B12b**。
+- **B12 修订（解冻期的连带，与冻结不矛盾）**：现有 B12 断言的是「技能文件本体」的**结构**（frontmatter 合规 + 正文长度下界；`test/redlines.test.ts`，检索串 `describe('B12 技能文件本体'`），**并不断言与 v2.1.4 逐字一致** → 解冻与冻结都**不影响** B12 是否要改。「干预」一节必须**真的存在**（否则「正文说有、实际没有」是静默的）→ 归入 **B12b**。
 
 | # | 红线 | 怎么断言（机械判据） |
 |---|---|---|
@@ -818,7 +819,7 @@ interface ToolResult { content: ContentBlock[]; isError: boolean; meta?: JsonVal
 - **它的声明边界（必须写明，否则下一个人会误以为它管得更多）**：**B24 抓不到「异常被吞掉」** —— `try{…}catch{ return fail({kind:'internal'}) }` 的返回值合法，B24 照样绿。那是坑 37 的地盘，不是这条红线的。
 - **配套硬要求（redline-verifier 实测踩出来的）**：**替身被调用次数 = 0 必须判红**，不许 skip。它的第一版探针在 `probe()` 里另造了一份 deps、注入被丢掉 → 六组**全部「通过」** → 差点得出「B24 今天已经是绿的」这个**反结论**。
 
-**B12b（解冻的连带）**：断言 `skills/dsh-plugin-debugging/SKILL.md` **含「干预」一节**且该节非空。`[已核]` 现有 B12 **不比对 v2.1.4 原件**（只查 frontmatter 合规与正文长度），所以解冻**不会**让 B12 变红；但反过来，**不补 B12b 的话「解冻了却没写」是静默的**。
+**B12b（解冻期补上、冻结期仍然有效）**：断言 `skills/dsh-plugin-debugging/SKILL.md` **含「干预」一节**且该节非空。`[已核]` 现有 B12 **不比对 v2.1.4 原件**（只查 frontmatter 合规与正文长度），所以解冻 / 冻结**都不会**让 B12 变红；但反过来，**不补 B12b 的话「正文说有、实际没有」是静默的**。
 
 **B16 / B22 互为反面**：前者禁「恒定块进输出」，后者禁「`audit` 进输出」。两条合起来 = §3 + §5 的全部内容。
 
@@ -1003,7 +1004,7 @@ npm pack @deepseek-ai/dsh-tools@0.1.7-rc.1     # → 解出 package/lib/types/pr
 | 契约（`ok` / `fail` / `nextStep` / `evidence` / `ensureToolResult`） | `src/lib/errors.ts` |
 | 契约与 `execute` 不抛的判据、以及 B10/B15/B14 等旧红线 | `test/redlines.test.ts` |
 | 单测助手（`expectOk` / `expectFail` / `expectFailEvidence` / `run`） | `test/tools/helpers.ts` |
-| 技能本体（**已解冻**，待补「干预」一节） | `skills/dsh-plugin-debugging/SKILL.md` |
+| 技能本体（**已冻结**，含「干预」一节） | `skills/dsh-plugin-debugging/SKILL.md` |
 | 打包配置（`files` / `exports` / `dsh.bundle` / `peerDependencies`） | `package.json` |
 | 启哪个 entry 进 profile | `cordis.patch.yml` |
 | 发布态不变量 | `scripts/check-release.mjs` |
