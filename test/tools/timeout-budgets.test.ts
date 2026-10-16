@@ -198,6 +198,7 @@ describe('工具只声明工作量：预算一律经 toolBudgetMs 取', () => {
   /** 行动类工具要四个宿主面；构造工具**不会**调用它们（定义是惰性的）。 */
   function restartStub(): RestartHost {
     return {
+      pathExists: () => true,
       ports: {
         fs: { read: async () => ({ status: 'absent' }), write: async () => undefined },
         restartHistory: async () => ({ known: true, value: [] }),

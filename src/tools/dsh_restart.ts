@@ -75,7 +75,6 @@ import {
   type CarrierKind,
   type CarrierObservation,
 } from '../lib/carrier.js'
-import { existsSync } from 'node:fs'
 import { resolveDshLaunch } from '../lib/dump.js'
 import type { SpawnImpl } from '../lib/exec.js'
 import { profileDir, readProfileManifest } from '../lib/profile.js'
@@ -253,6 +252,15 @@ export interface RestartHost {
   readonly approval: RestartApprovalPort
   readonly launch: RelaunchPort
   readonly exit: RestartExitPort
+  /**
+   * 探一个路径存不存在（用来判 `wscript.exe` 在不在）。
+   *
+   * **为什么是注入面而不是直接 `existsSync`**：这是**平台相关判据** —— CI 是 ubuntu、
+   * 本机是 Windows，直接判真机平台会让两条分支里总有一条在某个环境上永远跑不到
+   * （本仓纪律：平台相关判据要能显式钉住分支，见 `test/AGENTS.md`）。注入之后，
+   * 「隐藏启动器在」与「回退到 cmd」两条分支在**任意**平台上都能被真跑到。
+   */
+  readonly pathExists: (path: string) => boolean
 }
 
 /**
@@ -480,7 +488,13 @@ export function createRestartTool(deps: RestartToolDeps): ToolDefinition {
           return toOutput(planFailureResult(probe, config, 'gates', carrier))
         }
 
-        const planned = relaunchPlanOf(probe.launch, config, parsed.delayMs, process.pid)
+        const planned = relaunchPlanOf(
+          probe.launch,
+          config,
+          parsed.delayMs,
+          process.pid,
+          deps.restart.pathExists,
+        )
         const base = {
           gatesPassed: gatesPassedOf(probe),
           marker: probe.markerPath,
@@ -1205,19 +1219,21 @@ interface RelaunchPlan {
  * @param config 生效配置。
  * @param delayMs 等待上限（毫秒）—— 不是固定睡眠（见 {@link buildLauncherScript}）。
  * @param pid 本进程号：启动器等的就是它消失。
+ * @param pathExists 探路径存不存在的谓词（装配处注入 `existsSync`）—— 用来判隐藏启动器在不在。
  */
 function relaunchPlanOf(
   launch: LaunchCommand,
   config: ResolvedConfig,
   delayMs: number,
   pid: number,
+  pathExists: (path: string) => boolean,
 ): RelaunchPlan {
   const argv = [launch.command, ...launch.args].map(quoteArg).join(' ')
   const setHome = `set "DSH_HOME=${config.dshHome}"`
   const enter = launch.cwd.trim() === '' ? '' : ` && cd /d ${quoteArg(launch.cwd)}`
   const target = `cmd /c ${setHome}${enter} & ${argv}`
 
-  if (!hiddenLauncherAvailable(existsSync)) {
+  if (!hiddenLauncherAvailable(pathExists)) {
     // 回退：cmd 里没有 sleep，等待只能用 `ping -n`（这台机器上已被实测用过的形态）。
     const count = Math.max(1, Math.ceil(delayMs / 1000) + 1)
     return {
@@ -1450,12 +1466,14 @@ interface ActivityPort {
  * @param config 生效配置。
  * @param carrier 载体观测（**显式传入**：闸④的结论全靠它，见 `src/tools/index.ts` 的装配注释）。
  * @param spawn 子进程实现（跑 `schtasks` 用）。
+ * @param pathExists 探路径存不存在的谓词（**平台相关**：判隐藏启动器在不在）。
  */
 export function restartHostFrom(
   ctx: unknown,
   config: ResolvedConfig,
   carrier: CarrierObservation,
   spawn: SpawnImpl,
+  pathExists: (path: string) => boolean,
 ): RestartHost {
   const fs = createRestartFsPort(ctx as HostContextLike, {
     // 显式给档位：默认档写 $DSH_HOME 必被拒（实测见 restart-fs.ts 文件头）。
@@ -1463,6 +1481,8 @@ export function restartHostFrom(
   })
 
   return {
+    // 平台相关的那一格：由装配处注入（本层与库层都不碰 `node:fs`）。
+    pathExists,
     ports: {
       fs,
       restartHistory: async () => await restartHistoryFrom(fs, config.dshHome),

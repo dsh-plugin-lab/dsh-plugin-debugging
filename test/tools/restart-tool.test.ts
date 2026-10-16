@@ -206,6 +206,17 @@ interface HarnessOptions {
   /** 拉起端口自己抛（用来钉「兜底分支的 `key.stage` 按调用点报」）。 */
   relaunchThrows?: boolean
   /**
+   * 隐藏启动器（`wscript.exe`）在不在。
+   *
+   * **必须显式钉住分支**（本仓纪律：平台相关判据不许按真实平台走，见 `test/AGENTS.md`）：
+   * CI 是 ubuntu（`wscript.exe` 必然不在 ⇒ 走回退）、本机是 Windows（在 ⇒ 走隐藏形态）。
+   * 按真实平台判，两条分支里总有一条在某个环境上**永远跑不到**。
+   *
+   * 默认 `true`（隐藏形态）：本文件绝大多数用例与这两条分支无关，而其中少数几条断言
+   * `key` 的形状 —— 给一个确定的默认值比让它们在 CI 上悄悄换路要诚实。
+   */
+  hiddenLauncher?: boolean
+  /**
    * 这个宿主跑在什么载体上。
    *
    * **默认给 `cli × win32`**（唯一有已实测回归路线的那一格）：本文件绝大多数用例测的是
@@ -301,6 +312,8 @@ function harnessFor(home: string, options: HarnessOptions = {}): Harness {
   }
 
   const host: RestartHost = {
+    // 显式钉住隐藏启动器那一格（`hiddenLauncher: false` 测回退形态）。
+    pathExists: () => options.hiddenLauncher !== false,
     ports,
     approval: {
       policyOf: (agent) => {
@@ -879,6 +892,7 @@ describe('dsh_restart · 载体：桌面宿主在动手之前被拒（零写 / �
     const config = configFor(home, { enableRestart: volatileOf(true) })
     const ports = harnessFor(home, { policy: 'never' }).ports
     const host: RestartHost = {
+      pathExists: () => true,
       ports,
       approval: { policyOf: () => 'never', request: async () => 'allowed-once' },
       launch: { relaunch: async () => ({ ok: true, detail: 'stub' }) },
@@ -1115,6 +1129,27 @@ describe('dsh_restart · 拉起的命令可复核', () => {
     expect(String(h.launchCalls[0]?.commandLine)).not.toContain('ping')
     expect(h.launchCalls[0]?.budgetMs).toBeGreaterThan(0)
   })
+
+  it('回退形态（`wscript.exe` 不在）：退回 cmd 行 + `ping`，且**不写**启动器脚本', async () => {
+    // 两条分支都在**任意平台**上被真跑到：这一条显式把谓词钉成「不在」——
+    // CI 是 ubuntu（真机上必然不在）、本机是 Windows（真机上在），按真实平台判
+    // 总有一条分支在某个环境里永远跑不到（`test/AGENTS.md` 的平台纪律）。
+    const home = await tempDshHome()
+    const h = harnessFor(home, { policy: 'never', hiddenLauncher: false })
+    const data = expectOk(await run(h.tool, ARGS, execFor()))
+    const tr = String(h.launchCalls[0]?.commandLine)
+    expect(tr.startsWith(`cmd /c set "DSH_HOME=${home}"`)).toBe(true)
+    expect(tr, '回退形态的等待只能靠 ping').toContain('ping -n 4')
+    expect(tr).toContain('node bin.js --profile web')
+    expect(
+      h.fs.writes.some((entry) => entry.path.endsWith('relaunch.vbs')),
+      '回退却写了 VBS',
+    ).toBe(false)
+    // 回退形态必须**如实进 key**：没有 `launcher` / `launcherLog` 两格即是回退的信号。
+    expect(data.key['launcher']).toBeUndefined()
+    expect(data.key['launcherLog']).toBeUndefined()
+    expect(String(data.key['relaunch']), 'key 里仍应是目标命令').toContain('bin.js')
+  })
 })
 
 // ── 11. 接线：走完整入口 ───────────────────────────────────────────────────
@@ -1137,6 +1172,7 @@ describe('dsh_restart · 接线断言（坑 42）', () => {
     const tool = createRestartTool({
       ...deps,
       restart: {
+        pathExists: () => true,
         ports: wired,
         approval: { policyOf: () => 'never', request: async () => 'allowed-once' },
         launch: {
@@ -2041,6 +2077,7 @@ describe('dsh_restart · 总闸 enableRestart（默认关 ⇒ 结构化拒绝，
     })
     // `Harness` 只导出计数器与工具（它**不**导出 `restart` 那一面），所以宿主面另造一份。
     const hostOf = (fs: FsRecorder): RestartHost => ({
+      pathExists: () => true,
       ports: harnessFor(home, { policy: 'never', fs }).ports,
       approval: { policyOf: () => 'never', request: async () => 'allowed-once' },
       launch: { relaunch: async () => ({ ok: true, detail: 'stub' }) },

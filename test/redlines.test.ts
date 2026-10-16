@@ -4231,6 +4231,8 @@ function restartWith(kind: 'dry-run' | 'no-policy'): ToolDefinition {
     now: () => Date.UTC(2026, 9, 14, 6, 0, 0),
   }
   const restart: RestartHost = {
+    // 平台相关分支显式钉住（CI 是 ubuntu）—— 红线语料测的不是启动器形态。
+    pathExists: () => true,
     ports,
     approval: {
       policyOf: () => (kind === 'no-policy' ? undefined : 'never'),

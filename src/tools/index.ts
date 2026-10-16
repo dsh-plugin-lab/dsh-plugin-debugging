@@ -25,6 +25,10 @@
  * **只读纪律**：不杀进程、不改 profile、不写 `$DSH_HOME`。
  * 进程与端口一律**按端口**查（`lib/ports.ts`），不用命令行子串 —— 子串会误匹配派生 shell。
  */
+// `existsSync` 在这里出现是**装配点**：`dsh_restart` 需要一个「探路径在不在」的谓词来判
+// `wscript.exe`（隐藏启动器）在不在，而那是**平台相关**的 —— 由装配处注入，工具与库两边
+// 都不碰 `node:fs`（库半边无 IO 是 B10 那族红线守着的）。
+import { existsSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
 
 import type { PluginState } from '../contracts.js'
@@ -101,7 +105,7 @@ export function registerTools(ctx: Context, state: PluginState): void {
   ctx.tools.register(
     createRestartTool({
       ...deps,
-      restart: restartHostFrom(ctx, state.config, state.carrier, deps.spawn),
+      restart: restartHostFrom(ctx, state.config, state.carrier, deps.spawn, existsSync),
     }),
   )
 }
