@@ -20,11 +20,7 @@ import {
   DUMP_CONFIG_DESCRIPTION,
   DUMP_CONFIG_TOOL,
 } from '../../src/tools/dsh_dump_config.ts'
-import {
-  composeDescription,
-  DESCRIPTION_MAX_CHARS,
-  DESCRIPTION_MAX_LINES,
-} from '../../src/tools/describe.ts'
+import { composeDescription } from '../../src/tools/describe.ts'
 import { ensureToolResult, TOOL_ERROR_KINDS, toolResultProblem } from '../../src/lib/errors.ts'
 import {
   carrierOf,
@@ -34,6 +30,8 @@ import {
   execWith,
   expectFail,
   expectOk,
+  expectParameterDescriptionsNotBlank,
+  expectSynthesizedDescription,
   recordingSpawn,
   renderText,
   run,
@@ -121,31 +119,18 @@ describe('dsh_dump_config', () => {
   })
 
   describe('形状：描述层（SHAPE §2.1 冻结）', () => {
-    it('四段骨架：合成器与声明一致、行数 ≤4、字符 ≤240', () => {
+    it('四段骨架：合成器与声明一致（B20a 照不到的那一半）+ 本工具的参数闭集', () => {
       const tool = createDumpConfigTool(depsFor(configFor('/tmp/nowhere')))
       const description = DUMP_CONFIG_DESCRIPTION
 
       // 合成器与声明必须一致 —— 防止有人手写字符串绕过骨架。
-      expect(tool.description).toBe(composeDescription(description))
-      expect(description.what.trim()).not.toBe('')
-      expect(description.useWhen.trim()).not.toBe('')
-      const present = [
-        description.what,
-        description.useWhen,
-        description.boundary,
-        description.cost,
-      ].filter((segment) => segment !== undefined && segment.trim() !== '').length
-      const lines = composeDescription(description).split('\n')
-      expect(lines.length).toBeGreaterThanOrEqual(present)
-      expect(lines.length).toBeLessThanOrEqual(DESCRIPTION_MAX_LINES)
-      expect((tool.description ?? '').length).toBeLessThanOrEqual(DESCRIPTION_MAX_CHARS)
-      // 不许有纯空白行（空段必须先滤掉再 join，SHAPE §2.1）。
-      expect(lines.every((line) => line.trim() !== '')).toBe(true)
+      // ⚠️ 这条 **B20a 照不到**（它的 `shape.text` 是从声明重新合成的，不读 `tool.description`）。
+      expectSynthesizedDescription(tool, composeDescription(description))
+      // 骨架的其余判据（段非空 / 行数与字符上界 / 连接符 / 无空白行）由红线 B20a 对闭集
+      // 全量覆盖，这里不再逐字重抄（一处一事实）；本用例只留本工具特有的**精确参数名闭集**。
 
-      // ⚠️ `defineTool` 把参数编译成了 JSON schema（`{ type, properties }`，活跃坑 11），
-      // 所以要点进 `properties` 才看得到每个参数的描述。直接 `Object.values(tool.parameters)`
-      // 会拿到 `'object'` 与 properties 对象本身 → 每条 `description` 都是 `undefined`
-      // → 合计恒为 0 → **判据空转**（SHAPE §10.0「只有上界、没有下界」那一类假绿）。
+      // ⚠️ `defineTool` 把参数编译成了 JSON schema（`{ type, properties }`，活跃坑 11）——
+      // 下界判定在 helpers.ts 的 `expectParameterDescriptionsNotBlank`。
       const parameters = tool.parameters as {
         properties?: Record<string, { description?: string }>
       }
@@ -154,15 +139,7 @@ describe('dsh_dump_config', () => {
       // 精确闭集（不是个数）：加/删参数都要同批改这里。`dshHome` 是跨实例观察那个接缝
       // （`docs/SHAPE.md` §1.2 的 D′），它的存在本身就是契约的一部分。
       expect(names, '一个参数都没读到 —— 判据空转').toEqual(['profile', 'dshHome'])
-      for (const name of names) {
-        expect(props[name]?.description ?? '', `参数 ${name} 的描述是空的`).not.toBe('')
-      }
-      const total = Object.values(props).reduce(
-        (sum, item) => sum + (item.description?.length ?? 0),
-        0,
-      )
-      // 下界：`total > 0` —— 上界已删（SHAPE §2），这两条下界是唯一的机械守卫。
-      expect(total).toBeGreaterThan(0)
+      expectParameterDescriptionsNotBlank(tool)
     })
 
     it('恒定知识只在描述层边界段写一次：退出码语义 + 已知误报的判据', () => {

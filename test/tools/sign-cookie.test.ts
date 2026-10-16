@@ -37,6 +37,7 @@ import {
   depsFor,
   expectFail,
   expectOk,
+  expectParameterDescriptionsNotBlank,
   renderText,
   run,
   tempDshHome,
@@ -435,27 +436,22 @@ describe(SIGN_COOKIE_TOOL, () => {
   })
 
   describe('形状（SHAPE §2.1 / §4.1）', () => {
-    it('描述四段齐全、行数与字符数在上限内', () => {
+    it('描述四段齐全（boundary 折行占两行 ⇒ 恰好 4 行）', () => {
       const text = composeDescription(SIGN_COOKIE_DESCRIPTION)
       // 4 行 = what / useWhen / boundary 两行。`composeDescription` 先滤空段再
       // 用 `\n` 连（见 describe.ts 的注释），所以 boundary 内那个换行也占一行。
+      // ⚠️ 这条**精确行数断言**是本工具特有的形状钉子（boundary 带一个换行）——
+      // 骨架的其余判据（段非空 / 行数与字符上界）由红线 B20a 全量覆盖，这里不重抄。
       expect(text.split('\n')).toHaveLength(4)
-      expect(text.split('\n').length).toBeLessThanOrEqual(4)
-      expect(text.length).toBeLessThanOrEqual(240)
     })
 
     it('每个参数都有非空描述（读 `parameters.properties`，不是顶层遍历）', () => {
       const tool = createSignCookieTool(depsFor(configFor('/tmp/none', { port: 3080 })))
       const params = tool.parameters as { properties?: Record<string, { description?: string }> }
       const names = Object.keys(params.properties ?? {})
+      // 精确闭集是本工具的契约（B20a 只判通用下界）。
       expect(names).toEqual(['port', 'host', 'maxAgeDays', 'dshHome'])
-      let total = 0
-      for (const name of names) {
-        const description = params.properties?.[name]?.description ?? ''
-        expect(description.trim(), `参数 ${name} 的描述为空`).not.toBe('')
-        total += description.length
-      }
-      expect(total).toBeGreaterThan(0)
+      expectParameterDescriptionsNotBlank(tool)
       // S5 的配套：描述里要说清下界，否则模型很容易给出 0（参数名只暗示「天数」）。
       expect(params.properties?.['maxAgeDays']?.description ?? '').toContain('positive')
     })

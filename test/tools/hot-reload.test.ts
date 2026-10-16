@@ -50,11 +50,7 @@ import {
   HOT_RELOAD_DESCRIPTION,
   HOT_RELOAD_TOOL,
 } from '../../src/tools/dsh_hot_reload.ts'
-import {
-  composeDescription,
-  DESCRIPTION_MAX_CHARS,
-  DESCRIPTION_MAX_LINES,
-} from '../../src/tools/describe.ts'
+import { composeDescription } from '../../src/tools/describe.ts'
 import {
   TOOL_ERROR_KINDS,
   toolResultProblem,
@@ -67,6 +63,7 @@ import {
   execWith,
   expectFail,
   expectOk,
+  expectSynthesizedDescription,
   renderText,
   run,
   splitRender,
@@ -1070,50 +1067,21 @@ describe('dsh_hot_reload · 形状（SHAPE §2.1 / §3.1 / §4.1）', () => {
     )
   }
 
-  it('描述四段：合成器与声明一致、行数 ≤4、字符 ≤240（B20a）', () => {
+  it('描述四段：合成器与声明一致（B20a 照不到的那一半）+ 行动类的代价段（本工具特有）', () => {
     const tool = createHotReloadTool({
       ...depsFor(configFor('/tmp/nowhere')),
       reload: makeHost({}),
     })
     const description = HOT_RELOAD_DESCRIPTION
 
-    expect(tool.description).toBe(composeDescription(description))
-    expect(description.what.trim()).not.toBe('')
-    expect(description.useWhen.trim()).not.toBe('')
-    // 行动类工具**必写** cost 段（§2 规则 ④：改不改状态 / 有没有 dryRun / 可不可逆）。
+    expectSynthesizedDescription(tool, composeDescription(description))
+    // 行动类工具**必写** cost 段（§2 规则 ④：改不改状态 / 有没有 dryRun / 可不可逆）——
+    // B20a 只判「写了但为空」的闭集形状，判不了「行动类必须有 cost」这个角色规则。
     expect(description.cost).toBeDefined()
     expect(description.cost).toContain('dryRun')
 
-    const present = [
-      description.what,
-      description.useWhen,
-      description.boundary,
-      description.cost,
-    ].filter((segment) => segment !== undefined && segment.trim() !== '').length
-    const lines = composeDescription(description).split('\n')
-    expect(lines.length).toBeGreaterThanOrEqual(present)
-    expect(lines.length).toBeLessThanOrEqual(DESCRIPTION_MAX_LINES)
-    expect(lines.length).toBeGreaterThanOrEqual(4)
-    expect((tool.description ?? '').length).toBeLessThanOrEqual(DESCRIPTION_MAX_CHARS)
-
-    // ⚠️ `defineTool` 把参数编译成了 JSON schema（`{ type, properties }`），
-    // 所以要点进 `properties` 才看得到每个参数的描述。直接 `Object.values(tool.parameters)`
-    // 会拿到 `'object'` 与 properties 对象本身 → 每条 `description` 都是 `undefined`
-    // → 合计恒为 0 → **判据空转**（活跃坑 18 的形状）。
-    const parameters = tool.parameters as {
-      properties?: Record<string, { description?: string }>
-    }
-    const props = parameters.properties ?? {}
-    const names = Object.keys(props)
-    expect(names.length, '一个参数都没读到 —— 判据空转').toBe(4)
-    for (const name of names) {
-      expect(props[name]?.description ?? '', `参数 ${name} 的描述是空的`).not.toBe('')
-    }
-    const total = Object.values(props).reduce(
-      (sum, item) => sum + (item.description?.length ?? 0),
-      0,
-    )
-    expect(total).toBeGreaterThan(0)
+    // 骨架的其余判据（段非空 / 行数与字符上界 / 连接符 / 参数描述下界）由红线 B20a
+    // 对闭集全量覆盖，这里不再逐字重抄（一处一事实）。
   })
 
   it('`data` 顶层**恰好**三键：成功与失败同形（B21）', async () => {

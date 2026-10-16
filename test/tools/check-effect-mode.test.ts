@@ -21,11 +21,7 @@ import {
   createEffectModeTool,
   EFFECT_MODE_TOOL,
 } from '../../src/tools/dsh_check_effect_mode.ts'
-import {
-  composeDescription,
-  DESCRIPTION_MAX_CHARS,
-  DESCRIPTION_MAX_LINES,
-} from '../../src/tools/describe.ts'
+import { composeDescription } from '../../src/tools/describe.ts'
 import { ensureToolResult, TOOL_ERROR_KINDS, toolResultProblem } from '../../src/lib/errors.ts'
 import {
   baselineMode,
@@ -42,6 +38,8 @@ import {
   execWith,
   expectFail,
   expectOk,
+  expectParameterDescriptionsNotBlank,
+  expectSynthesizedDescription,
   jumpingClock,
   recordingSpawn,
   renderText,
@@ -129,32 +127,19 @@ describe('dsh_check_effect_mode', () => {
   })
 
   describe('形状：描述层（SHAPE §2.1 冻结）', () => {
-    it('四段骨架：合成器与声明一致、行数 ≤4、字符 ≤240', async () => {
+    it('四段骨架：合成器与声明一致（B20a 照不到的那一半）+ 本工具的参数闭集', async () => {
       const dshHome = await tempDshHome()
       const tool = createEffectModeTool(depsFor(configFor(dshHome)))
       const description = CHECK_EFFECT_MODE_DESCRIPTION
 
       // 合成器与声明必须一致 —— 防止有人手写字符串绕过骨架。
-      expect(tool.description).toBe(composeDescription(description))
-      // 必填两段非空（滤空段不放宽它们）。
-      expect(description.what.trim()).not.toBe('')
-      expect(description.useWhen.trim()).not.toBe('')
-      // 上界：骨架就是四段；下界：段数不许被空格连接并成一行。
-      const present = [
-        description.what,
-        description.useWhen,
-        description.boundary,
-        description.cost,
-      ].filter((segment) => segment !== undefined && segment.trim() !== '').length
-      const lines = composeDescription(description).split('\n')
-      expect(lines.length).toBeGreaterThanOrEqual(present)
-      expect(lines.length).toBeLessThanOrEqual(DESCRIPTION_MAX_LINES)
-      expect((tool.description ?? '').length).toBeLessThanOrEqual(DESCRIPTION_MAX_CHARS)
+      // ⚠️ 这条 **B20a 照不到**（它的 `shape.text` 是从声明重新合成的，不读 `tool.description`）。
+      expectSynthesizedDescription(tool, composeDescription(description))
+      // 骨架的其余判据（段非空 / 行数与字符上界 / 连接符）由红线 B20a 对闭集全量覆盖，
+      // 这里不再逐字重抄（一处一事实）；本用例只留本工具特有的**精确参数名闭集**。
 
       // ⚠️ `defineTool` 把参数**编译成了 JSON schema**（`{ type, properties, required }`，
-      // 见 AGENTS 活跃坑 11）—— 直接 `Object.values(tool.parameters)` 拿到的是 `'object'`
-      // 字符串与 properties 对象本身，每条 `description` 都是 `undefined` ⇒ 合计恒为 0
-      // ⇒ 合计恒为 0，**两条下界判红**（SHAPE §10.0：下界才是防空转的那一半）。
+      // 见 AGENTS 活跃坑 11）—— 下界判定在 helpers.ts 的 `expectParameterDescriptionsNotBlank`。
       const parameters = tool.parameters as {
         properties?: Record<string, { description?: string }>
       }
@@ -165,13 +150,7 @@ describe('dsh_check_effect_mode', () => {
         'alreadyInDependencies',
         'dshHome',
       ])
-      let total = 0
-      for (const name of names) {
-        const text = props[name]?.description ?? ''
-        expect(text, `参数 ${name} 的描述是空的`).not.toBe('')
-        total += text.length
-      }
-      expect(total).toBeGreaterThan(0)
+      expectParameterDescriptionsNotBlank(tool)
     })
 
     it('恒定知识只在描述层出现一次（旧输出里那两句机制说明逐字不在输出里）', async () => {

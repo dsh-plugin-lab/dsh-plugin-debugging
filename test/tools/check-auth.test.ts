@@ -30,11 +30,7 @@ import {
   CHECK_AUTH_DESCRIPTION,
   CHECK_AUTH_TOOL,
 } from '../../src/tools/dsh_check_auth.ts'
-import {
-  composeDescription,
-  DESCRIPTION_MAX_CHARS,
-  DESCRIPTION_MAX_LINES,
-} from '../../src/tools/describe.ts'
+import { composeDescription } from '../../src/tools/describe.ts'
 import { ensureToolResult, TOOL_ERROR_KINDS, toolResultProblem } from '../../src/lib/errors.ts'
 import type { SpawnImpl } from '../../src/lib/exec.ts'
 import type { FetchImpl } from '../../src/lib/http.ts'
@@ -44,6 +40,8 @@ import {
   execWith,
   expectFail,
   expectOk,
+  expectParameterDescriptionsNotBlank,
+  expectSynthesizedDescription,
   renderText,
   run,
   splitRender,
@@ -131,45 +129,26 @@ describe('dsh_check_auth', () => {
   })
 
   describe('形状：描述层（SHAPE §2.1 冻结）', () => {
-    it('四段骨架：合成器与声明一致、行数 ≤4、字符 ≤240', () => {
+    it('四段骨架：合成器与声明一致（B20a 照不到的那一半）+ 本工具的参数闭集', () => {
       const tool = createCheckAuthTool(depsFor(configFor('/tmp/nowhere')))
 
       // 合成器与声明必须一致 —— 防止有人手写字符串绕过骨架。
-      expect(tool.description).toBe(composeDescription(CHECK_AUTH_DESCRIPTION))
-      expect(CHECK_AUTH_DESCRIPTION.what.trim()).not.toBe('')
-      expect(CHECK_AUTH_DESCRIPTION.useWhen.trim()).not.toBe('')
-      // 上界：骨架就是四段；下界：段数不许被空格连接并成一行（B20a 的下界）。
-      const present = [
-        CHECK_AUTH_DESCRIPTION.what,
-        CHECK_AUTH_DESCRIPTION.useWhen,
-        CHECK_AUTH_DESCRIPTION.boundary,
-        CHECK_AUTH_DESCRIPTION.cost,
-      ].filter((segment) => segment !== undefined && segment.trim() !== '').length
-      const lines = composeDescription(CHECK_AUTH_DESCRIPTION).split('\n')
-      expect(lines.length).toBeGreaterThanOrEqual(present)
-      expect(lines.length).toBeLessThanOrEqual(DESCRIPTION_MAX_LINES)
-      expect((tool.description ?? '').length).toBeLessThanOrEqual(DESCRIPTION_MAX_CHARS)
+      // ⚠️ 这条 **B20a 照不到**（它的 `shape.text` 是从声明重新合成的，不读 `tool.description`）
+      // —— `expectSynthesizedDescription` 是全仓唯一实现（helpers.ts）。
+      expectSynthesizedDescription(tool, composeDescription(CHECK_AUTH_DESCRIPTION))
+      // 骨架的其余判据（段非空 / 行数与字符上界 / 连接符）由红线 B20a 对闭集全量覆盖，
+      // 这里不再逐字重抄（一处一事实；本用例只留本工具特有的参数闭集）。
 
       // ⚠️ `defineTool` 把参数编译成了 JSON schema（`{ type, properties }`），所以要点进
-      // `properties` 才看得到每个参数的描述。直接 `Object.values(tool.parameters)` 会拿到
-      // `'object'` 与 properties 对象本身 → 每条 `description` 都是 `undefined` → 合计恒为 0
-      // → 合计恒为 0，**两条下界都会判红**（判据空转，活跃坑 18 的形状）。实测过：rawKeys=["type","properties"]、
-      // rawTotal=0。所以下面**必须有下界**（参数个数 > 0 且 total > 0），光有上界等于没判。
-      // 形状照 `test/tools/hot-reload.test.ts`（仓里唯一先写对的那份）。
+      // `properties` 才看得到每个参数的描述（活跃坑 18；下界判定在 helpers.ts 的
+      // `expectParameterDescriptionsNotBlank`）。**精确闭集是本工具的契约**：加/删参数同批改。
       const parameters = tool.parameters as {
         properties?: Record<string, { description?: string }>
       }
       const props = parameters.properties ?? {}
       const names = Object.keys(props)
-      expect(names.length, '一个参数都没读到 —— 判据空转').toBe(2)
-      for (const name of names) {
-        expect(props[name]?.description ?? '', `参数 ${name} 的描述是空的`).not.toBe('')
-      }
-      const total = Object.values(props).reduce(
-        (sum, item) => sum + (item.description?.length ?? 0),
-        0,
-      )
-      expect(total, '参数描述合计为 0 —— 判据空转').toBeGreaterThan(0)
+      expect(names, '一个参数都没读到 —— 判据空转').toEqual(['port', 'host'])
+      expectParameterDescriptionsNotBlank(tool)
     })
 
     it('搬走的恒定知识**只能**在描述层出现一次（旧的凭证 note 不再进输出）', () => {

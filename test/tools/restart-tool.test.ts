@@ -67,11 +67,7 @@ import {
   type RestartApprovalOutcome,
   type RestartHost,
 } from '../../src/tools/dsh_restart.ts'
-import {
-  composeDescription,
-  DESCRIPTION_MAX_CHARS,
-  DESCRIPTION_MAX_LINES,
-} from '../../src/tools/describe.ts'
+import { composeDescription } from '../../src/tools/describe.ts'
 import {
   cmdResult,
   carrierOf,
@@ -1576,11 +1572,8 @@ describe('dsh_restart · appExit 与审批服务的结构面', () => {
 // ── 15. 描述层与 L2 ───────────────────────────────────────────────────────
 
 describe('dsh_restart · 描述与 L2', () => {
-  it('描述是四段骨架、段序固定、在字符上限内', async () => {
+  it('描述承载**四件必须说清的事** + 行动类的代价段（骨架形状由红线 B20a 全量覆盖）', async () => {
     const text = composeDescription(RESTART_DESCRIPTION)
-    const lines = text.split('\n')
-    expect(lines.length).toBeLessThanOrEqual(DESCRIPTION_MAX_LINES)
-    expect(text.length).toBeLessThanOrEqual(DESCRIPTION_MAX_CHARS)
     // 四件必须说清的事（判据是「模型看不到会不会做错决定」）。
     // ⚠️ 措辞从 `cannot reach another instance` 压成 `not another instance`（2026-10-16）：
     // 事实没变（重启只作用于本进程所在的宿主），腾出来的字符给了边界段的**第四件**事实。
@@ -1590,6 +1583,8 @@ describe('dsh_restart · 描述与 L2', () => {
     expect(text, '描述没说桌面端不能重启 —— 那是真机缺陷的根因').toMatch(
       /Desktop hosts are refused/u,
     )
+    // 行动类工具**必写** cost 段 —— B20a 只判「写了但为空」的闭集形状，
+    // 判不了「行动类必须有 cost」这个角色规则（与 hot-reload 同一条角色判据）。
     expect(RESTART_DESCRIPTION.cost, '行动类工具必须写代价段').toBeTruthy()
   })
 
