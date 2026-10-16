@@ -516,3 +516,39 @@ export const CANCELLED_MESSAGE = 'the caller cancelled this execution'
 
 /** 取消语义的 `nextStep.why`：重试的判据按 `kind` 走，`cancelled` 不在其中。 */
 export const CANCELLED_WHY = 'cancellation is up to the caller; retrying the same call is pointless'
+
+/**
+ * 「再调一次时 `dshHome` 参数要不要带」的**唯一判定**。
+ *
+ * 规则：只在本次是**参数覆盖**（`dshHomeSource === 'tool-argument'`）时才带 ——
+ * 结论是关于**那个实例**的，下一步丢掉 home 会拿到另一个实例的答案，而两次输出
+ * 长得一样（同一张输出表），这种错看起来像成功。没覆盖时多印配置值只是噪声。
+ *
+ * 此前这条规则在 `dump_config` 与 `diagnose` 各实现一遍（后者注释还明写
+ * 「同 `dsh_dump_config.retryArgs` 的理由」）—— 改一处必漏另一处（审计 B6）。
+ *
+ * @param resolved 带 `dshHomeSource` 的配置投影（各工具的 `key.resolved` 形状即可）。
+ * @returns 应并入重试参数的 `dshHome` 键值；非跨实例时为空对象。
+ */
+export function homeRetryArg(resolved: {
+  dshHomeSource?: unknown
+  dshHome?: unknown
+}): Record<string, string> {
+  if (resolved.dshHomeSource !== 'tool-argument') return {}
+  return typeof resolved.dshHome === 'string' ? { dshHome: resolved.dshHome } : {}
+}
+
+/**
+ * 守卫兜底那一支的 `keyText` 开头 —— **key 不是对象时该印什么**的唯一判定。
+ *
+ * 规则：**不许静默返回空数组**（守卫把结果换掉了，那一刻模型最该知道「字段都不可信」，
+ * 静默会让兜底看起来像一次正常的空结果）。此前 5 份逐字相同，而 `check_effect_mode`
+ * 走样成 `return []` —— 同一语义 6 个落点、1 处违约，没有任何判据照得到（审计 B3）。
+ *
+ * @param key 本次的 `key`（守卫合成的兜底里是 `{}`）。
+ * @returns 兜底行数组；`key` 合法时返回 `undefined`，调用方继续正常路径。
+ */
+export function guardKeyLines(key: unknown): string[] | undefined {
+  if (!key || typeof key !== 'object') return [GUARD_FALLBACK_LINE]
+  return undefined
+}

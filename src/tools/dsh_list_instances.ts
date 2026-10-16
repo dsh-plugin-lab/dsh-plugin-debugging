@@ -49,6 +49,7 @@ import { listListeners, type ListenerCandidate } from '../lib/ports.js'
 import type { RenderTable } from '../lib/render.js'
 import { composeDescription, type ToolDescription } from './describe.js'
 import {
+  guardKeyLines,
   asAudit,
   CANCELLED_MESSAGE,
   CANCELLED_WHY,
@@ -661,8 +662,10 @@ function nextStepFor(
  * @param key 本次的 `key`。
  */
 function keyText(key: ListInstancesKey): string[] {
-  // 渲染层**绝不抛**（`render.ts` 的纪律）：兜底里 `key` 是 `{}`。
-  if (!key || typeof key !== 'object') return [GUARD_FALLBACK_LINE]
+  // 渲染层**绝不抛**（`render.ts` 的纪律）。「key 不是对象时印什么」的唯一判定
+  // 在 shared.ts 的 guardKeyLines —— **不许静默返回空数组**。
+  const fallback = guardKeyLines(key)
+  if (fallback !== undefined) return fallback
   const lines: string[] = [scanLine(key.scan)]
   if (!Array.isArray(key.instances)) {
     lines.push(guardFallbackLine('instances'))
@@ -707,4 +710,3 @@ function instanceLine(item: InstanceKey): string {
 }
 
 /** 兜底行：`ensureToolResult` 合成的结果里 `key` 是 `{}`。 */
-const GUARD_FALLBACK_LINE = guardFallbackLine('scan')

@@ -75,6 +75,8 @@ import { probeHmr, type HmrProbe } from '../lib/effect.js'
 import type { RenderTable } from '../lib/render.js'
 import { composeDescription, type ToolDescription } from './describe.js'
 import {
+  guardKeyLines,
+  homeRetryArg,
   asAudit,
   assertResolvedDshHome,
   CANCELLED_MESSAGE,
@@ -851,9 +853,8 @@ function invocationKey(invocation: DumpInvocation): InvocationKey {
  * @param resolved `key` 里的配置投影。
  */
 function retryArgs(resolved: ResolvedKey): Record<string, string> {
-  return resolved.dshHomeSource === 'tool-argument'
-    ? { profile: resolved.profile, dshHome: resolved.dshHome }
-    : { profile: resolved.profile }
+  // 「跨实例时 dshHome 要不要带」的唯一判定在 shared.ts 的 homeRetryArg。
+  return { profile: resolved.profile, ...homeRetryArg(resolved) }
 }
 
 /**
@@ -900,10 +901,11 @@ function countByClass(
  * @param key 本次的 `key`。
  */
 function keyText(key: DumpConfigKey): string[] {
-  // 渲染层**绝不抛**（`render.ts` §3.1）：`ensureToolResult` 合成的兜底里 `data.key` 是 `{}`
-  // （`lib/errors.ts` 的 `malformedResult`），数组字段可能整块缺席 —— `for…of undefined`
-  // 会当场抛。`key` 本身不是对象时也要有输出，**不许静默返回空数组**。
-  if (!key || typeof key !== 'object') return [GUARD_FALLBACK_LINE]
+  // 渲染层**绝不抛**（`render.ts` §3.1）：守卫合成的兜底里数组字段可能整块缺席 ——
+  // `for…of undefined` 会当场抛。「key 不是对象时印什么」的唯一判定在 shared.ts 的
+  // guardKeyLines —— **不许静默返回空数组**。
+  const fallback = guardKeyLines(key)
+  if (fallback !== undefined) return fallback
   const lines: string[] = [resolvedLine(key.resolved)]
   // 「缺席」与「空数组」不是一回事：兜底路径上不许把「不知道」印成「没有」
   // （活跃坑 18 的三值纪律，`listStartupLogs` 那边同样处理）。
@@ -968,8 +970,6 @@ function coverageLine(flags: readonly string[]): string {
  * 那一刻模型最该知道的事实正是「这个结果是守卫合成的，里面的字段都不可信」。
  * 省略这一行会让兜底**静默**（看起来像一次正常的空结果）。
  */
-const GUARD_FALLBACK_LINE = guardFallbackLine()
-
 /**
  * `resolved:` 那一行 —— 整份结论的前提，也是 `nextStep.args.profile` 的取值来源。
  *

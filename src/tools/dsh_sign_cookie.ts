@@ -41,10 +41,10 @@ import {
 import type { RenderTable } from '../lib/render.js'
 import { composeDescription, type ToolDescription } from './describe.js'
 import {
+  guardKeyLines,
   assertResolvedDshHome,
   CANCELLED_WHY,
   effectiveConfig,
-  guardFallbackLine,
   resolvePort,
   resolvedLine as sharedResolvedLine,
   toOutput,
@@ -389,8 +389,9 @@ export { cookieHeader }
  * @param key 本次的 `key`。
  */
 function keyText(key: SignCookieKey): string[] {
-  // 渲染层绝不抛（红线 B25）：守卫合成的兜底里 `data.key` 可能是 `{}`。
-  if (!key || typeof key !== 'object') return [GUARD_FALLBACK_LINE]
+  // 渲染层绝不抛（红线 B25）。「key 不是对象时印什么」的唯一判定在 shared.ts 的 guardKeyLines。
+  const fallback = guardKeyLines(key)
+  if (fallback !== undefined) return fallback
   const lines: string[] = [resolvedLine(key.resolved)]
   if (key.authority !== undefined) lines.push(`authority: ${key.authority}`)
   if (key.cookieName !== undefined) lines.push(`cookie name: ${key.cookieName}`)
@@ -407,8 +408,6 @@ function keyText(key: SignCookieKey): string[] {
  *
  * 逐字常量现住在 `shared.ts`（此前各工具各抄一份，靠 `@see` 手工同步）。
  */
-const GUARD_FALLBACK_LINE = guardFallbackLine()
-
 /**
  * 生效配置那一行（与其它工具逐字一致，避免同一种事印出两种说法）。
  *

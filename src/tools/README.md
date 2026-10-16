@@ -10,13 +10,14 @@
 
 ## 共享助手住在哪
 
-三类语义 + 一组通用助手，各只有**唯一实现**，都住在 `shared.ts`；工具文件里出现第二份即为违例（规则见 [AGENTS.md](AGENTS.md)）。
+跨工具的语义各只有**唯一实现**，住处见下表；工具文件里出现第二份即为违例（规则与判据见 [AGENTS.md](AGENTS.md) 的 B30 那条）。
 
 | 类 | 助手 | 作用 |
 |---|---|---|
 | 装配 | `withHomeOverride` / `withCallHome` / `spawnWithHome` / `childEnvFor` | 把本次调用的 `dshHome` 同时叠进**配置**与**子进程环境**（两层必须同改） |
 | 投影 | `effectiveConfig` / `resolvePort` | 把「这次实际用的是哪份配置、哪个端口」摊成可见证据 |
-| 渲染 | `resolvedLine` / `guardFallbackLine` | L2 的 `resolved:` 行与守卫兜底行（模型在工具之间读的是同一张脸） |
-| 通用 | `asAudit` / `oneLine` / `toOutput` / `toolOutput` | 类型边界转型、L2 单行化、返回值收敛 |
+| 渲染 | `resolvedLine` / `guardFallbackLine` / `guardKeyLines` | L2 的 `resolved:` 行、守卫兜底行、以及「key 不是对象时印什么」的判定（模型在工具之间读的是同一张脸） |
+| 语义 | `spawnFailureOf` / `spawnFailureMessage` / `homeRetryArg` | 起不了 `dsh` 的 kind 映射与 message 模板、跨实例重试要不要带 `dshHome` 的判定 |
+| 通用 | `asAudit` / `oneLine` / `toOutput` / `toolOutput` / `CANCELLED_MESSAGE` / `CANCELLED_WHY` | 类型边界转型、L2 单行化、返回值收敛、取消语义的一对模板 |
 
-`resolvedLine` 的字段顺序、端口取舍与逐字段防御都在这一处；各工具**只决定要不要端口 / 目录**，不自己拼字符串。
+`resolvedLine` 的字段顺序、端口取舍与逐字段防御都在这一处；各工具**只决定要不要端口 / 目录**，不自己拼字符串。落点不都在 `shared.ts`：取异常 code 的正典在 `../lib/errors.ts`，relaunch 措辞的正典在 `../lib/carrier.ts` —— B30 按「名/片段 → 唯一落点」判，不按「只许在 shared.ts」判。

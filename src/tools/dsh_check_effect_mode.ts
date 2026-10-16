@@ -82,6 +82,7 @@ import { resolveDshLaunch, runDump } from '../lib/dump.js'
 import type { RenderTable } from '../lib/render.js'
 import { composeDescription, type ToolDescription } from './describe.js'
 import {
+  guardKeyLines,
   asAudit,
   assertResolvedDshHome,
   CANCELLED_MESSAGE,
@@ -874,7 +875,11 @@ function nextStepFor(mode: EffectMode, profile: string, carrier: CarrierObservat
 function keyText(key: EffectModeKey): string[] {
   // 渲染层**绝不抛**（`render.ts` 的纪律）：形状守卫只看「`key` 是对象」，
   // 所以 `{}` 这种合法但空的对象也会走到这里 —— 不能假定字段都在。
-  if (key === null || typeof key !== 'object') return []
+  // 「key 不是对象时印什么」的唯一判定在 shared.ts 的 guardKeyLines。
+  // ⚠️ 此前这里走样成 `return []`（其余五个工具都印兜底行）—— 同一语义
+  // 6 个落点 1 处违约，审计 B3 揪出后收敛：**不许静默返回空数组**。
+  const fallback = guardKeyLines(key)
+  if (fallback !== undefined) return fallback
   const lines: string[] = []
   if (key.stage !== undefined && key.stage !== 'answered') lines.push(`stage: ${key.stage}`)
   if (key.mode !== undefined) lines.push(`mode: ${key.mode}`)

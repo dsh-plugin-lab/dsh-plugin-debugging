@@ -56,6 +56,8 @@ import {
 } from '../lib/startup-log.js'
 import { composeDescription, type ToolDescription } from './describe.js'
 import {
+  guardKeyLines,
+  homeRetryArg,
   asAudit,
   assertResolvedDshHome,
   CANCELLED_MESSAGE,
@@ -801,10 +803,9 @@ function nextStepFor(input: {
 /**
  * 「再跑一次本工具 / 派给下一个工具」用的参数：**跨实例时把 `dshHome` 一起带上**。
  *
- * 为什么必须带（同 `dsh_dump_config.retryArgs` 的理由）：这次的结论是关于**那个实例**的，
- * 下一步若丢掉 home，模型会拿到另一个实例的答案 —— 而两次调用的输出长得一模一样
- * （同一张输出表），这种错**看起来像成功**。只在**参数覆盖过**时才带：没覆盖时再调一次
- * 本来就是对的，多印一个配置里的值只会变成噪声（L2 规则：只放本次非默认的）。
+ * 为什么必须带（理由与判定都在 shared.ts 的 `homeRetryArg`，一处一事实）：只在
+ * **参数覆盖过**时才带 —— 没覆盖时再调一次本来就是对的，多印一个配置里的值只会
+ * 变成噪声（L2 规则：只放本次非默认的）。
  *
  * 值必须在模型看得见的地方（B17）：`key.resolved` 会渲染成 L2 的 `resolved: … dshHome=…` 行。
  *
@@ -815,9 +816,7 @@ function retryArgs(
   resolved: ResolvedKey,
   extra: Record<string, JsonValue> = {},
 ): Record<string, JsonValue> {
-  return resolved.dshHomeSource === 'tool-argument'
-    ? { ...extra, dshHome: resolved.dshHome }
-    : extra
+  return { ...extra, ...homeRetryArg(resolved) }
 }
 
 /**
@@ -1091,10 +1090,11 @@ function toStartupLogsKey(startup: StartupLogsResult): StartupLogsKey {
  * @param key 本次的 `key`。
  */
 function keyText(key: DiagnoseKey): string[] {
-  // 渲染层**绝不抛**（`render.ts` §3.1）：`ensureToolResult` 合成的兜底里 `data.key` 是 `{}`
-  // （`lib/errors.ts` 的 `malformedResult`），数组字段可能整块缺席 —— `for…of undefined`
-  // 会当场抛。`key` 本身不是对象时也要有输出，**不许静默返回空数组**。
-  if (!key || typeof key !== 'object') return [GUARD_FALLBACK_LINE]
+  // 渲染层**绝不抛**（`render.ts` §3.1）：守卫合成的兜底里数组字段可能整块缺席 ——
+  // `for…of undefined` 会当场抛。「key 不是对象时印什么」的唯一判定在 shared.ts 的
+  // guardKeyLines —— **不许静默返回空数组**。
+  const fallback = guardKeyLines(key)
+  if (fallback !== undefined) return fallback
   const lines: string[] = [resolvedLine(key.resolved)]
   // 跨实例：紧跟 `resolved:` 印一行「两半分开报」的**可判**记号。它与 L1 那句同一个事实，
   // 但落在不同的层 —— L1 给判定、L2 给模型做下一步时要瞄的那两格（谁是目标的、谁是本进程的）。
@@ -1146,7 +1146,6 @@ function keyText(key: DiagnoseKey): string[] {
  * 那一刻模型最该知道的事实正是「这个结果是守卫合成的，里面的字段都不可信」。
  * 省略这一行会让兜底**静默**（看起来像一次正常的空结果）。
  */
-const GUARD_FALLBACK_LINE = guardFallbackLine()
 
 /**
  * `resolved:` 那一行。
