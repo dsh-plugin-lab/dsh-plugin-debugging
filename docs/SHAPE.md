@@ -502,13 +502,21 @@ data
 | ① 重启循环熔断 | 短窗口内重启次数超阈值 → 拒绝 | `restart-loop` |
 | ② 其他会话在跑 | 除调用方自己以外的活跃会话仍在执行回合 → 拒绝；**调用方自己的会话不算忙** | `busy` + 列出阻塞者 |
 | ③ bundle 表解析不了 | profile 的 `bundles` / patch 解析失败 → 拒绝 | `bad-composition` + 指路 `dsh_dump_config` |
-| ④ 拿不到启动命令 | 无法确定「怎么把宿主重新拉起来」→ 拒绝（**不猜**） | `no-launch-command` |
+| ④ **载体没有已实测的回归路线** | **先问「这个载体能不能把宿主带回来」，再问「命令拼不拼得出来」**：路线为 `none` ⇒ 拒绝；路线是 `task-scheduler` 但定不出启动命令 ⇒ 也拒绝（**不猜**） | `no-relaunch-route` / `no-launch-command` |
 
 闸②的判据已可落地（`agents.list` 的 `status` / `inbox`、`jobs.list`、`workspace/session-activity`），契约与一条 **fail-closed 要求**见 [HOST-CONTRACTS.md](HOST-CONTRACTS.md) §2.3（忙判定与唤醒通道）。
 
-**流程（顺序是判据）**：闸门检查 → **审批门** → **写 marker（落盘，必须在拉起之前）** → 拉起新进程 → **本进程退出** →（新进程）读 marker → 恢复会话 → 注入 notice → **把 marker 标为「已消费」**（**不是删除**：宿主 `fs` 缝上没有任何删除方法 —— 状态迁移替代删除的裁决见 §10.3 与 [HOST-CONTRACTS.md](HOST-CONTRACTS.md) §2.5）。
+**闸④的语义在 2026-10-16 变更过一次，但四道闸的数量没变** —— 变的是闸④的观测更准。原判据只问「命令拼不拼得出来」，而 2026-10-15 的真机缺陷恰好是**命令拼得出来却拼错了**（桌面宿主上 `argv` 齐全 ⇒ 旧闸④放行、宿主退出、没人回来）⇒ 现在**先问路线、再问命令**。两个拒绝码的分工：
 
-**实现落点**：库半边 `src/lib/restart.ts`（marker + 四道闸 + 恢复判定）· 真实 IO `src/lib/restart-fs.ts`（走宿主 `ctx.fs`）· 恢复半 `src/lib/restart-recovery.ts`（由 `src/index.ts` 调度）· 工具壳 `src/tools/dsh_restart.ts`（四道闸 → 审批门 → 写 marker → 计划任务拉起 → `appExit`）；注册处在 `src/tools/index.ts`。
+- `no-relaunch-route` —— **现实**问题：这个载体**结构上**没有通道。三档：桌面宿主（只有 Electron 壳能 `app.relaunch()`）、非 win32（没有已实测路线）、认不出来（不猜）。重试不会让它变。
+- `no-launch-command` —— **取值**问题：路线在（`task-scheduler`），但启动命令定不出来。改配置可能让它变。
+
+两档的措辞（`verdict` / `remedy`）**只写在 `src/lib/carrier.ts` 的 `relaunchRefusalFor` 一处**，判定在 `src/lib/restart.ts` 的 `judgeLaunchCommand`。载体这一维的宿主事实（谁拉起桌面宿主、插件侧为什么没有通道）在 [HOST-CONTRACTS.md](HOST-CONTRACTS.md) §2.7 —— 本文不重述。
+
+**流程（顺序是判据）**：闸门检查 → **审批门** → **写 marker（落盘，必须在拉起之前）** → 拉起新进程 → **本进程退出** →（新进程）读 marker → 恢复会话 → 注入 notice → **把 marker 标为「已消费」**（**不是删除**：宿主 `fs` 缝上没有任何删除方法 —— 状态迁移替代删除的裁决见 §10.3 与 [HOST-CONTRACTS.md](HOST-CONTRACTS.md) §2.5）。
+**桌面载体在「闸门检查」这一步就拒绝，也就是动手之前** —— 不写 marker、不拉起、不退出，一条副作用都不发生；这正是闸门排在审批门之前的意义。
+
+**实现落点**：库半边 `src/lib/restart.ts`（marker + 四道闸 + 恢复判定）· `src/lib/carrier.ts`（载体观测 + 只认已实测路线的回归路线表）· 真实 IO `src/lib/restart-fs.ts`（走宿主 `ctx.fs`）· 恢复半 `src/lib/restart-recovery.ts`（由 `src/index.ts` 调度）· 工具壳 `src/tools/dsh_restart.ts`（四道闸 → 审批门 → 写 marker → 计划任务拉起 → `appExit`）；注册处在 `src/tools/index.ts`。
 
 **四步的通道都已核过**（证据与分级在 [HOST-CONTRACTS.md](HOST-CONTRACTS.md) §2，这里只留结论）：
 
@@ -548,6 +556,7 @@ data
 **验收**：四道闸**各一条拒绝用例**；真机一条「重启 → 会话被唤醒 → notice 到达发起者」闭环；反向用例「marker 存在但新进程没起来」→ 下次启动仍能恢复或明确报「上次重启未完成」；真机判据由**独立角色**跑，写者不自己验自己（[ARCHITECTURE.md](ARCHITECTURE.md) §8）。
 
 **协作纪律（契约，不是建议）**：`dsh_check_effect_mode` 先行 —— `mode=hot` 且 `hmr=present` → 通常不需要写侧工具 `[已实测]`；`mode=hot` 但 `hmr=absent` → 改 config **必须重启** `[已实测]`；`mode=hot` 且 `hmr=present-conditional`（`disabled:` 是运行时表达式 ⇒ 当时按**可用**处理，条件进 L1/L2）→ **按 `present` 那档走，但结论只在那个表达式求值为启用时成立**，这一档**没有实测**；`mode=restart-required` → 走 `dsh_restart`。
+⚠️ **保留 profile（`desktop`）上这一节的协作纪律不适用**：那里的 `hmr` 是**不可核实**（CLI 拒绝那个 profile 的 dump ⇒ 组合树读数拿不到），工具会按「**这次的答案是否依赖 hmr**」分岔 —— 依赖的走诚实失败、不依赖的照常回答。结论与真源见 [HOST-CONTRACTS.md](HOST-CONTRACTS.md) §2.7，本文不重述机制。
 **拒绝不是失败**：闸门拒绝是设计的一部分，模型应原样报给用户。
 **闸②（别的会话在飞）另有一个显式逃生口 `force: true`**（维护者 2026-10-14 拍板）：
 它**只覆盖闸②** —— ①③④ 是「这件事根本做不成」，不是「用户知情后的选择」，因此**不可绕过**；
@@ -756,6 +765,7 @@ interface ToolResult { content: ContentBlock[]; isError: boolean; meta?: JsonVal
 - **`SKILL.md`**：它是**运行时载荷**，不是文档；但它**跟着插件一起演化**。**新增/改名工具、改动写侧语义、改动「干预」范围时，同批改它** —— 漏改是**静默**的（B12 只查 frontmatter 与正文长度，**不比对原件**；B9 只钉工具名闭集）。⇒ 正文里**不带工具名**的假话（例：一句「本插件不提供 X」）两条红线都抓不到，只能靠人工通读。
 - **`AGENTS.md` 的待办**：`SKILL.md` **已解冻**（2026-10-13 拍板，待办里已改成「跟着插件一起演化」）；配套的 **B12 断言对象**也已从「与原件逐字一致」改成**结构约束**（见 §10 的 B12 修订注）。**再改技能正文时，同批核那两条待办是否要跟着动。**
 - **两份门面**（[README.md](../README.md) / [README_zh.md](../README_zh.md)）：配置表、工具清单、只读纪律的措辞**成对改**。
+- **载体这一维（闸④ / 拒绝码）**：拒绝码闭集在 §6.1 那张表与 `src/lib/restart.ts` 的 `RefusalCode`；**模型可见的措辞**在 `src/tools/dsh_restart.ts` 的 `RESTART_DESCRIPTION` 与 `src/lib/carrier.ts` 的 `relaunchRefusalFor`；宿主事实在 [HOST-CONTRACTS.md](HOST-CONTRACTS.md) §2.7；两份门面的 `dsh_restart` 那一节与平台支持那一节也引用了它。**改任一处都要同批看其余几处。**
 - **描述预算（§2）**：**加一个工具 = 系统提示多占一段** —— 那个字符数是**实测值、会漂**，别抄；加工具时同批复核 §2 的结论是否还成立。
 
 ---
@@ -918,7 +928,7 @@ $DSH_HOME/dsh-plugin-debugging/
 | `dsh-plugin-reload` 0.2.1 | reina4xa/dsh-plugin-reload | 工具 `reload_plugin`，按 entry id / 模块名 / MCP `serverName` 重启单个 entry | 三种定位方式；「先 import 成功再换 fiber」的顺序（**本仓已实现并实测**） | 它是工具调用触发的单 entry 重启；我们先判「改动属于哪一档」 |
 | `dsh-hot-reload` 0.2.4 | stuarthu/dsh-hot-reload | watch profile 的锁文件，已加载插件版本变化时原位替换；**失败过的版本不自动重试** | 「不自动重试失败版本」这条我们原本没有 | 它事件驱动、面向升级；我们工具调用驱动、面向刚改完源码 |
 | `dsh-hotswap` 0.1.1 | HongzhongL/dsh-hotswap | Web 侧热启用/停用/重启；把开关写进 profile patch 的托管区块；**保护名单** | **保护名单**；`entry.update({disabled})` 是 Loader 级开关的正解 | 它允许写 profile；**本仓不写 profile** |
-| `dsh-smart-restart` 0.5.1 | edusrez/dsh-smart-restart | 启动检测到新进程接管就 notice 唤醒；记录调用方会话；**canary 预检**；从 cgroup 识别 systemd | **canary 预检**（我们四道闸没有）；记录调用方会话 | 它是 systemd/Linux 导向；本机是 Windows，闸④必须处理「拿不到启动命令」 |
+| `dsh-smart-restart` 0.5.1 | edusrez/dsh-smart-restart | 启动检测到新进程接管就 notice 唤醒；记录调用方会话；**canary 预检**；从 cgroup 识别 systemd | **canary 预检**（我们四道闸没有）；记录调用方会话 | 它是 systemd/Linux 导向；本机是 Windows，闸④必须处理「载体没有已实测的回归路线」（其次才是「拿不到启动命令」） |
 | `dsh-restart` 0.1.2 | anweat/dsh-restart | 工具 + `/restart` 命令；**自 0.1.3-alpha.4 移除内置 detached watchdog**，理由是交给外部管理器 | **「不自建看门狗」的判例**（他们做了又撤） | 我们的 §6.1 已改为「优先交给外部」 |
 | `dsh-desktop-auto-restart` 0.1.0 | comer2031/dsh-desktop-auto-restart | 工具默认不注册；先写「待唤醒清单」再调脚本；**宿主繁忙时拒绝，调用方自己不算忙**；无 `force`；按端口 + 精确 PID | 与 §6.1 最接近的一份；另有三条硬信息：执行策略 `Restricted` 时脚本静默不执行而 WMI 仍返回 rc=0（**假成功**）；WMI 建进程会被安全软件记敏感动作；非桌面形态直接拒绝 | 它靠 PowerShell + WMI + user32，只支持 Windows 桌面端 |
 

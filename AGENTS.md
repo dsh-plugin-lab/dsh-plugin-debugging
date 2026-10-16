@@ -158,6 +158,8 @@ git diff --check
       决策与「静态写进 preset 为何被否决」→ [.agents/notes/2026-10-13-skill-registers-twice-dynamic-scope.md](.agents/notes/2026-10-13-skill-registers-twice-dynamic-scope.md)。
 - [ ] **`SkillReport.scoped` 真机不可观测** —— `state.skill` 没有对外暴露面，pluginInventory 也不含插件内部状态。
       v1.1 可考虑让本仓某个工具报出「技能半边注册成了没有、几个 agent」，这样「注册了但没生效」不必靠 winner 反推。
+- [ ] **桌面载体上插件侧没有回归路线** —— `dsh_restart` 在那里只能**如实拒绝**（拒绝码 `no-relaunch-route`）：能重启它的只有 Electron 壳，而 Host↔壳的 IPC 是闭集、对页面的通道里没有 restart / relaunch。要让它真正可用，**得上游在闭集里加一条重启请求**（落地后本仓只多一个 `relaunchRouteFor` 取值 + 一条实现）。
+      事实真源 → [docs/HOST-CONTRACTS.md](docs/HOST-CONTRACTS.md) §2.7；决策与被否掉的替代方案 → [.agents/notes/2026-10-16-desktop-carrier-decision.md](.agents/notes/2026-10-16-desktop-carrier-decision.md)。
 - [x] **`SKILL.md` 冻结**（维护者 2026-10-15 拍板）：技能正文**冻在 0.4.0 那一版**，不再跟着插件演化。
       理由是收益判断：一轮无背景冷读显示，「问题」里**大部分其实是技能与工具的设计分工**，再改误伤多于修好。
       冻结声明写在那次提交的提交信息里；正文见 [skills/dsh-plugin-debugging/SKILL.md](skills/dsh-plugin-debugging/SKILL.md)。
@@ -179,7 +181,7 @@ git diff --check
 6. rank **升序、小者胜**；runtime 恒 250 且无旋钮，只在**同层内**比较 ⇒ 压得住 custom / user，**压不住** project-dsh(100) / project-agents(200)。⚠️ 被 shadow 完全静默。
 7. **技能不进系统提示词**：模型只先看到 `name` + `description` ⇒ 描述写不好 = 插件不存在。
 8. `--dump-config` **退出码恒 0**，不能当门禁；`--dump-config-schema` 退出码 1 = 有 error。已知误报看 error 的 `path` 指不指向**你改过的那一行**。
-9. **`--profile` 不会到达插件**（CLI 自己吃掉了）⇒ 只能从 env `DSH_PROFILE` / `DSH_PROFILE_DIR` 读。
+9. **`--profile` 不会到达插件**（CLI 自己吃掉了）⇒ 只能从 env `DSH_PROFILE` / `DSH_PROFILE_DIR` 读。⚠️ **但 profile 身份不要从这里读** —— 见坑 41。
 10. 装带安装脚本的依赖要**先明确放行字段**，否则本机与 CI 行为不一致（本仓为 `esbuild` 的 postinstall 踩过）。
 11. `defineTool` 的 `output.schema` 要**作者层字面量**，结构强制挪到返回前的 `ensureToolResult()`。⚠️ 喂已标注的 schema 会报**方向相反**的类型错，`execute` 静默退化成 `Promise<never>`。
 12. `cordis.patch.yml` 的 `insert:` 用裸包名时，**只有该包能从「被启动 profile 的目录」解析到才挂得上**。⚠️ 组合树照样有行、退出码 0，运行期 `failed to import` —— 行在、功能不在。
@@ -204,10 +206,11 @@ git diff --check
 31. **提交时不许 `git add -A`**：有并发写者时只 add 自己的路径 —— 提交者不能替别人决定提交边界。
 32. **本仓 `.ps1` 必须 UTF-8 *with BOM***（PS5.1 无 BOM 按 GBK 解码 ⇒ 中文注释直接解析失败）。⚠️ prettier 跳过、CI 不解析，本机与 CI 全绿也照不出来。
 33. **包管理器翻转时** `.gitignore`、两个 workflow、`.prettierignore`、`.pre-commit-config.yaml`、`release-guard.mjs` 的非产物清单**必须同批翻**。⚠️ 漏 `.gitignore` 最凶：锁文件被本地忽略、CI 缺它。
-34. **「配置会被重读」的触发者住在 hmr 里**；判断 hmr 只有两条真源：**profile 文件**与 **`--dump-config`**。⚠️ 别拿 `ctx.get('hmr')` 当探针（挂着也是 `undefined`）。
+34. **「配置会被重读」的触发者住在 hmr 里**；判断 hmr 只有两条真源：**profile 文件**与 **`--dump-config`**。⚠️ 别拿 `ctx.get('hmr')` 当探针（挂着也是 `undefined`）。⚠️ **保留 profile（`desktop`）上第二条取不到**（CLI 拒绝那个 profile 的 dump）—— 那一档读什么，见 [docs/HOST-CONTRACTS.md](docs/HOST-CONTRACTS.md) §2.7。
 35. **别拿不存在的字段当判据**：`resolved` 只有 `{ dshHome, dshHomeSource, profile, port, portSource }` ⇒ 验「重读」看 `resolved.profile`。
 36. 共享工作树里**别用 `git reset --hard` 同步分支** —— **「工作区干净」≠「没人在写」**，落进窗口的改动会无声消失。
 37. **「断言症状消失」≠「断言根因修好」** ⇒ 修复里带兜底 `try/catch` 时，**先写护栏、再把 bug 改回去跑一遍**。**推断不算钉死，变异才算。**
 38. **`edit` 工具会剥掉 `.ps1` 的 BOM** ⇒ 用 `[IO.File]::WriteAllText(…, UTF8Encoding($true))` 写回并复核头三字节。
 39. `tool.parameters` 是**编译后的 JSON schema** ⇒ 参数描述的判据必须点进 `.properties`，并配**下界**（个数 > 0 / 描述非空 / 合计 > 0）。
 40. **测试替身被静默丢弃 ⇒ 判据退回真实世界**：overrides 用**显式对象构造**，并**给替身配调用计数、断言它真被调用过**。⚠️「没生效」与「生效了」在绿的时候长得一样。
+41. **`DSH_PROFILE` 不是 profile 身份的真源**（真源是运行时的 `profileContext.name`：启动器在建树之前 `provide`，检索串 `provide('profileContext'`）。⚠️ **它记的不是这个宿主的身份** —— 可能来自启动 shell 的**继承**、也可能来自本仓 `DEFAULT_PROFILE` 的**兜底**，**成因判「推不出来」**（本机没有用户级 / 机器级持久 `DSH_PROFILE`）；两种成因**后果相同**：**按它拼重启命令行会拉起另一个 profile**（2026-10-15 真机缺陷：桌面宿主上拼出 `--profile web`，恢复半的成果落进了错的实例）。证据与决策 → [.agents/notes/2026-10-16-desktop-carrier-decision.md](.agents/notes/2026-10-16-desktop-carrier-decision.md)、宿主事实 → [docs/HOST-CONTRACTS.md](docs/HOST-CONTRACTS.md) §2.7。
