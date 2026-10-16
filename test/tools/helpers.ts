@@ -13,6 +13,7 @@ import { afterEach } from 'vitest'
 
 import type { ResolvedConfig } from '../../src/contracts.ts'
 import { WORKLOAD_DEFAULT_BUDGET_MS } from '../../src/lib/timeouts.ts'
+import { observeCarrier, type CarrierKind, type CarrierObservation } from '../../src/lib/carrier.ts'
 import type { CommandResult, RunCommandOptions, SpawnImpl } from '../../src/lib/exec.ts'
 import type { FetchImpl } from '../../src/lib/http.ts'
 import { createToolDeps, type ToolDeps } from '../../src/tools/shared.ts'
@@ -143,6 +144,7 @@ export function depsFor(
     env?: NodeJS.ProcessEnv
     now?: () => number
     loader?: () => LoaderReadResult
+    carrier?: CarrierObservation
   } = {},
 ): ToolDeps {
   return createToolDeps(config, {
@@ -151,7 +153,54 @@ export function depsFor(
     env: overrides.env ?? {},
     ...(overrides.now === undefined ? {} : { now: overrides.now }),
     ...(overrides.loader === undefined ? {} : { loader: overrides.loader }),
+    // ⚠️ **不注入就落 `UNKNOWN_CARRIER`**（`createToolDeps` 的兜底）：那是 fail-closed 的
+    // 那一端 —— 忘了注入的用例会在 `dsh_restart` 闸④上响亮失败，而不是悄悄拿到一条
+    // 它在真机上并不拥有的回归路线（`task-scheduler`）。凡是断言「能拉起」的用例
+    // **必须**显式给 `carrierOf('cli')`。
+    ...(overrides.carrier === undefined ? {} : { carrier: overrides.carrier }),
   })
+}
+
+/**
+ * 造一个**指定载体**的观测 —— 判据里注入载体用。
+ *
+ * ## 为什么是「派生」而不是手搓字面量
+ *
+ * 手搓 `{kind, profile, platform, rule, evidence}` 会成为 `observeCarrier` 之外的
+ * **第二份事实源**：将来加一条判据时，夹具仍然喂着旧形状，于是判据在真机上失效而测试全绿
+ * （本仓「判据滞后于实现」那一族）。所以这里一律经 `observeCarrier` 走真实判据，
+ * 只把输入换掉。
+ *
+ * ## 为什么不读当前进程
+ *
+ * `argv` / `env` / `profileContext` 全部**显式给**：夹具必须是封闭的，
+ * 否则「本机 argv[1] 恰好是什么」会悄悄决定判据走哪一支（坑 24 / 坑 40 的同族）。
+ *
+ * @param kind 要造的载体（`unknown` = 什么都没观测到）。
+ * @param platform 平台（默认 `win32`，让「已实测的那条路线」在任意机器上都能被表达）。
+ */
+export function carrierOf(kind: CarrierKind, platform = 'win32'): CarrierObservation {
+  switch (kind) {
+    case 'cli':
+      return observeCarrier({
+        argv: ['node', '/opt/dsh/node_modules/@deepseek-ai/dsh/lib/bin.js'],
+        env: {},
+        platform,
+        profileContext: { name: 'web' },
+      })
+    case 'desktop-host':
+      return observeCarrier({
+        argv: [
+          'node',
+          '/Applications/DeepSeek Harness.app/Contents/Resources/app.asar/dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/index.js',
+        ],
+        env: {},
+        platform,
+        profileContext: { name: 'desktop' },
+      })
+    case 'unknown':
+      return observeCarrier({ argv: ['node'], env: {}, platform })
+  }
 }
 
 /**

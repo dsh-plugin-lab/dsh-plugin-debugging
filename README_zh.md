@@ -58,7 +58,7 @@
 | `dsh_dump_config` | — | `profile`、`dshHome` | 展示一个 `profile` 最终解析成什么：组合树，以及解释它的诊断信息。 |
 | `dsh_hot_reload` | `entryId` / `module` / `serverName` 三者取一 | `dryRun` | 把一个已挂载的 `entry` 替换成磁盘上的最新代码，不重启；失败自动回滚。 |
 | `dsh_sign_cookie` | — | `host`、`port`、`maxAgeDays`、`dshHome` | 签一个浏览器会话 `cookie`，让脚本或命令行客户端访问你自己的 DSH 实例。 |
-| `dsh_restart` | `reason` | `delayMs`、`dryRun`、`force` | 当改动确实需要重启时，重启当前宿主。**默认关闭。** |
+| `dsh_restart` | `reason` | `delayMs`、`dryRun`、`force` | 当改动确实需要重启时，重启当前宿主。**仅 Web（Windows）。** **默认关闭。** |
 
 **三个容易踩的坑：**
 
@@ -124,25 +124,29 @@ Node `>= 20`，以及 DSH 版本满足 [package.json](package.json) 中的范围
 
 `dsh_restart` 是唯一不可逆的动作：它会让宿主退出，也就是你正在排障的那个。它默认关闭，跑起来要连过三道门槛：
 
-1. **四道确定性检查**：是否陷入重启循环、是否有其他会话或作业在忙、`bundle` 表是否可读、启动命令能否确定。`force` 只能覆盖“会话在忙”这一道，另外三道绕不过。
+1. **四道检查**：是否陷入重启循环、是否有其他会话或作业在忙、`bundle` 表是否可读、启动命令能否确定。`force` 只能覆盖“会话在忙”这一道，另外三道绕不过。
 2. **一道独立的审批检查**：先读取审批策略，只有策略是 `ask` 时才询问。`never` 表示提示已关闭，在 `never` 下询问必然被拒，所以必须先读策略再决定是否询问。
 3. **写 `marker` 前的独立检查**：本插件自己的命名空间不在默认文件沙箱内，所以这次写入会显式使用 `danger-full-access`。
 
 **三道的结果都会写进工具输出。** `dryRun` 会跑完所有门槛，但不写任何东西。
 
+> [!IMPORTANT]
+> **仅 Web（Windows）。** 桌面端 App 不能重启自己，Linux/macOS 也没有已实现的拉起路线。桌面端里宿主是 Electron 壳的子进程，它的保留 profile 被 DSH 命令行拒绝，也没有面向插件的通道能重启壳：它在写任何东西之前就拒绝，并告诉用户从托盘退出再启动。
+
 **重启后会发生什么：**
 
-- 新宿主读取 `marker`，唤醒之前列出的每一个会话，发一条通知，并让它们各跑一轮。
-- 通知里的 `reason` 只发给请求重启的那个会话。
-- 被中断的其他会话收到同样的事实——何时请求、花了多久、`marker` 的最终状态——但看不到 `reason`。
+- 新宿主读取 `marker`，重新唤醒之前列出的每一个会话，并在每个会话里留一条说明。
+- 这条说明是一份回顾，不是「请继续」：什么时候请求的重启、宿主停了多久、`marker` 最后怎么了。
+- 你写的 `reason` 只出现在你发起重启的那个会话里；其他会话拿到同样的回顾，但看不到它。
 
 ## 平台支持
 
-**按端口识别监听进程**支持 Windows、Linux 和 macOS。具体行为：
+**按端口识别监听进程**在设计上跨平台；目前只在 Windows 上做过真机实测。具体行为：
 
 - **找不到可用命令时**：报告“无法检查”，而不是“没有监听者”。这两个结论正好相反。
 - **弱兜底命令**：可能发现“有人在监听”，但说不出是哪个进程；这种情况记为“未识别”，而不是报告“没有监听者”。
-- **唯一例外**：`dsh_restart` 只在 Windows 上能真正重新拉起宿主（计划任务路线已实测）。在其他平台上，它会在写入任何东西之前拒绝，避免先落下 `marker` 才发现拉不回来。
+
+其余能力与平台无关，只有一个例外：`dsh_restart` 仅 Web，且仅限 Windows。如果你能在 Linux 或 macOS 上试一次真机重启，欢迎到 [#44](https://github.com/dsh-plugin-lab/dsh-plugin-debugging/issues/44) 说一声 —— 那个缺口正是这个 issue 留着的原因。
 
 ## 配置
 
@@ -152,7 +156,7 @@ Node `>= 20`，以及 DSH 版本满足 [package.json](package.json) 中的范围
 
 | 字段 | 默认 | 含义 |
 |---|---|---|
-| `enableRestart` | `false` | 是否允许运行 `dsh_restart`。立即生效，无需重启宿主。 |
+| `enableRestart` | `false` | 是否允许运行 `dsh_restart`（仅 Web，Windows）。立即生效，无需重启宿主。 |
 | `dshHome` | `$DSH_HOME` 或 `<home>/.dsh` | 实例存放 `profiles`、日志和凭据的目录。 |
 | `profile` | `$DSH_PROFILE` 或默认 `profile` | 工具要检查哪个 `profile`。 |
 | `port` | `0` | 要探测的宿主端口；`0` 表示自动寻找监听端口。 |

@@ -24,9 +24,16 @@ import { isDeepStrictEqual } from 'node:util'
 import { describe, expect, it } from 'vitest'
 
 import {
+  carrierAuditOf,
+  relaunchRefusalFor,
+  relaunchRouteFor,
+  type CarrierObservation,
+} from '../../src/lib/carrier.ts'
+import {
   consumeRestartMarker,
   decideRecovery,
   judgeBusySession,
+  judgeLaunchCommand,
   judgeRestartLoop,
   MARKER_VERSION,
   markerAfterConsumption,
@@ -51,6 +58,7 @@ import {
   type RestartRequest,
   type TextRead,
 } from '../../src/lib/restart.ts'
+import { carrierOf, withPlatform } from './helpers.ts'
 
 /** 一个**记调用**的 marker IO 替身 —— 判据数的是调用次数，不是返回值。 */
 interface FsRecorder {
@@ -124,12 +132,18 @@ function portsFor(overrides: PortOverrides = {}): { ports: RestartPorts; fs: FsR
   return { ports, fs }
 }
 
+/** 载体：这一份的**默认**是「命令行 × win32」= 唯一有已实测回归路线的那一格。 */
+const CLI_WIN32: CarrierObservation = carrierOf('cli', 'win32')
+
 const REQUEST: RestartRequest = {
   dshHome: HOME,
   reason: 'the plugin code changed and only a restart picks it up',
   callingSession: 'aaaa-1111-bbbb',
   force: false,
   dryRun: false,
+  // 闸④ 的第一问。默认给「有路线」那一格 —— 于是下面那些**不是**测载体的用例
+  // 走的仍是既有判据（忘了给就会在闸④上响亮地红，而不是悄悄换一条路）。
+  carrier: CLI_WIN32,
 }
 
 /** 断言被闸门拒绝（与 `test/tools/helpers.ts` 的 `expectFail` 同形）。 */
@@ -376,6 +390,136 @@ describe('lib/restart · 闸③ bundle 表 / 闸④ 启动命令', () => {
     })
     const refused = mustRefuse(await planRestart(REQUEST, ports))
     expect(refused.code).toBe('no-launch-command')
+  })
+})
+
+/**
+ * 闸④ 的**第一问是路线**（2026-10-15 真机缺陷的根因）。
+ *
+ * 这一节钉四件：
+ * 1. **桌面端在动手之前被拒**，而且是**零写**（数调用次数，不看返回值）；
+ * 2. **`cli × linux` 也拒绝** —— 平台分支由 `carrierOf(..., 'linux')` **注入**，
+ *    所以这条在任何机器上都被真跑到（坑 25：不许按真实平台分支）；
+ * 3. **`unknown` 拒绝**（不许把「不知道」当成「有路线」）；
+ * 4. **两档拒绝码分得开**：路线有、命令空 ⇒ 仍是 `no-launch-command`。
+ *    （四条合起来才是「先问路线、再问命令」这个顺序的判据；只测前三条时，
+ *    一个「永远返回 no-relaunch-route」的实现也是绿的。）
+ */
+describe('lib/restart · 闸④ 先问路线：没有回归路线的载体在动手前被拒', () => {
+  /** 三格「没有路线」的载体：桌面 / 非 win32 的命令行 / 认不出来。 */
+  const noRoute: ReadonlyArray<{ label: string; carrier: CarrierObservation }> = [
+    { label: '桌面宿主', carrier: carrierOf('desktop-host', 'win32') },
+    { label: 'cli × linux', carrier: carrierOf('cli', 'linux') },
+    { label: 'cli × darwin', carrier: carrierOf('cli', 'darwin') },
+    { label: '认不出来', carrier: carrierOf('unknown', 'win32') },
+  ]
+
+  it('每一格都 ⇒ no-relaunch-route + manual + 零写 marker（走完整入口）', async () => {
+    for (const item of noRoute) {
+      // 前置：这张表本身必须真的没有路线，否则下面断的是别的东西。
+      expect(relaunchRouteFor(item.carrier), `${item.label}: 路线表与用例不一致`).toBe('none')
+      const { ports, fs } = portsFor()
+      const plan = await planRestart({ ...REQUEST, carrier: item.carrier, dryRun: false }, ports)
+      const refused = mustRefuse(plan)
+      expect(refused.gate, `${item.label}: 不是闸④`).toBe('launch-command')
+      expect(refused.code, `${item.label}: 拒绝码不是 no-relaunch-route`).toBe('no-relaunch-route')
+      expect(refused.manual, `${item.label}: 没标成「要人来做」`).toBe(true)
+      expectRefusalShape(refused)
+      // 根因事实：**一次都没写**（不是「返回值看起来没写」）。
+      expect(fs.writes, `${item.label}: 被拒却写了 marker`).toEqual([])
+      // verdict / remedy 逐字来自那三档文案的唯一出处。
+      const refusal = relaunchRefusalFor(item.carrier)
+      expect(refused.verdict, `${item.label}: verdict 没带上那一档的原话`).toContain(refusal.reason)
+      expect(refused.remedy, `${item.label}: remedy 不是那一档的`).toBe(refusal.remedy)
+      // evidence 至少含三行机器码（复核「凭什么判成这一档」）。
+      expect(refused.evidence.some((line) => line.startsWith('carrier: '))).toBe(true)
+      expect(refused.evidence.some((line) => line.startsWith('platform: '))).toBe(true)
+      expect(refused.evidence.some((line) => line.startsWith('rule: '))).toBe(true)
+      // 防空转：桌面那一档必须点名 Desktop，linux 那一档必须把平台名带出来。
+      expect(refused.verdict, `${item.label}: 文案串档了`).toContain(
+        item.carrier.kind === 'desktop-host'
+          ? 'Desktop'
+          : item.carrier.kind === 'unknown'
+            ? 'could not be identified'
+            : item.carrier.platform,
+      )
+    }
+  })
+
+  it('四格的 verdict 两两不同（压成一句就是把三值压成两值）', () => {
+    const refusals = noRoute.map((item) =>
+      judgeLaunchCommand({ launch: { known: true, value: LAUNCH }, carrier: item.carrier }),
+    )
+    const verdicts = refusals.map((decision) => (decision.passed ? '' : decision.verdict))
+    expect(new Set(verdicts).size, '四格给出了同一句 —— 三档文案被压平了').toBe(4)
+    expect(new Set(verdicts).has('')).toBe(false)
+  })
+
+  it('桌面端：命令**拼得出来也照样拒绝** —— 路线先于命令（真机缺陷的那条路径）', () => {
+    const desktop = carrierOf('desktop-host', 'win32')
+    // 命令是完好的（真机上它就是「拼得出来」的）——判据必须**不看它**就拒。
+    const refused = judgeLaunchCommand({
+      launch: { known: true, value: { command: 'node', args: ['bin.js'], cwd: 'C:/repo' } },
+      carrier: desktop,
+    })
+    expect(refused.passed).toBe(false)
+    if (refused.passed) throw new Error('期望拒绝')
+    expect(refused.code).toBe('no-relaunch-route')
+    // 反空转：同一份命令换成有路线的载体 ⇒ **必须放行**（否则上面那条可能只是恒拒）。
+    const allowed = judgeLaunchCommand({
+      launch: { known: true, value: { command: 'node', args: ['bin.js'], cwd: 'C:/repo' } },
+      carrier: CLI_WIN32,
+    })
+    expect(allowed.passed, 'cli × win32 也被拒了 —— 判据成了恒拒').toBe(true)
+  })
+
+  it('cli × win32：路线有 ⇒ 空命令才是 no-launch-command（两档码必须分得开）', async () => {
+    const empty = portsFor({ launch: { known: true, value: { command: '  ', args: [], cwd: '' } } })
+    const refused = mustRefuse(await planRestart(REQUEST, empty.ports))
+    expect(refused.code).toBe('no-launch-command')
+    expect(refused.gate).toBe('launch-command')
+
+    // 反空转：同一条路径上少一个 `known: true` ⇒ 同样是 `no-launch-command`（不是路线那一档）。
+    const unknown = portsFor({
+      launch: { known: false, reason: 'argv[1] is not a startable entry' },
+    })
+    const refused2 = mustRefuse(await planRestart(REQUEST, unknown.ports))
+    expect(refused2.code).toBe('no-launch-command')
+    expect(refused2.evidence).toEqual(['argv[1] is not a startable entry'])
+  })
+
+  it('`withPlatform` 显式声明：路线的平台来自**载体观测**，不是进程的 `process.platform`', async () => {
+    // 伪装成 linux、但载体观测说的是 cli × win32 ⇒ 闸④（路线）**放行**，
+    // 而取值面（`process.platform`）拒绝 ⇒ 落到第二档 `no-launch-command`。
+    // 这一条把「两层必须同意同一套规则」钉住了：只看其中一层都会得到另一个结论。
+    const observed = await withPlatform('linux', async () =>
+      planRestart({ ...REQUEST, carrier: CLI_WIN32, dryRun: true }, portsFor().ports),
+    )
+    // 取值面是注入端口给的常量（`LAUNCH`），所以这里预期 4/4 放行 —— 它证明的正是
+    // 「闸④路线那一问读的是 `carrier.platform`，与进程平台无关」。
+    expect(observed.kind, '路线那一问读了 process.platform 而不是载体观测').toBe('ready')
+    // 反空转：同一个进程平台下，把载体观测换成 linux ⇒ 路线那一问就拒。
+    const refused = await withPlatform('linux', async () =>
+      planRestart(
+        { ...REQUEST, carrier: carrierOf('cli', 'linux'), dryRun: true },
+        portsFor().ports,
+      ),
+    )
+    expect(refused.kind).toBe('refused')
+    if (refused.kind !== 'refused') throw new Error('期望拒绝')
+    expect(refused.code).toBe('no-relaunch-route')
+  })
+
+  it('`carrierAuditOf` 的投影与 `planRestart` 的 evidence 说的是同一件事（同一份观测）', () => {
+    const desktop = carrierOf('desktop-host', 'win32')
+    const decision = judgeLaunchCommand({ launch: { known: false, reason: 'x' }, carrier: desktop })
+    if (decision.passed) throw new Error('期望拒绝')
+    const audit = carrierAuditOf(desktop)
+    expect(decision.evidence).toContain(`carrier: ${audit.kind}`)
+    expect(decision.evidence).toContain(`platform: ${audit.platform}`)
+    expect(decision.evidence).toContain(`rule: ${audit.rule}`)
+    // 「可无损落 JSON」这条边界同样管 evidence（宿主会逐值校验）。
+    expect(JSON.parse(JSON.stringify(decision.evidence))).toEqual(decision.evidence)
   })
 })
 

@@ -33,6 +33,7 @@
 ⚠️ **锚点已经落后于本机安装树**（那一份又往前走了；现查 `…\node_modules\@deepseek-ai\dsh\package.json`）。
 **锚点本身不动**：它记的是「下面每条事实**是在哪一份宿主上核的**」—— 换成新版本号等于宣称下面每条都复核过，而那件事**没有发生**。
 ⇒ **本节的结论只对锚点那一份成立**；在更新的那一份上引用之前，按本文给的检索串重核一遍。
+⚠️ **一处例外**：§2.7「桌面载体」那一节的 `[已核]` 读的是 **harness 源码检出**、**装好的桌面应用 `app.asar`** 与 **`@deepseek-ai/dsh-base` 的发布产物**、`[已实测]` 是本机 CLI 读数 —— 它们**不锚在这里**，那一节自带真源与检索串（桌面应用自带一份运行时，版本可能与安装树不同）。
 
 ---
 
@@ -322,6 +323,32 @@ notice 真落进发起者会话。那份 marker 由**工具壳**写（四道闸 
 
 **顺序保证（由 E2 直接得出，不是推断）**：`appExit` 的语义是「**等树 dispose 完**再退」⇒ **marker 的写必须在调用它之前 `await` 完成**；`ctx.fs.writeText` 返回 Promise，所以「写完了才退」= **先 await 写、再调 `appExit`**。**不许**先调 `appExit` 再写（树都拆了，写还在飞）。E11 实测的顺序与之一致（disposer 先跑、`beforeExit` 在后）。⚠️ **但别把它当「保证跑完所有异步收尾」**：E12 那 5 秒是硬上限，超了就强制退出。
 
+### 2.7 桌面载体：谁拉起宿主、插件侧还有没有回归路线（2026-10-16）
+
+**这一节回答一个以前没被建模的问题**：「怎么把宿主重新拉起来」不只有「命令行拼得出来」一个答案 —— **载体**（谁把它拉起来的）先决定**有没有那条通道**。2026-10-15 的真机缺陷正是这一维缺席的结果：桌面宿主上命令拼得出来，闸④于是放行，宿主退出后没人回来。
+
+⚠️ **本节的真源与前几节不同**：下面的 `[已核]` 读的是 **harness 源码检出**（`apps/desktop` / `apps/desktop-host` / `apps/cli`）、**本机装好的桌面应用 `app.asar` 里的同形产物**与**本机 npm 安装树的 `dsh-base` 产物**，`[已实测]` 是本机 CLI 上的读数 —— 它们**不锚在**本文开头那个安装树锚点那一份 `@deepseek-ai/dsh` 上（桌面应用自带一份运行时，与安装树的版本**可能不同**；引用前现查）。
+
+| # | 事实 | 证据（包 / 文件 + 检索串） | 分级 |
+|---|---|---|---|
+| K1 | 桌面 Host 是 **Electron 以 Node 模式起的子进程**：入口 `<runtimeDir>/node_modules/@deepseek-ai/dsh-desktop-host/lib/index.js`（装好的形态即 `…/app.asar/dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/index.js`），`cwd = projectDir`，stdio 带 `ipc` | `apps/desktop/src/host-process.ts` 的 `spawn(` 调用点（检索串 `dsh-desktop-host` · `cwd: this.projectDir`） | `[已核]` |
+| K2 | 那个 Host 用**保留 profile `desktop`** 起应用 | `apps/desktop-host/src/index.ts`（检索串 `profile: 'desktop'` · `loadProfileDirectory`） | `[已核]` |
+| K3 | ⚠️ **DSH 命令行无条件拒绝那个保留名**：`--profile desktop`（boot）与 `--profile desktop --dump-config` 都回 `error: profile "desktop" is managed exclusively by the Electron application`、**exit 1**；`plugin` 子命令只在 `manageDesktopProfile`（桌面内置 CLI）下放行 | `apps/cli/src/args.ts` 的 `rejectElectronProfile`（检索串 `managed exclusively by the Electron application`）；**本机实测**：npm 全局 CLI 与桌面内置 `resources/runtime/cli/bin/dsh.cmd` 都拒，而 `dsh.cmd plugin --profile desktop --version` 放行 | `[已核]` + `[已实测]` |
+| K4 | ⚠️ **Host ↔ 壳的 Node IPC 消息类型是闭集**（`ready` / `fatal` / `platform-session` / `shutdown-complete` / `update-tasks` / `quit-inspection`）；壳收到集外类型就 `fail(… invalid IPC event)` 并 **`child.kill('SIGTERM')`** | `apps/desktop/src/host-process.ts` 的 `isDesktopHostEvent`（检索串 `invalid IPC event`） | `[已核]` |
+| K5 | ⚠️ **壳对页面暴露的 `ipcMain` 通道全表里没有 restart / relaunch**；`app.relaunch()` 只出现在**壳自己**的路径：更新安装流程、致命恢复弹窗的 Restart、（仅 development 才挂的）「重启应用与 Host」菜单 | `apps/desktop/src/main.ts`（检索串 `app.relaunch` · `restartAppHostMenu`） | `[已核]` |
+| K6 | ⇒ **对插件而言，桌面载体的回归路线 = 没有**：能重启它的只有 Electron 壳，而 K4 / K5 说明插件够不到那条通道 | 由 K1–K5 得出 | **结论**（不是独立证据） |
+| K7 | **产品对「需要重启」给用户的原话是一句提示**，没有按钮 | `packages/client/ui-plugin-manager/src/client/locales.ts`（检索串 `restartNotice` → `Restart DSH to apply the change.`） | `[已核]` |
+| K8 | ⚠️ **profile 身份的真源是 `profileContext.name`**：启动器在建树回调**开头** `provide` 它（早于任何 config-tree entry 挂载）。**`DSH_PROFILE` 记的不是这个宿主的身份** —— 它可能来自启动 shell 的**继承**、也可能来自本仓 `src/config.ts` 的 `DEFAULT_PROFILE` **兜底**，**成因判「推不出来」**（「本机没有用户级 / 机器级持久 `DSH_PROFILE`」这一格是本机读数，见右栏）；而两种成因**后果相同** | `apps/cli/src/profile-boot.ts` 的 `hostCtx.provide('profileContext', profileContext)`（检索串 `provide('profileContext'`）与 `@deepseek-ai/dsh-app-boot` 的 `ProfileContext` 声明；本机安装树的 `dsh/lib` 里 `DSH_PROFILE` **零命中**；注册表 `HKCU:\Environment` 与机器级环境里**均无** `DSH_PROFILE` | `[已核]`（源码 / 产物）· `[已实测]`（注册表读数） |
+| K9 | **`hmr` 那一行的来源是 `@deepseek-ai/dsh-base` 的 `cordis.patch.yml`** —— 那里逐字是 `- id: hmr` / `name: '@deepseek-ai/dsh-hmr'` / `disabled: !!js "!ctx.get('profileContext')"`；而桌面 profile 的 `dsh.profile.bundles` 里含 `@deepseek-ai/dsh-base` ⇒ **凡 base-backed profile（含桌面）的组合树里都有这一行**。⚠️ **别拿「profile 的 `node_modules` 里有没有 `dsh-hmr`」当判据**：那个包从 install anchor 解析，web 的 `node_modules` 里同样没有 —— 那正是本条曾被误读成「桌面没有热重载」的成因 | 桌面 `app.asar` 内与 npm 安装树的 `@deepseek-ai/dsh-base/cordis.patch.yml` **同形**（两处逐字核过），检索串 `- id: hmr` · `disabled: !!js` · `profileContext` | `[已核]` |
+| K10 | ⚠️ **未核**：那一行的 `disabled: !!js "!ctx.get('profileContext')"` 在**桌面宿主里求值成什么** | CLI 无条件拒绝保留 profile 的 `--dump-config`（K3）⇒ **没有真机读数**；按 `profileContext` 存在**推断**应为「启用」，但**推断不是实测** | `[无法判定]` |
+
+**K8 的后果（本机真缺陷）**：拿一个与宿主身份无关的名字去拼重启命令行，就会**拉起另一个 profile**（那次事故里正是 `--profile web`，恢复半的成果落进了错的实例；盘上痕迹与被否掉的替代方案见 [.agents/notes/2026-10-16-desktop-carrier-decision.md](../.agents/notes/2026-10-16-desktop-carrier-decision.md)）。
+
+**K10 的后果：保留 profile 上 `hmr` 是「不可核实」，不是「没有」** —— 所以 `dsh_check_effect_mode` 在那里**按「这次的答案是否依赖 hmr」分岔**（机制与判据的真源在实现里，本节只留结论）：答案依赖 hmr 的改动走**既有的** `hmr-unverified` 诚实失败（同时否认「热生效」与「必须重启」）；答案不依赖 hmr 的改动（原表本来就要求重启的那些，如 `host-code`）**照常回答**，只把「那次复核不可用」写进证据。⚠️ 把它压成「没有 hmr」是反向的错：桌面端根本重启不了（闸④拒绝），于是用户会被指向一个走不通的动作。
+（真源：`src/tools/dsh_check_effect_mode.ts`，检索串 `hmr-unverified` · `HmrAvailability`；分岔判据是 `src/lib/effect.ts` 的 `baselineMode`。）
+
+**桌面端为什么仍然「能重启」**：执行者是 **Electron 壳自己**（K5 那三条路径），不是插件。所以本仓的做法是**如实拒绝**（拒绝码 `no-relaunch-route`，见 [SHAPE.md](SHAPE.md) §6.1），并把「人能做什么」写成一句话交给用户（退出 App 再启动）—— 不把人指向一个不存在的工具动作。
+
 ---
 
 ## 3. 生态约定：`package.json` 的 `dsh.hotReload`
@@ -356,6 +383,9 @@ notice 真落进发起者会话。那份 marker 由**工具壳**写（四道闸 
 - **`dsh_restart` 还剩下的那条**：工具壳写的 marker 被恢复半**真消费**这件事**已在真宿主发生**（读数与分级在 §2.4.1 末尾「工具壳写的 marker 已被恢复半真消费」那条，这里不复制）；
   **仍未验的是时序** —— 「重启后**立刻**恢复」 `[无法判定]`（那次 notice 隔了很久才到、宿主是另一次启动；恢复的触发点尚未查清）。
 - **`appExit` 的 5 秒上限在真实重启里够不够**：E12/E13 只测到「调用后进程确实退出」；**dispose 慢过 5 s 时**那一次到底是谁收的尾、有没有丢收尾工作，**未测**（本轮 4 次里只有 1 次逼近该上限，且没有可分类的探针）。
+- **`profileContext` 在 `apply` 期是否可见**：**源码方向确定、真机未验** —— 启动器在建树回调开头 `provide` 它（早于任何 config-tree entry 挂载，K8），所以方向是「早于插件 `apply`」；但本仓**没有**在真机上量过「插件 `apply` 的第一刻 `ctx.get('profileContext')` 是否已经是那个对象」。⇒ 读不到时按「取不到」降级（不猜），别把这条源码方向当实测用。
+- **桌面宿主里 `hmr` 那一行 `disabled:` 的运行时表达式求值成什么**：`[无法判定]` —— CLI 无条件拒绝保留 profile 的 `--dump-config`（K3）⇒ **没有真机读数**；按 `profileContext` 存在**推断**应为「启用」，但**推断不是实测**。
+  ⚠️ **「组合树里有没有 `- id: hmr` 这一行」不在这里** —— 那件事**已经清楚**：它来自 `@deepseek-ai/dsh-base` 的 patch，凡 base-backed profile（含桌面）都有（K9）。**别把它再列成待核项**，也别把「不可核实」写成「没有」。
 
 **此前就留着的**：
 

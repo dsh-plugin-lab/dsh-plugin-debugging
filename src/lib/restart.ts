@@ -25,7 +25,7 @@
  * | ① 重启循环熔断 | 冷却窗口内已经重启过 | `restart-loop` |
  * | ② 别的会话在飞 | 除「调用方自己那个回合」外还有会话 / 作业 / 定时提醒在跑（**唯一有 `force` 逃生口**） | `busy` |
  * | ③ bundle 表解析不了 | profile 的 bundles 读不出 / 不是 JSON | `bad-composition` |
- * | ④ 拿不到启动命令 | 定不出「怎么把宿主拉起来」——**不猜** | `no-launch-command` |
+ * | ④ 带不回来 | 载体没有已实测的回归路线（`no-relaunch-route`）/ 路线有、命令定不出来（`no-launch-command`）—— **都不猜** | 两档各有码 |
  *
  * `force` **只覆盖闸②**，且**真的覆盖了**才留痕（写进 marker 的 `force` 与 `trace`）。
  * ①③④ 的判据签名里**根本没有 `force`** —— 「不可绕过」在这里是结构性的，不是一句约定：
@@ -44,6 +44,9 @@
  * 与路径无关；白名单只放宽了另一条**路径**判据 `judgeHostDataWrites`）。
  */
 import { join } from 'node:path'
+
+import type { CarrierObservation } from './carrier.js'
+import { relaunchRefusalFor, relaunchRouteFor } from './carrier.js'
 
 /** marker 的格式版本（写出去的那一个）。**只许加字段，不许改语义** —— 改语义等于把版本门推倒。 */
 export const MARKER_VERSION = 1
@@ -385,7 +388,20 @@ export function markerAfterConsumption(marker: RestartMarker, now: number): Rest
 export type GateId = 'restart-loop' | 'busy-session' | 'composition' | 'launch-command'
 
 /** 拒绝码 —— **闭集**，与 SHAPE §6.1 的表一一对应。 */
-export type RefusalCode = 'restart-loop' | 'busy' | 'bad-composition' | 'no-launch-command'
+export type RefusalCode =
+  | 'restart-loop'
+  | 'busy'
+  | 'bad-composition'
+  | 'no-launch-command'
+  /**
+   * 闸④的第二档：**这个载体根本没有已实测的回归路线**。
+   *
+   * 与 `no-launch-command` 分开是判据上的硬要求（2026-10-15 真机缺陷）：
+   * 「命令拼不出来」是**取值**问题（再试、改配置都可能变），而「载体带不回来」是
+   * **现实**问题（桌面宿主上插件压根没有通道，重试一万次也一样）。压成一码，
+   * 模型会去反复重试一个结构上做不到的动作。
+   */
+  | 'no-relaunch-route'
 
 /**
  * 一个观测的三值形状。
@@ -682,17 +698,50 @@ export interface LaunchCommand {
 export interface LaunchCommandInput {
   /** 启动命令的解析结果。`known: false` = 定不出来。 */
   launch: Observed<LaunchCommand>
+  /**
+   * 这个宿主是被谁拉起来的（`lib/carrier.ts` 的观测）。
+   *
+   * **它不是「又一份关于命令的输入」**：它回答的是另一维问题 —— 「就算命令拼得出来，
+   * 有没有人能把它拉回来」。2026-10-15 的真机缺陷正是因为这一维从没被建模：
+   * 桌面宿主上命令**拼得出来**（而且拼错了 profile），于是闸④放行、宿主退出、没人回来。
+   */
+  carrier: CarrierObservation
 }
 
 /**
- * 闸④：拿不到启动命令。
+ * 闸④：能不能把宿主拉回来。
  *
- * 「拿不到」与「拿到了但是空的」都拒绝，理由同一条：**不猜**。
- * 猜错的代价是进程没了、也没人把它拉回来 —— 那是这套东西里唯一不可逆的失败。
+ * **先问路线，再问命令** —— 顺序是判据，不是风格：反过来就会出现「命令拼得好好的、
+ * 于是放行」那条真机路径（桌面宿主上 `argv` 齐全，拼出来的却是另一个 profile）。
  *
- * @param input 启动命令观测。
+ * 两档拒绝的理由各写各的：
+ * - **路线为 `none`** ⇒ `no-relaunch-route`：这个载体**结构上**没有通道
+ *   （桌面端只有 Electron 壳能 `app.relaunch()`；非 win32 没有已实测路线；认不出来不猜）。
+ *   `verdict` / `remedy` 逐字来自 `relaunchRefusalFor`（三档措辞只写在那里一处）。
+ * - **路线为 `task-scheduler`、但拿不到命令** ⇒ `no-launch-command`：**不猜**。
+ *   猜错的代价是进程没了、也没人把它拉回来 —— 那是这套东西里唯一不可逆的失败。
+ *
+ * @param input 启动命令观测 + 载体观测。
  */
 export function judgeLaunchCommand(input: LaunchCommandInput): GateDecision {
+  if (relaunchRouteFor(input.carrier) === 'none') {
+    const refusal = relaunchRefusalFor(input.carrier)
+    return {
+      gate: 'launch-command',
+      passed: false,
+      code: 'no-relaunch-route',
+      verdict: `refused by the launch-command gate: ${refusal.reason}`,
+      remedy: refusal.remedy,
+      // 三行机器码在前（复核「凭什么判成这一档」），观测自己的证据行跟在后。
+      evidence: [
+        `carrier: ${input.carrier.kind}`,
+        `platform: ${input.carrier.platform}`,
+        `rule: ${input.carrier.rule}`,
+        ...input.carrier.evidence,
+      ],
+      manual: true,
+    }
+  }
   const nothing = (why: string): GateRefusal => ({
     gate: 'launch-command',
     passed: false,
@@ -725,6 +774,14 @@ export interface RestartRequest {
   force: boolean
   /** 只演练、不落盘。 */
   dryRun: boolean
+  /**
+   * 这个宿主是被谁拉起来的（闸④的第一问）。
+   *
+   * **必填**：可选会让「没传」与「传了 `unknown`」在类型上不可分，而前者是接线漏了
+   * （本插件的 bug）、后者是一条真结论。两者对判据的意义完全不同 —— 与
+   * `ToolDeps.carrier` 同一条纪律。
+   */
+  carrier: CarrierObservation
 }
 
 /**
@@ -836,7 +893,10 @@ export async function planRestart(request: RestartRequest, ports: RestartPorts):
     if (!composition.passed) return refusalFrom(composition, ['restart-loop', 'busy-session'])
 
     const launchObservation = await ports.launchCommand()
-    const launchDecision = judgeLaunchCommand({ launch: launchObservation })
+    const launchDecision = judgeLaunchCommand({
+      launch: launchObservation,
+      carrier: request.carrier,
+    })
     if (!launchDecision.passed) {
       return refusalFrom(launchDecision, ['restart-loop', 'busy-session', 'composition'])
     }

@@ -31,7 +31,21 @@ export const RESTART_ENABLED_BY_DEFAULT = false
 export interface Config {
   /** DSH_HOME 目录；留空则取环境变量 `DSH_HOME`，再退回 `<homedir>/.dsh`。 */
   dshHome?: string
-  /** profile 名；留空则取环境变量 `DSH_PROFILE`，再退回 `web`。 */
+  /**
+   * profile 名；留空则取**运行时真源** `profileContext.name`，再退回环境变量 `DSH_PROFILE`，
+   * 最后退回 `web`。
+   *
+   * ⚠️ **`DSH_PROFILE` 不是 profile 身份的真源**（2026-10-16 真机缺陷后改的优先级）：
+   * 它只说明「启动这个进程的那个 shell 里恰好有什么」。真机那一轮 Desktop Host 拿到的是
+   * `web`，于是 `dsh_restart` 拉起的是一条 **`--profile web`** 的命令行 —— 桌面端用户
+   * 被送到了另一个 profile。真源是 `profileContext.name`（每次 `dsh` 启动都由启动器在
+   * **建树之前** provide）。
+   *
+   * ⚠️ **那个 `web` 是怎么来的，判「推不出来」**（2026-10-16 复核）：本机没有用户级/机器级
+   * 持久 `DSH_PROFILE`，所以它**可能**来自启动 shell 的继承、**也可能**来自本仓
+   * {@link DEFAULT_PROFILE} 的兜底。两种成因**后果相同**（拿一个与宿主无关的名字去拼命令行），
+   * 所以这里只写形状、不断言成因。
+   */
   profile?: string
   /** 宿主端口；`0` = 由工具从监听端口推断。 */
   port?: number
@@ -115,12 +129,24 @@ export function defaultDshHome(): string {
  * 把「这个值是从配置来的、从环境变量来的、还是我们按默认值推的」显式带出去，
  * 读的是默认目录这件事本身就成了可见证据，而不是隐藏假设。
  *
+ * ## profile 的优先级（**运行时真源优先于环境变量**，2026-10-16 改）
+ *
+ * `config.profile`（用户显式写的）> **`runtime.profile`（`profileContext.name`）** >
+ * `env.DSH_PROFILE` > `web`。
+ *
+ * 为什么真源必须排在环境变量之前：`DSH_PROFILE` 是**继承来的**（那次真机缺陷里它正是
+ * 从启动 Electron 的那个 shell 继承下来的 `web`），而 `profileContext.name` 是**启动器
+ * 为这个进程登记的** profile。两者不一致时，后者才回答「这个宿主管的是哪个 profile」。
+ * 环境变量保留在链上，只为兼容**没有** `profileContext` 的注入式调用（单测 / 宿主不在场）。
+ *
  * @param config 宿主传来的（或单测里手写的）配置。
  * @param env 只用于测试注入；默认读 `process.env`。
+ * @param runtime 运行期真源（`profileContext`）；形状与容错在 `src/lib/carrier.ts` 里判。
  */
 export function resolveConfig(
   config: Config | undefined,
   env: NodeJS.ProcessEnv = process.env,
+  runtime: { profile?: string | undefined } = {},
 ): ResolvedConfig {
   const configuredHome = config?.dshHome ?? ''
   const envHome = env.DSH_HOME ?? ''
@@ -128,7 +154,8 @@ export function resolveConfig(
     configuredHome !== '' ? configuredHome : envHome !== '' ? envHome : defaultDshHome()
   const dshHomeSource: ResolvedConfig['dshHomeSource'] =
     configuredHome !== '' ? 'config' : envHome !== '' ? 'env' : 'default'
-  const profile = config?.profile || env.DSH_PROFILE || DEFAULT_PROFILE
+  const runtimeProfile = runtime.profile ?? ''
+  const profile = config?.profile || runtimeProfile || env.DSH_PROFILE || DEFAULT_PROFILE
   return {
     dshHome,
     dshHomeSource,

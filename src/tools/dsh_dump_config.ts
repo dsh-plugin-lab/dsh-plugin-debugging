@@ -22,6 +22,13 @@
  * 就是已知的那条，判它必须把 `path`（形如 `/182`）解析成组合树里的 entry id ——
  * 所以「有 error」与「有**该管的** error」不是一回事，本工具分两类报。
  *
+ * ## 一条**在起子进程之前**就成立的拒：保留 profile
+ *
+ * `dsh --profile desktop --dump-config` 被 CLI 无条件拒绝（`rejectElectronProfile`），
+ * 所以「读 desktop 的组合树」这件事**在任何载体上都做不到**，换个 profile 去答又是另一个问题。
+ * 判据因此建在 **profile 名**上（`isReservedDesktopProfile`）而不是载体上 —— 从 web 会话里
+ * dump desktop 同样读不出来。结论与理由见 `reservedProfileFailure()`。
+ *
  * ## 输出形状（SHAPE §3 / §4.1 / §5）
  *
  * `data` 顶层**恰好三键**：`verdict`（L1，成功失败都有）/ `key`（L2 的原料）/
@@ -37,6 +44,11 @@
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools'
 
 import {
+  carrierAuditOf,
+  isReservedDesktopProfile,
+  type CarrierObservation,
+} from '../lib/carrier.js'
+import {
   fail,
   ok,
   toToolError,
@@ -44,6 +56,7 @@ import {
   type NextStep,
   type ToolData,
   type ToolError,
+  type ToolFail,
 } from '../lib/errors.js'
 import { budgetFor, createDeadline, toolBudgetMs, type Workload } from '../lib/timeouts.js'
 import {
@@ -206,6 +219,13 @@ interface AssemblyInput {
   screening: Screening
   /** hmr 探测结果；**没探测过就不要传**（「没查」≠「没有」）。 */
   hmr?: HmrProbe
+  /**
+   * 载体观测；**只有保留 profile 的早拒那一支传**。
+   *
+   * 那一支的结论是「这个 profile 读不出来」，而复核者要问的第二件事正是
+   * 「当时宿主跑在什么载体上」—— 它进 `audit`（模型不读）。
+   */
+  carrier?: CarrierObservation
 }
 
 /**
@@ -274,6 +294,16 @@ export function createDumpConfigTool(deps: ToolDeps): ToolDefinition {
       const profile = args.profile ?? home.profile
       const resolvedBlock = effectiveConfig(home, 'not-used', profile)
       const resolved = toResolvedKey(resolvedBlock)
+      // **保留 profile 早拒**：生效 profile 已定、**子进程还没起**。
+      //
+      // `dsh --profile desktop --dump-config` 被 CLI **无条件**拒绝（`rejectElectronProfile`；
+      // 真机实测，npm CLI 与桌面内置 CLI 都回 `error: profile "desktop" is managed exclusively
+      // by the Electron application`、exit 1）。所以这条路不是「可能失败」而是**必然失败** ——
+      // 先拒，既不白起一个子进程，也**不换一个 profile 去答**：换掉就等于把
+      // 「我读的是 desktop」偷换成另一个 profile 的答案（本仓最坏的那种谎）。
+      if (isReservedDesktopProfile(profile)) {
+        return toOutput(reservedProfileFailure(deps, resolvedBlock, resolved))
+      }
       // 子进程必须看到**同一个** home：只加参数不注环境的话，`dsh` 会读回本进程的 home，
       // 而 `resolved.dshHome` 印的是参数值 —— 那正是最坏的那种「看着成功读错目录」。
       const spawn = spawnWithHome(deps.spawn, childEnvFor(deps.env, home.dshHome))
@@ -505,6 +535,56 @@ function failureOf(invocation: DumpInvocation, resolved: ResolvedKey): FailureHe
 }
 
 /**
+ * **保留 profile** 的结构化失败（在起子进程之前就返回）。
+ *
+ * 为什么它是一条独立的早拒、而不是等 dump 自己报错：
+ * - 那条路会先起一个**必然失败**的子进程（实测 CLI 直接 `exit 1`）；
+ * - `--dump-config` 的退出码契约是**恒 0**，而这里拿到的是非 0 加一句
+ *   `managed exclusively by the Electron application` —— 那形状贴着「组合期错」，
+ *   归集时容易与真诊断混在一起；
+ * - 最关键的是**结论的方向**：这条路上不存在「换个 profile 再问一次」这个选项
+ *   （换掉就是答了另一个问题）。
+ *
+ * `key` 仍走 {@link assembled} 那一处装配（`invocations: []` 是事实：一次都没跑），
+ * 于是「没读到」与「读到了、是空的」照旧分开 —— 渲染层因此印
+ * `actionable: unknown`，而不是 `none`（三值纪律）。
+ *
+ * @param deps 运行期依赖（`carrier` 进 `audit`，供人复核）。
+ * @param resolvedBlock 生效配置块。
+ * @param resolved `key` 里的配置投影。
+ */
+function reservedProfileFailure(
+  deps: ToolDeps,
+  resolvedBlock: EffectiveConfigBlock,
+  resolved: ResolvedKey,
+): ToolFail<DumpConfigKey> {
+  const screening = screen([], [])
+  return fail(
+    {
+      kind: 'not-configured',
+      message: `profile "${resolved.profile}" is managed exclusively by the Electron application, so dsh refuses to dump it`,
+    },
+    assembled({
+      verdict:
+        `nothing could be dumped: "${resolved.profile}" is the profile reserved by the Desktop application, ` +
+        'and the dsh command line refuses it on every platform, so this composition tree cannot be read from here' +
+        coverageSentence(screening),
+      resolvedBlock,
+      resolved,
+      runs: [],
+      screening,
+      carrier: deps.carrier,
+    }),
+    {
+      manual: true,
+      why:
+        'read this profile in the diagnostics of the Desktop application itself, or name an explicit ' +
+        'non-reserved profile — a reserved profile cannot be dumped by the dsh command line on any platform',
+    },
+  )
+}
+
+/**
  * 每一个诊断来源**怎么读** —— 「工具打算读哪些东西」的唯一声明。
  *
  * 顺序即 `notScreened` 的输出顺序（先组合树那份、再 schema 那份）。
@@ -590,7 +670,7 @@ function bareRun(
  * @param input 装配输入（含这一分支的 `verdict`）。
  */
 function assembled(input: AssemblyInput & { verdict: string }): ToolData<DumpConfigKey> {
-  const { verdict, resolvedBlock, resolved, runs, screening, hmr } = input
+  const { verdict, resolvedBlock, resolved, runs, screening, hmr, carrier } = input
   return {
     verdict,
     key: {
@@ -620,6 +700,12 @@ function assembled(input: AssemblyInput & { verdict: string }): ToolData<DumpCon
         stoppedBecause: run.failure?.error.message ?? null,
       })),
       hmr: hmr ?? null,
+      // 早拒那一支才有的两格：生效 profile 与载体观测。`profile` 另起一格（不复用
+      // `resolved.profile`）是因为「这次到底问了哪个 profile」正是这一支的结论本身
+      // ——复核者不该先去 `resolved` 里翻（`carrier` 自带的是载体层认出的 profile，两者可能不同）。
+      ...(carrier === undefined
+        ? {}
+        : { profile: resolved.profile, carrier: carrierAuditOf(carrier) }),
     }),
   }
 }

@@ -58,7 +58,7 @@ After installation, the agent gains a set of tools and a skill document. The ski
 | `dsh_dump_config` | — | `profile`, `dshHome` | Show what a `profile` resolved to: the composed tree, plus the diagnostics that explain it. |
 | `dsh_hot_reload` | one of `entryId` / `module` / `serverName` | `dryRun` | Swap a mounted `entry` to the latest code on disk without restarting. Rolled back on failure. |
 | `dsh_sign_cookie` | — | `host`, `port`, `maxAgeDays`, `dshHome` | Sign a browser-session `cookie` so a script or CLI client can reach your own DSH instance. |
-| `dsh_restart` | `reason` | `delayMs`, `dryRun`, `force` | Restart this host when a change truly requires it. **Off by default.** |
+| `dsh_restart` | `reason` | `delayMs`, `dryRun`, `force` | Restart this host when a change truly requires it. **Web only (Windows).** **Off by default.** |
 
 **Three common traps:**
 
@@ -124,25 +124,29 @@ These tools **never restart a process, never rewrite a `profile`, and never writ
 
 `dsh_restart` is the only irreversible action: it ends the host you are debugging. It is off by default, and running it means passing three gates:
 
-1. **Four deterministic checks**: whether it is in a restart loop, whether other sessions or jobs are busy, whether the `bundle` table is readable, and whether the launch command can be determined. `force` overrides only the "sessions busy" gate; the other three cannot be bypassed.
-2. **A separate approval check**: the approval policy is read first, and the model is asked only when the policy is `ask`. `never` means prompts are disabled, so asking under `never` would be refused; the policy must be read before deciding whether to ask.
+1. **Four checks**: whether it is in a restart loop, whether other sessions or jobs are busy, whether the `bundle` table is readable, and whether the launch command can be determined. `force` overrides only the "sessions busy" gate; the other three cannot be bypassed.
+2. **A separate approval check**: the approval policy is read first, and you are asked only when the policy is `ask`. `never` means prompts are disabled, so asking under `never` would be refused; the policy must be read before deciding whether to ask.
 3. **A separate check before writing `marker`**: this plugin's own namespace is outside the default file sandbox, so the write explicitly uses `danger-full-access`.
 
 **All three results are written into the tool output.** `dryRun` runs every gate but writes nothing.
 
+> [!IMPORTANT]
+> **Web only (Windows).** The Desktop app cannot restart itself, and Linux/macOS have no implemented relaunch path. In the Desktop app the host is a child of the Electron shell, the DSH command line refuses its reserved profile, and no plugin-facing channel can relaunch the shell: it refuses before writing anything, and tells the user to quit from the tray and start again.
+
 **What happens after a restart:**
 
-- The new host reads the `marker`, wakes every session listed in it, sends one notice, and runs each of them for a turn.
-- The `reason` in the notice is delivered only to the session that requested the restart.
-- Other interrupted sessions receive the same facts — when it was requested, how long it took, what became of the `marker` — but cannot see the `reason`.
+- The new host reads the `marker`, wakes every session listed in it, and leaves one note in each.
+- That note is a recap, not a "please continue": when the restart was requested, how long the host was down, what became of the `marker`.
+- The `reason` you typed appears only in the session you started the restart from; other sessions get the same recap without it.
 
 ## Platform support
 
-**Port-based process identification** works on Windows, Linux, and macOS. Specifically:
+**Port-based process identification** is designed to be cross-platform; only Windows has been measured on real hardware. Specifically:
 
 - **When no usable command is found**: it reports "could not check", not "no listener". Those are opposite conclusions.
 - **Weaker fallbacks**: they may find "someone is listening" without identifying the process; that is reported as unidentified, not as "no listener".
-- **The one exception**: `dsh_restart` can truly relaunch the host only on Windows (the task-scheduler route has been measured). On other platforms it refuses before writing anything, so it will not leave a `marker` behind and then discover it cannot bring the host back.
+
+Everything else is platform-neutral, with one exception: `dsh_restart` is Web only, and only on Windows. If you can try a real relaunch on Linux or macOS, tell us in [#44](https://github.com/dsh-plugin-lab/dsh-plugin-debugging/issues/44) — that gap is exactly what the issue is for.
 
 ## Configuration
 
@@ -152,7 +156,7 @@ These fields configure this plugin in the `profile` composition. `enableRestart`
 
 | Field | Default | Meaning |
 |---|---|---|
-| `enableRestart` | `false` | Whether `dsh_restart` is allowed to run. Takes effect immediately, with no host restart. |
+| `enableRestart` | `false` | Whether `dsh_restart` is allowed to run (Web only, Windows). Takes effect immediately, with no host restart. |
 | `dshHome` | `$DSH_HOME`, otherwise `<home>/.dsh` | Where the instance keeps `profiles`, logs, and credentials. |
 | `profile` | `$DSH_PROFILE`, otherwise the default `profile` | Which `profile` the tools inspect. |
 | `port` | `0` | Host port to probe; `0` means find the listening port automatically. |

@@ -33,6 +33,12 @@ import {
 } from '../../src/lib/errors.ts'
 import type { ResolvedConfig } from '../../src/contracts.ts'
 import { resolveConfig } from '../../src/config.ts'
+import {
+  carrierAuditOf,
+  relaunchRefusalFor,
+  relaunchRouteFor,
+  type CarrierObservation,
+} from '../../src/lib/carrier.ts'
 import type { CommandResult, RunCommandOptions, SpawnImpl } from '../../src/lib/exec.ts'
 import type {
   BusySource,
@@ -68,6 +74,7 @@ import {
 } from '../../src/tools/describe.ts'
 import {
   cmdResult,
+  carrierOf,
   configFor,
   depsFor,
   expectFail,
@@ -184,6 +191,16 @@ interface HarnessOptions {
   requestThrows?: boolean
   /** 拉起端口自己抛（用来钉「兜底分支的 `key.stage` 按调用点报」）。 */
   relaunchThrows?: boolean
+  /**
+   * 这个宿主跑在什么载体上。
+   *
+   * **默认给 `cli × win32`**（唯一有已实测回归路线的那一格）：本文件绝大多数用例测的是
+   * 闸①②③与审批门那条老路，载体不是它们的变量。⚠️ 但**忘了给**时 `depsFor` 的兜底是
+   * `UNKNOWN_CARRIER` ⇒ 闸④ 会在它们之前响亮地拒 —— 那正是兜底该有的方向（fail-closed），
+   * 也正是本文件显式给默认值的理由：让「忘了给」在**新写的**用例上立刻暴露，而不是
+   * 让老用例悄悄换一条路。
+   */
+  carrier?: CarrierObservation
   /** 生效配置的覆盖项；**默认 `enableRestart: true`**（本文件要测的四道闸那一路）。 */
   config?: Partial<ResolvedConfig>
 }
@@ -311,7 +328,8 @@ function harnessFor(home: string, options: HarnessOptions = {}): Harness {
 
   // 本文件其余用例要测的都是「开关**开**着」的那条路（默认关是另一条，见第 22 节）。
   const config = configFor(home, { enableRestart: volatileOf(true), ...options.config })
-  const deps = depsFor(config, {})
+  // 载体**显式给**（默认「命令行 × win32」= 唯一有已实测回归路线的那一格）。
+  const deps = depsFor(config, { carrier: options.carrier ?? carrierOf('cli', 'win32') })
   // ⚠️ 显式对象构造（不是往窄类型的形参里塞多余字段）：替身被静默丢掉是本仓踩过的坑 40。
   const tool = createRestartTool({ ...deps, restart: host })
   return {
@@ -700,6 +718,217 @@ describe('dsh_restart · `force` 只覆盖闸②', () => {
   })
 })
 
+// ── 6b. 载体：没有回归路线的宿主在**动手之前**被拒 ─────────────────────────
+
+/**
+ * 2026-10-15 真机缺陷的根因判据：桌面宿主上 `dsh_restart` **拼得出一条命令**
+ * （拼的还是另一个 profile），于是闸④放行、宿主退出、没人把它拉回来。
+ *
+ * 这一节的每一条都建在「**载体**这一维有没有被建模」上 —— 所以断言的是**计数**
+ * （写 / 拉起 / 退出各为 0），不是「有没有报错」：拒绝**不是**失败（`ok: true`），
+ * 于是「拒绝了但已经动手」在只看返回值时完全看不出来（本仓坑 40 的同族）。
+ */
+describe('dsh_restart · 载体：桌面宿主在动手之前被拒（零写 / 零拉起 / 零退出）', () => {
+  it('桌面端 ⇒ no-relaunch-route；三条根因事实各有一断，且 L1 / L2 / L3 三层都说得清', async () => {
+    const home = await tempDshHome()
+    const desktop = carrierOf('desktop-host', 'win32')
+    const h = harnessFor(home, { policy: 'never', carrier: desktop })
+    const result = await run(h.tool, ARGS, execFor())
+    // 闸门拒绝**不是**失败：工具这次的操作完成了（它正确地判了「不该做」）。
+    expect(result.ok, '闸门拒绝应当是 ok:true').toBe(true)
+    const data = expectOk(result)
+
+    expect(data.key['gate']).toBe('launch-command')
+    expect(data.key['code']).toBe('no-relaunch-route')
+    // L2 的载体那一行是模型对上拒绝码的唯一依据。
+    expect(data.key['carrier']).toBe('desktop-host')
+
+    // 根因事实：**三条各有一断**。少了任何一条，「拒绝了却已经动手」都会漏过去。
+    expect(h.fs.writes, '桌面端却写了 marker').toHaveLength(0)
+    expect(h.launchCalls, '桌面端却拉起了新进程 —— 那正是真机缺陷的那一半').toHaveLength(0)
+    expect(h.exitCalls, '桌面端却调了退出通道').toHaveLength(0)
+    // 顺序：闸门全过才轮到审批门 ⇒ 这一格连档位都不该读。
+    expect(h.requestCalls, '闸④拒了却弹了审批窗').toHaveLength(0)
+    expect(h.policyCalls, '闸④拒了却读了审批档').toHaveLength(0)
+
+    // L1 点名桌面那一档（逐字来自 `relaunchRefusalFor` 的唯一出处）。
+    expect(data.verdict).toContain('Desktop')
+    expect(data.verdict).toContain('no plugin-facing channel')
+    // L3 是**人**的动作：桌面端只有壳能重启，而壳的入口是托盘。
+    const step = result.nextStep as { manual?: unknown; why?: string } | undefined
+    expect(step?.manual).toBe(true)
+    expect(step?.why).toContain('tray')
+
+    // L2（模型真正读的那一层）里看得见载体。
+    const text = renderText(h.tool, ARGS, result)
+    expect(text, 'L2 里看不见载体 —— 模型对不上 no-relaunch-route 的成因').toContain(
+      'carrier: desktop-host',
+    )
+    // `audit` 里给复核的是**可无损落 JSON** 的投影（不是活的观测对象）。
+    expect(data.audit['carrier']).toEqual(carrierAuditOf(desktop))
+    // evidence 带上了三行机器码（人复核「凭什么判成这一档」）。
+    const evidence = data.audit['evidence'] as string[]
+    expect(evidence.some((line) => line.startsWith('carrier: '))).toBe(true)
+    expect(evidence.some((line) => line.startsWith('rule: '))).toBe(true)
+  })
+
+  it('`unknown` 与 `cli × linux` / `darwin` 同样拒绝，且三档「人能做什么」彼此可分', async () => {
+    const home = await tempDshHome()
+    const cases: ReadonlyArray<{
+      label: string
+      carrier: CarrierObservation
+      marker: string
+      /** L3 必须含的那句 —— 每档**自己的** remedy（三档措辞的唯一出处是 `relaunchRefusalFor`）。 */
+      why: string
+      /** L3 里**不许**出现的那几句：串档就是把「人能做什么」压成了同一句。 */
+      notWhy: readonly string[]
+    }> = [
+      {
+        label: '认不出来',
+        carrier: carrierOf('unknown', 'win32'),
+        marker: 'could not be identified',
+        why: 'does not guess',
+        notWhy: ['tray', 'has been measured'],
+      },
+      {
+        label: 'cli × linux',
+        carrier: carrierOf('cli', 'linux'),
+        marker: 'linux',
+        why: 'has been measured',
+        notWhy: ['tray', 'does not guess'],
+      },
+      {
+        label: 'cli × darwin',
+        carrier: carrierOf('cli', 'darwin'),
+        marker: 'darwin',
+        why: 'has been measured',
+        notWhy: ['tray', 'does not guess'],
+      },
+    ]
+    for (const item of cases) {
+      // 前置：这张表本身必须真的没有路线。
+      expect(relaunchRouteFor(item.carrier), `${item.label}: 路线表与用例不一致`).toBe('none')
+      const h = harnessFor(home, { policy: 'never', carrier: item.carrier })
+      const result = await run(h.tool, ARGS, execFor())
+      const data = expectOk(result)
+      expect(data.key['code'], `${item.label}: 拒绝码不是 no-relaunch-route`).toBe(
+        'no-relaunch-route',
+      )
+      expect(data.verdict, `${item.label}: 文案串档了`).toContain(item.marker)
+      expect(h.fs.writes, `${item.label}: 被拒却写了 marker`).toHaveLength(0)
+      expect(h.launchCalls, `${item.label}: 被拒却拉起了`).toHaveLength(0)
+      expect(h.exitCalls, `${item.label}: 被拒却退出了`).toHaveLength(0)
+      // L3：非 Windows 那两档的**唯一**判据落点。此前只有库层用例逐字比对了 `relaunchRefusalFor`，
+      // 「库层那两句 → 工具层 `nextStep.why`」这一跳对这两档是空的（桌面档有，见上面那条）。
+      // ⇒ 非 Windows 用户撞到拒绝时，拿到的那句「怎么办」从来没被断过。
+      //
+      // ⚠️ 本用例在**任意平台**都成立，故**不用** `withPlatform`：平台取自显式传入的载体观测
+      // （`carrierOf`），而 `launchCommand` 那一跳在路线为 `none` 时根本不会被执行（闸④先拒）
+      // —— 坑 25 管的是「按**真实** `process.platform` 分岔」的断言，这条不属那一族。
+      const step = result.nextStep as { manual?: unknown; why?: string } | undefined
+      expect(step?.manual, `${item.label}: 三档都必须是人的动作`).toBe(true)
+      const why = String(step?.why ?? '')
+      expect(why, `${item.label}: why 没接上 remedy`).toContain(item.why)
+      for (const forbidden of item.notWhy) {
+        expect(why, `${item.label}: why 串到别档（出现了 ${forbidden}）`).not.toContain(forbidden)
+      }
+    }
+  })
+
+  it('反空转：同一组端口换成 `cli × win32` ⇒ 写 / 拉起 / 退出各一次（否则上面那些 0 可能只是「这条路什么都不做」）', async () => {
+    const home = await tempDshHome()
+    const h = harnessFor(home, { policy: 'never', carrier: carrierOf('cli', 'win32') })
+    const result = await run(h.tool, ARGS, execFor())
+    const data = expectOk(result)
+    expect(data.key['carrier']).toBe('cli')
+    // `cli` 是默认路径、没有信息量 ⇒ L2 里**不印**（照 `restartEnabled` 只在为假时印的先例）。
+    expect(renderText(h.tool, ARGS, result)).not.toContain('carrier: cli')
+    expect(h.fs.writes).toHaveLength(1)
+    expect(h.launchCalls).toHaveLength(1)
+    await flushDeferredExit()
+    expect(h.exitCalls).toEqual([0])
+  })
+
+  it('dryRun 也一样被拒（演练走的是同一个入口 —— 它**不是**后门）', async () => {
+    const home = await tempDshHome()
+    const h = harnessFor(home, { policy: 'never', carrier: carrierOf('desktop-host', 'win32') })
+    const data = expectOk(await run(h.tool, { ...ARGS, dryRun: true }, execFor()))
+    expect(data.key['code']).toBe('no-relaunch-route')
+    expect(data.key['stage']).toBe('gates')
+    expect(h.fs.writes).toHaveLength(0)
+    expect(h.launchCalls).toHaveLength(0)
+    expect(h.exitCalls).toHaveLength(0)
+  })
+
+  it('载体来自 `deps`（装配点注入）而不是工具自己现探：换掉 deps 的载体，同一个工具对象给出另一个结论', async () => {
+    const home = await tempDshHome()
+    const config = configFor(home, { enableRestart: volatileOf(true) })
+    const ports = harnessFor(home, { policy: 'never' }).ports
+    const host: RestartHost = {
+      ports,
+      approval: { policyOf: () => 'never', request: async () => 'allowed-once' },
+      launch: { relaunch: async () => ({ ok: true, detail: 'stub' }) },
+      exit: { exit: () => () => undefined },
+    }
+    // ⚠️ 显式对象构造（坑 40）：替身被静默丢掉时「没生效」与「生效了」在绿的时候一样。
+    const desktopTool = createRestartTool({
+      ...depsFor(config, { carrier: carrierOf('desktop-host', 'win32') }),
+      restart: host,
+    })
+    const cliTool = createRestartTool({
+      ...depsFor(config, { carrier: carrierOf('cli', 'win32') }),
+      restart: host,
+    })
+    // 反空转的第一步：两个工具对象**必须给出不同结论**，否则「载体被读到了」没被证明。
+    expect(expectOk(await run(desktopTool, ARGS, execFor())).key['code']).toBe('no-relaunch-route')
+    expect(expectOk(await run(cliTool, ARGS, execFor())).key['code']).toBeUndefined()
+  })
+
+  it('**每一条**返回路径的 `audit` 都带载体投影（下界：7 条互不相同的路径 + 一次 JSON 往返）', async () => {
+    // 为什么是「每一条」：`audit` 不进模型文本，它唯一的消费者是**事后复核的人**。
+    // 只覆盖成功那一格时，「被拒了为什么」在 `audit` 里查不到 —— 而这个工具的拒绝
+    // **会**由载体决定。下界写的是「至少 7 条路径」，且每条都断言投影**在场**。
+    const home = await tempDshHome()
+    const paths: ReadonlyArray<{ label: string; options: HarnessOptions; args: unknown }> = [
+      { label: '成功（闸门全过 + 拉起 + 退出）', options: { policy: 'never' }, args: ARGS },
+      {
+        label: '闸④ 拒绝（桌面端）',
+        options: { policy: 'never', carrier: carrierOf('desktop-host', 'win32') },
+        args: ARGS,
+      },
+      {
+        label: '闸① 拒绝',
+        options: { policy: 'never', history: { known: true, value: [NOW - 1_000] } },
+        args: ARGS,
+      },
+      { label: 'dryRun', options: { policy: 'never' }, args: { ...ARGS, dryRun: true } },
+      { label: '审批档读不出来', options: { policy: undefined }, args: ARGS },
+      { label: '端口抛异常', options: { portThrows: 'busy' }, args: ARGS },
+      {
+        label: '总闸关着',
+        options: { policy: 'never', config: { enableRestart: volatileOf(false) } },
+        args: ARGS,
+      },
+    ]
+    const seen: string[] = []
+    for (const item of paths) {
+      const h = harnessFor(home, item.options)
+      const result = await run(h.tool, item.args, execFor())
+      const data = (result as unknown as { data: { audit: Record<string, unknown> } }).data
+      seen.push(item.label)
+      expect(data.audit['carrier'], `${item.label}: audit 里没有载体投影`).toBeDefined()
+      // 宿主边界：`audit` 要能无损落 JSON（`profile` 取不到时那个键整个不印）。
+      expect(
+        JSON.parse(JSON.stringify(data.audit)),
+        `${item.label}: audit 过不了 JSON 往返`,
+      ).toEqual(data.audit)
+    }
+    // 下界自证：这七条**必须**真的都跑过（否则循环里少一条也没人发现）。
+    expect(seen).toHaveLength(paths.length)
+    expect(new Set(seen).size, '用例标签重复 ⇒ 覆盖面比看起来小').toBe(paths.length)
+  })
+})
+
 // ── 7. 沙箱被拒要可诊断 ────────────────────────────────────────────────────
 
 describe('dsh_restart · 文件沙箱拒绝要可诊断', () => {
@@ -867,7 +1096,10 @@ describe('dsh_restart · 接线断言（坑 42）', () => {
       restartHistory: async () => await restartHistoryFrom(fs.port, home),
     }
     // 这一条走的是「开关**开**着」的完整链路（默认关那一格见第 22 节），所以显式打开。
-    const deps = depsFor(configFor(home, { enableRestart: volatileOf(true) }), {})
+    // 载体同样显式给（闸④ 的第一问；不给就走 fail-closed 的 `UNKNOWN_CARRIER`）。
+    const deps = depsFor(configFor(home, { enableRestart: volatileOf(true) }), {
+      carrier: carrierOf('cli', 'win32'),
+    })
     const tool = createRestartTool({
       ...deps,
       restart: {
@@ -1013,15 +1245,32 @@ describe('dsh_restart · 计划任务拉起（平台显式钉住）', () => {
     expect(spawned, 'linux 上竟然起了子进程').toBe(0)
   })
 
-  it('闸④ 的取值面也按平台分：win32 定得出命令，别的平台判「拿不到」（构造 + 执行都在钉住的平台里）', async () => {
+  it('闸④ 的取值面也按「平台 × 载体」分：win32 定得出命令，别的平台判「拿不到」（构造 + 执行都在钉住的平台里）', async () => {
     const config = configFor('C:/home', { profile: 'web' })
-    const win = await withPlatform('win32', () => launchCommandFrom(config))
+    // ⚠️ 第二参是**载体观测**（不是平台）：平台由 `carrierOf(..., platform)` 注入 ⇒
+    // 下面两条断言的是「平台 × 载体」这张表，而不是「函数的第二个参数恰好是什么」。
+    const win = await withPlatform('win32', () =>
+      launchCommandFrom(config, carrierOf('cli', 'win32')),
+    )
     expect(win.known).toBe(true)
     expect(win.known && win.value.args).toContain('--profile')
 
-    const linux = await withPlatform('linux', () => launchCommandFrom(config))
+    const linux = await withPlatform('linux', () =>
+      launchCommandFrom(config, carrierOf('cli', 'linux')),
+    )
     expect(linux.known, 'linux 上竟然定出了启动命令 —— 那条路线没有实测过').toBe(false)
     expect(linux.known === false && linux.reason).toContain('linux')
+
+    // 纵深防御（2026-10-16）：桌面宿主连命令都不给 —— 而且**与进程平台无关**
+    // （桌面端在任何平台上都没有插件可用的重启通道）。
+    for (const platform of ['win32', 'darwin'] as const) {
+      const desktop = await withPlatform(platform, () =>
+        launchCommandFrom(config, carrierOf('desktop-host', platform)),
+      )
+      expect(desktop.known, `${platform}: 桌面宿主竟然定出了启动命令`).toBe(false)
+      if (desktop.known) throw new Error('期望 known: false')
+      expect(desktop.reason, `${platform}: 桌面端那一句没带出来`).toContain('Desktop')
+    }
   })
 
   it('预算已耗尽（budgetMs = 0）⇒ 直接失败，不起子进程', async () => {
@@ -1332,10 +1581,15 @@ describe('dsh_restart · 描述与 L2', () => {
     const lines = text.split('\n')
     expect(lines.length).toBeLessThanOrEqual(DESCRIPTION_MAX_LINES)
     expect(text.length).toBeLessThanOrEqual(DESCRIPTION_MAX_CHARS)
-    // 三件必须说清的事（判据是「模型看不到会不会做错决定」）。
-    expect(text).toContain('cannot reach another instance')
+    // 四件必须说清的事（判据是「模型看不到会不会做错决定」）。
+    // ⚠️ 措辞从 `cannot reach another instance` 压成 `not another instance`（2026-10-16）：
+    // 事实没变（重启只作用于本进程所在的宿主），腾出来的字符给了边界段的**第四件**事实。
+    expect(text).toContain('not another instance')
     expect(text).toContain('ask prompts, never auto-runs')
     expect(text).toContain('file sandbox')
+    expect(text, '描述没说桌面端不能重启 —— 那是真机缺陷的根因').toMatch(
+      /Desktop hosts are refused/u,
+    )
     expect(RESTART_DESCRIPTION.cost, '行动类工具必须写代价段').toBeTruthy()
   })
 
@@ -1353,9 +1607,24 @@ describe('dsh_restart · 描述与 L2', () => {
     // 反空转：它必须在 **boundary 段**里（那是「执行前必须知道、且调用结果里学不到」的段），
     // 不许被挪到别处 —— 只断合成后的 `text` 对「四段随便写哪都行」也绿。
     expect(RESTART_DESCRIPTION.boundary).toContain('Windows only')
-    // 同一段里的另外两件事实还在（不自动跑 / 写动作还要过文件沙箱）。
+    // 同一段里的另外三件事实还在（不自动跑 / 桌面端被拒 / 写动作还要过文件沙箱）。
     expect(RESTART_DESCRIPTION.boundary).toContain('ask prompts, never auto-runs')
     expect(RESTART_DESCRIPTION.boundary).toContain('file sandbox')
+    expect(RESTART_DESCRIPTION.boundary, '桌面端那一档没进边界段').toContain(
+      'Desktop hosts are refused',
+    )
+  })
+
+  it('描述**调用前**就给出桌面端的路由信号：L1 里那句拒绝码在描述层有对应的措辞', () => {
+    // 根因：真机那次是「模型**调用之后**才发现这条路走不通」—— 而那时宿主已经退出。
+    // 所以描述层必须让它在**调用之前**就知道。判据取「描述层那一句」与「判据层那一档」
+    // 的**语义对应**（不逐字比：两边一个给人看路由、一个给人看机器码）。
+    const text = composeDescription(RESTART_DESCRIPTION)
+    const desktopRefusal = relaunchRefusalFor(carrierOf('desktop-host', 'win32'))
+    expect(desktopRefusal.reason).toContain('Desktop')
+    expect(text, '描述没提桌面端，而闸④会拒它 ⇒ 模型必然白调一次').toMatch(
+      /Desktop hosts are refused/u,
+    )
   })
 
   it('`keyText` 能喂空对象（守卫合成的兜底就是 `{}`），且不给默认值', () => {
@@ -1363,6 +1632,15 @@ describe('dsh_restart · 描述与 L2', () => {
     expect(keyText({ stage: 'gates', dryRun: false, markerWritten: false } as never)).toEqual([
       'stage: gates',
     ])
+  })
+
+  it('载体在 L2 里**只在不是 `cli` 时**印（照 `restartEnabled` 只在为假时印的先例）', () => {
+    // 下界：两格**必须**给出不同结论，否则「只在不是 cli 时印」这条判据是空转的。
+    expect(keyText({ stage: 'gates', carrier: 'desktop-host' } as never)).toContain(
+      'carrier: desktop-host',
+    )
+    expect(keyText({ stage: 'gates', carrier: 'unknown' } as never)).toContain('carrier: unknown')
+    expect(keyText({ stage: 'gates', carrier: 'cli' } as never)).toEqual(['stage: gates'])
   })
 })
 
@@ -1713,7 +1991,12 @@ describe('dsh_restart · 总闸 enableRestart（默认关 ⇒ 结构化拒绝，
     }
 
     // ⚠️ 显式对象构造 + 断言替身被接上（坑 40）。
-    const deps = depsFor(resolveConfig({ dshHome: home, enableRestart: live as never }), {})
+    // 载体也要显式给：这一条断言的是「开关拨开之后**真的会动手**」，而闸④ 的第一问
+    // 在 `UNKNOWN_CARRIER` 上会先拒 —— 不给的话下面那条「写了一次」会红在载体上，
+    // 看起来却像开关没生效。
+    const deps = depsFor(resolveConfig({ dshHome: home, enableRestart: live as never }), {
+      carrier: carrierOf('cli', 'win32'),
+    })
     // `Harness` 只导出计数器与工具（它**不**导出 `restart` 那一面），所以宿主面另造一份。
     const hostOf = (fs: FsRecorder): RestartHost => ({
       ports: harnessFor(home, { policy: 'never', fs }).ports,

@@ -15,6 +15,7 @@ import type {} from '@deepseek-ai/dsh-tools'
 
 import { resolveConfig, type Config } from './config.js'
 import type { PluginState } from './contracts.js'
+import { observeCarrier } from './lib/carrier.js'
 import { RECOVERY_STARTUP_DELAY_MS, runStartupRecovery } from './lib/restart-recovery.js'
 import type { ContextLike as RecoveryContextLike } from './lib/restart-fs.js'
 import { registerSkills, type AgentsLike } from './skills/register.js'
@@ -111,7 +112,25 @@ function scheduleRestartRecovery(ctx: Context, dshHome: string): void {
  * @param config 配置（缺省即全默认值）。
  */
 export function apply(ctx: Context, config: Config = {}): void {
-  const state: PluginState = { config: resolveConfig(config), skill: null }
+  // ── 载体：**整个插件只探这一次** ──────────────────────────────────────────
+  //
+  // 它是进程级事实，而三处消费者（`dsh_restart` 闸④ / `dsh_dump_config` /
+  // `dsh_check_effect_mode` 的 `nextStep`）的结论都建在它上面。各探各的就会出现
+  // 「同一个进程里两处对载体的判断不一致」，而那种错没有任何判据照得到。
+  //
+  // 取服务一律走**可选**路径（结构面 + 容错，见 `optionalService`）：`profileContext`
+  // 由启动器在建树之前 provide（`apps/cli/src/profile-boot.ts`），缺席时降级成
+  // 「取不到」而不是抛 —— 宿主换版本时表现为降级（`src/lib/AGENTS.md`）。
+  const profileContext = optionalService<{ name?: unknown }>(ctx, 'profileContext')
+  const carrier = observeCarrier({ profileContext })
+
+  // profile 的**真源**就是那一次观测（`DSH_PROFILE` 是继承来的环境变量，不是身份）
+  // —— 优先级与理由见 `resolveConfig` 的文件头。
+  const state: PluginState = {
+    config: resolveConfig(config, process.env, { profile: carrier.profile }),
+    skill: null,
+    carrier,
+  }
 
   // 技能半边：可选，失败只记状态，不打断挂载。
   // 动态 scope 注入要 `ctx.agents`（活跃 agent 注册表）—— 同样走**可选服务**取，

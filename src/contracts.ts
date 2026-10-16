@@ -6,6 +6,7 @@
  */
 import type { Volatile } from '@deepseek-ai/cordis'
 
+import type { CarrierObservation } from './lib/carrier.js'
 import type { WorkloadBudgetConfig } from './lib/timeouts.js'
 
 /** 技能注册的结果。注册失败**不是**插件的失败 —— 工具半边照常工作。 */
@@ -49,6 +50,15 @@ export interface PluginState {
   config: ResolvedConfig
   /** `null` = 技能半边还没跑过（不该出现在注册完成之后）。 */
   skill: SkillReport | null
+  /**
+   * 这个宿主跑在什么载体上（`apply()` 里探**一次**，三处消费者共用）。
+   *
+   * 为什么在这里而不是各工具自己读 env：载体是**进程级事实**，而它的结论会导致拒绝
+   * （`dsh_restart` 闸④、`dsh_dump_config`、`dsh_check_effect_mode` 的 `nextStep`）。
+   * 各读各的就会出现「同一个进程里两处对载体的判断不一致」——那种错没有任何判据照得到。
+   * 判定逻辑与理由在 `src/lib/carrier.ts`（纯函数，可单独单测）。
+   */
+  carrier: CarrierObservation
 }
 
 /**
