@@ -137,8 +137,12 @@ const DUMP_CONFIG_TOOL = 'dsh_dump_config'
  *
  * 它不是 `timeouts.ts` 那套预算（那套管的是「这次调用能等多久」，唯一出处是
  * `toolBudgetMs`）；它是「新进程什么时候起来」。两者混起来会让「预算」这个词有两个含义。
+ *
+ * 3 秒的依据（2026-10-17 真机）：marker 在闸④之后、排程之前就已落盘（`markerWritten: true`
+ * 先于排程打印），旧进程在排程后只做「退出」这一件事 —— 维护者 2026-10-17 拍板收窄到 3s；
+ * 若真机出现「旧进程未死透」的竞态（新宿主抢文件失败），这里的第一嫌疑就是本值。
  */
-const DEFAULT_DELAY_MS = 10_000
+const DEFAULT_DELAY_MS = 3_000
 
 /**
  * 写 marker 时显式传给宿主 `fs.writeText` 的沙箱档位。

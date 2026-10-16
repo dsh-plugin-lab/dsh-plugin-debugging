@@ -1061,7 +1061,8 @@ describe('dsh_restart · 拉起的命令可复核', () => {
     await run(h.tool, ARGS, execFor())
     const line = String(h.launchCalls[0]?.commandLine)
     // 逐段钉住形状：这串会**逐字**交给计划任务去执行，掺一句给人看的说明就会被真的执行。
-    expect(line.startsWith(`cmd /c set "DSH_HOME=${home}" && cd /d C:/repo && ping -n 11`)).toBe(
+    // ping 次数 = ceil(delayMs/1000)+1：默认 3_000 ⇒ 4（2026-10-17 收窄，10s → 3s）。
+    expect(line.startsWith(`cmd /c set "DSH_HOME=${home}" && cd /d C:/repo && ping -n 4`)).toBe(
       true,
     )
     expect(line.endsWith('& node bin.js --profile web')).toBe(true)
