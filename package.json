@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-debugging",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "For DSH plugin development: runtime diagnostics and in-place fixes your agent can run itself.",
   "keywords": [
     "dsh",
