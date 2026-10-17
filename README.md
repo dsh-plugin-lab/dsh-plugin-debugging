@@ -5,7 +5,7 @@
 <h1 align="center">dsh-plugin-debugging</h1>
 
 <p align="center">
-  <img src="assets/banner.png" alt="dsh-plugin-debugging: letting a DSH agent inspect and fix its own runtime" width="600">
+  <img src="assets/banner.gif" alt="dsh-plugin-debugging: letting a DSH agent inspect and fix its own runtime" width="600">
 </p>
 
 <div align="center">
