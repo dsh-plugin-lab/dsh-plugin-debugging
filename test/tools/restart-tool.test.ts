@@ -1104,7 +1104,11 @@ describe('dsh_restart · 拉起的命令可复核', () => {
 
   it('落盘的作业文件：home → 工作目录 → 目标命令 + argv，且**不含**说明性文字', async () => {
     const home = await tempDshHome()
-    const h = harnessFor(home, { policy: 'never' })
+    // 端口显式注入：停止窗口那五格只在端口定得出来时才写（见下一条用例的反面）。
+    const h = harnessFor(home, {
+      policy: 'never',
+      env: { DSH_WEB_URL: 'http://127.0.0.1:3080' },
+    })
     await run(h.tool, ARGS, execFor())
     const job = h.fs.writes.find((entry) => entry.path.endsWith('.job'))
     expect(job, '作业文件没落盘 —— `/tr` 指的就是它').toBeDefined()
@@ -1117,9 +1121,10 @@ describe('dsh_restart · 拉起的命令可复核', () => {
     // argv 走 JSON 数组：参数里的空格/引号/`&` 都无损，且**不经过任何 shell**。
     const argsLine = text.split('\r\n').find((line) => line.startsWith('args=')) ?? ''
     expect(JSON.parse(argsLine.slice('args='.length))).toEqual(['bin.js', '--profile', 'web'])
-    // 停止窗口的三个作动值也在这份文件里（launcher.js 靠它们 ensure 窗口）。
+    // 停止窗口的五格也在这份文件里（launcher.js 靠它们 ensure 窗口）。
     expect(text).toContain('stopWindow=')
     expect(text).toContain('stopWindowPid=')
+    expect(text).toContain('stopWindowPort=3080')
     expect(text).toContain('markerPath=')
     expect(text, '作业文件里掺了给人看的括注').not.toContain('(cwd')
   })
@@ -1189,15 +1194,25 @@ describe('dsh_restart · 拉起的命令可复核', () => {
     expect(job).toContain('stopWindowPort=3099')
   })
 
-  it('端口解析不出来时（不配置、也没有 `DSH_WEB_URL`）落点为 0，且**如实暴露**', async () => {
-    // 上面那条判据的反面：两者一起才能证明「端口真的来自解析」，而不是某个常量。
-    // `env: {}` 也顺带钉住「工具不读 `process.env`」—— 本机有 DSH_WEB_URL，
-    // 若实现偷读进程环境，这一条就会拿到 3080 而不是 0。
+  it('端口解析不出来时：**不写**停止窗口那五格、不产生假路径，且在 `key` 里明说这一次没有停止窗口', async () => {
+    // 这一格取代了原先「落点为 0」的写法。0 是个假端口 —— 窗口会去绑它、等 180 秒才放弃，
+    // 而界面显示得像「DSH 没在运行」。现在的行为是**整组缺席**：作业文件里没有端口就没有
+    // 窗口，而 `key.stopWindowSkipped` 把「新宿主既无控制台、又无可见停止入口」说出来。
+    //
+    // `env: {}` 顺带钉住「工具不读 `process.env`」—— 本机有 DSH_WEB_URL，
+    // 若实现偷读进程环境，这一条就会拿到 3080 而不是降级。
     const home = await tempDshHome()
     const h = harnessFor(home, { policy: 'never', env: {} })
-    await run(h.tool, ARGS, execFor())
-    const job = String(h.fs.writes.find((entry) => entry.path.endsWith('.job'))?.text)
-    expect(job).toContain('stopWindowPort=0')
+    const data = expectOk(await run(h.tool, ARGS, execFor()))
+    const text = String(h.fs.writes.find((entry) => entry.path.endsWith('.job'))?.text)
+    expect(text, '端口定不出来却写了端口').not.toContain('stopWindowPort')
+    expect(text, '端口定不出来却写了窗口落点').not.toContain('stopWindowPid')
+    expect(text, '端口定不出来却写了命令').not.toContain('stopWindowCommand')
+    // 作业文件名退化成不带端口后缀那一档（重启本身照常成立）。
+    expect(String(h.launchCalls[0]?.commandLine)).toContain('launch.job')
+    // 而这件事**必须在 key 里可见**：不说的话，人/模型会以为这次重启和别的没两样。
+    expect(String(data.key['stopWindowSkipped'])).toContain('no port could be resolved')
+    expect(data.key['stopWindow']).toBeUndefined()
   })
 })
 

@@ -388,6 +388,13 @@ export interface RestartKey {
   /** 停止窗口自己的日志（与 `stopWindow` 同进同出）：绑不上 / 建不出 job 时唯一留痕。 */
   stopWindowLog?: string
   /**
+   * 这一次**没有**停止窗口，以及为什么。
+   *
+   * 只在「端口定不出来」时出现。它存在的意义是不把「新宿主既无控制台、又无可见停止入口」
+   * 伪装成一次正常重启 —— 那正是 issue #63 记录的状态。
+   */
+  stopWindowSkipped?: string
+  /**
    * 交给 `schtasks /tr` 的那条调用 —— **只在它超限被拒时出现**。
    *
    * 为什么不是常驻字段：平时它对模型没有信息量（模型要复核的是**目标命令**，走 `relaunch`），
@@ -535,8 +542,18 @@ export function createRestartTool(deps: RestartToolDeps): ToolDefinition {
           launcher: planned.jobPath,
           launcherLog: planned.logPath,
           ...(planned.hidden ? {} : { launcherMode: 'console-fallback' as const }),
-          stopWindow: planned.stopWindowPidPath,
-          stopWindowLog: planned.stopWindowLogPath,
+          // 端口定不出来 ⇒ 这一次没有停止窗口。这一格**必须说出来**：不说的后果是
+          // 「新宿主无控制台、也没有可见停止入口」——正是 issue #63 那个状态，
+          // 而模型/人会以为这次重启和别的一样正常。
+          ...(planned.stopWindowPidPath === undefined
+            ? {
+                stopWindowSkipped:
+                  'no port could be resolved, so the relaunched host will have no visible stop window',
+              }
+            : {
+                stopWindow: planned.stopWindowPidPath,
+                stopWindowLog: planned.stopWindowLogPath ?? '',
+              }),
           sandbox: SANDBOX_MODE,
           resolved: effectiveConfig(config),
           carrier: carrier.kind,
@@ -693,7 +710,10 @@ export function createRestartTool(deps: RestartToolDeps): ToolDefinition {
                 audit: {
                   launcher: planned.jobPath,
                   launcherLog: planned.logPath,
-                  stopWindowLog: planned.stopWindowLogPath,
+                  // `undefined` 不能进 JSON（`JsonValue`），所以缺席就整格不写。
+                  ...(planned.stopWindowLogPath === undefined
+                    ? {}
+                    : { stopWindowLog: planned.stopWindowLogPath }),
                   markerPath: plan.markerPath,
                   reason: parsed.reason,
                   carrier: carrierAudit,
@@ -1232,10 +1252,15 @@ interface RelaunchPlan {
   logPath: string
   /** 走的是隐藏 shim（`wscript`）还是回退形态（`node` 直跑，会闪一个可见控制台）。 */
   hidden: boolean
-  /** 停止窗口的 pidfile（单例判据，启动器读它）。 */
-  stopWindowPidPath: string
-  /** 停止窗口的日志落点。 */
-  stopWindowLogPath: string
+  /**
+   * 停止窗口的 pidfile（单例判据，启动器读它）。
+   *
+   * `undefined` = **端口定不出来**，所以这一次没有停止窗口。这一格必须缺席而不是留个
+   * 指向不存在文件的路径 —— 那会是另一种「看起来正常」。
+   */
+  stopWindowPidPath?: string
+  /** 停止窗口的日志落点；与 `stopWindowPidPath` 同进同出。 */
+  stopWindowLogPath?: string
 }
 
 /**
@@ -1326,21 +1351,25 @@ function relaunchPlanOf(
   pathExists: (path: string) => boolean,
   env: NodeJS.ProcessEnv,
 ): RelaunchPlan {
-  // ⚠️ **不能用 `config.port`**：那个字段默认是 `0`，语义是「自己推断」
-  // （`src/config.ts` 的 `port: z.number().default(0)`）。2026-10-17 真机 dry-run 抓到
-  // 过这个错 —— 它产出了 `launch-0.job` / `stop-window-0.pid`，窗口会去绑 0 号端口、
-  // 永远找不到宿主。真正的端口要经 `resolvePort` 解析（配置 > `DSH_WEB_URL`）。
+  // ⚠️ **端口必须解析，不能直接把配置值当端口**。这一段曾经把 `config.port` 直接传下去，
+  // 而那个字段的默认值是 `0`（语义是「自己推断」），于是产出了 `launch-0.job` /
+  // `stop-window-0.pid`：窗口去绑 0 号端口、永远找不到宿主，而当时 931 条用例 + CI +
+  // lint 全绿（没有判据问过端口是几）。现在 `ResolvedConfig.port` 已经是 `number | undefined`
+  // （「没写」而不是「0」），这里再经 `resolvePort` 走三段优先级。
   //
   // `env` 是**注入**的而不是 `process.env`：本机有 `DSH_WEB_URL`、CI 没有，
   // 直接读进程环境会让行为随机器变（本仓坑 24/25）。
   const resolvedPort = resolvePort(undefined, config.port, env)
-  const port = resolvedPort?.port ?? 0
+  const port = resolvedPort?.port
 
   const logPath = restartLauncherLogPath(config.dshHome)
+  // 端口定得出来 ⇒ 作业文件与停止窗口都按端口命名（多实例各管各的）；
+  // 定不出来 ⇒ 作业文件退化成不含端口的名字，**并且不创建停止窗口**（见下）。
   const jobPath = restartLauncherJobPath(config.dshHome, port)
-  // 停止窗口的三个落点都带端口：两个实例（3080 / 3081）各管各的窗口，互不影响。
-  const stopWindowPidPath = restartStopWindowPidPath(config.dshHome, port)
-  const stopWindowLogPath = restartStopWindowLogPath(config.dshHome, port)
+  const stopWindowPidPath =
+    port === undefined ? undefined : restartStopWindowPidPath(config.dshHome, port)
+  const stopWindowLogPath =
+    port === undefined ? undefined : restartStopWindowLogPath(config.dshHome, port)
   const hidden = hiddenLauncherAvailable(pathExists)
 
   const target = [launch.command, ...launch.args].map(quoteArg).join(' ')
@@ -1358,18 +1387,24 @@ function relaunchPlanOf(
     wscript: wscriptPath(),
     showWindow: showWindowShimPath(),
     job: jobPath,
-    stopWindowCommand: stopWindowCommandLine({
-      powershell: powershellPath(),
-      script: stopWindowScriptPath(),
-      port,
-      pidPath: stopWindowPidPath,
-      logPath: stopWindowLogPath,
-      markerPath: restartMarkerPath(config.dshHome),
-    }),
-    stopWindow: stopWindowScriptPath(),
-    stopWindowPid: stopWindowPidPath,
-    stopWindowLog: stopWindowLogPath,
-    stopWindowPort: port,
+    // 端口定不出来时**不写**这两格：`launcher.js` 见到空的 `stopWindowPort` 就不拉起窗口，
+    // 而不是拿着 0 去绑一个不存在的端口、再等 180 秒才放弃。
+    ...(port === undefined || stopWindowPidPath === undefined || stopWindowLogPath === undefined
+      ? {}
+      : {
+          stopWindowCommand: stopWindowCommandLine({
+            powershell: powershellPath(),
+            script: stopWindowScriptPath(),
+            port,
+            pidPath: stopWindowPidPath,
+            logPath: stopWindowLogPath,
+            markerPath: restartMarkerPath(config.dshHome),
+          }),
+          stopWindow: stopWindowScriptPath(),
+          stopWindowPid: stopWindowPidPath,
+          stopWindowLog: stopWindowLogPath,
+          stopWindowPort: port,
+        }),
     markerPath: restartMarkerPath(config.dshHome),
   })
 
@@ -2124,6 +2159,10 @@ export function keyText(key: RestartKey): string[] {
   }
   if (typeof key?.stopWindowLog === 'string' && key.stopWindowLog !== '') {
     lines.push(`stopWindowLog: ${key.stopWindowLog}`)
+  }
+  // 这一格必须在：它是「新宿主没有可见停止入口」的唯一可见证据（issue #63 那个状态）。
+  if (typeof key?.stopWindowSkipped === 'string' && key.stopWindowSkipped !== '') {
+    lines.push(`stopWindowSkipped: ${key.stopWindowSkipped}`)
   }
   // 总闸档位**只在为假时印**（开着是默认路径、没有信息量；关着才是模型必须看见的那一格）。
   if (key?.restartEnabled === false) {

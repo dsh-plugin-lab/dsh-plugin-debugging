@@ -231,6 +231,33 @@ export function restartLauncherLogPath(dshHome: string): string {
 }
 
 /**
+ * 把端口拼进文件名之前的**守卫**。
+ *
+ * ## 为什么要有它（不是防御性编程，是补一次真实事故）
+ *
+ * 2026-10-17：调用方把插件配置的哨兵值 `0`（语义是「自己推断」）直接传了进来，于是
+ * `restartStopWindowPidPath(home, 0)` 高高兴兴返回了一个**看起来很正常的路径**
+ * `.../stop-window-0.pid`。没有异常、没有日志，下游的窗口去绑 0 号端口、永远等不到宿主，
+ * 界面显示「Waiting for DSH to appear on port 0」—— 看起来像「DSH 没在运行」，
+ * 而不是「有个哨兵值漏出来了」。
+ *
+ * 这类静默形状正是本仓最怕的，所以在**哨兵值真正咬人的那一层**（拼文件名）把它拦下来。
+ *
+ * ⚠️ 它是**断言，不是控制流**：正常路径在 `relaunchPlanOf` 里已经解析过端口，走到这里
+ * 必是正数。抛只会在「有人又直接拿配置值来拼路径」时发生 —— 而那正是要抓的东西。
+ *
+ * @param port 解析后的端口。
+ */
+function requireResolvedPort(port: number): number {
+  if (!Number.isSafeInteger(port) || port <= 0) {
+    throw new RangeError(
+      `a port must be resolved before it goes into a file name, but got ${String(port)}`,
+    )
+  }
+  return port
+}
+
+/**
  * 可见停止窗口脚本的落点：`$DSH_HOME/<包名>/restart/stop-window-<port>.ps1`。
  *
  * **为什么带端口**：窗口是「一个宿主实例」的影子，不是「一台机器」的影子。两个实例
@@ -243,7 +270,7 @@ export function restartLauncherLogPath(dshHome: string): string {
  * @param port 这个实例监听的端口（窗口按端口认宿主）。
  */
 export function restartStopWindowPath(dshHome: string, port: number): string {
-  return join(dshHome, 'dsh-plugin-debugging', 'restart', `stop-window-${String(port)}.ps1`)
+  return join(dshHome, 'dsh-plugin-debugging', 'restart', `stop-window-${String(requireResolvedPort(port))}.ps1`)
 }
 
 /**
@@ -256,7 +283,7 @@ export function restartStopWindowPath(dshHome: string, port: number): string {
  * @param port 实例端口。
  */
 export function restartStopWindowPidPath(dshHome: string, port: number): string {
-  return join(dshHome, 'dsh-plugin-debugging', 'restart', `stop-window-${String(port)}.pid`)
+  return join(dshHome, 'dsh-plugin-debugging', 'restart', `stop-window-${String(requireResolvedPort(port))}.pid`)
 }
 
 /**
@@ -269,11 +296,14 @@ export function restartStopWindowPidPath(dshHome: string, port: number): string 
  * @param port 实例端口。
  */
 export function restartStopWindowLogPath(dshHome: string, port: number): string {
-  return join(dshHome, 'dsh-plugin-debugging', 'restart', `stop-window-${String(port)}.log`)
+  return join(dshHome, 'dsh-plugin-debugging', 'restart', `stop-window-${String(requireResolvedPort(port))}.log`)
 }
 
 /**
- * 拉起脚本（`job` 文件）的落点：`$DSH_HOME/<包名>/restart/launch-<port>.job`。
+ * 拉起作业文件（`job` 文件）的落点：`$DSH_HOME/<包名>/restart/launch-<port>.job`。
+ *
+ * 端口**定不出来**时退化成 `launch.job`（不带端口后缀）：作业文件本身不需要端口，
+ * 只有停止窗口需要。这一格**不抛**，因为重启本身在没有端口时仍然成立。
  *
  * 它只有一项职责：把**动态值**（新宿主的命令、旧进程号、等待上限、各种落点）从 TS
  * 交给仓里的静态资产。格式见 {@link serializeLauncherJob}。
@@ -286,10 +316,11 @@ export function restartStopWindowLogPath(dshHome: string, port: number): string 
  * （B10 的白名单只认字面量）。
  *
  * @param dshHome 宿主数据目录（`$DSH_HOME`）。
- * @param port 这个实例监听的端口（两个实例各写各的）。
+ * @param port 这个实例监听的端口（两个实例各写各的）；`undefined` = 定不出来。
  */
-export function restartLauncherJobPath(dshHome: string, port: number): string {
-  return join(dshHome, 'dsh-plugin-debugging', 'restart', `launch-${String(port)}.job`)
+export function restartLauncherJobPath(dshHome: string, port: number | undefined): string {
+  const suffix = port === undefined ? '' : `-${String(requireResolvedPort(port))}`
+  return join(dshHome, 'dsh-plugin-debugging', 'restart', `launch${suffix}.job`)
 }
 
 /**
@@ -392,15 +423,21 @@ export interface LauncherJob {
    * 症状只是「没有窗口」。2026-10-17 实测：同一个串由 PowerShell 直传能起，由
    * `node` 的 `spawn` 传就起不来。
    */
-  stopWindowCommand: string
-  /** 停止窗口脚本。 */
-  stopWindow: string
+  stopWindowCommand?: string
+  /**
+   * 停止窗口脚本。
+   *
+   * 下面五格**一起缺席**表示「这一次不创建停止窗口」（端口定不出来）。这不是省略号式的
+   * 偷懒：`launcher.js` 靠「`stopWindowPort` 是不是正数」来决定拉不拉窗口，
+   * 而半套字段（有脚本没端口）只会让它去绑一个不存在的端口。
+   */
+  stopWindow?: string
   /** 停止窗口的 pidfile（单例判据）。 */
-  stopWindowPid: string
+  stopWindowPid?: string
   /** 停止窗口的日志。 */
-  stopWindowLog: string
+  stopWindowLog?: string
   /** 停止窗口盯的端口。 */
-  stopWindowPort: number
+  stopWindowPort?: number
   /** marker 落点：停止窗口用它区分「重启途中」与「被人停了」。 */
   markerPath: string
 }
@@ -434,11 +471,15 @@ export function serializeLauncherJob(job: LauncherJob): string {
     `wscript=${job.wscript}`,
     `showWindow=${job.showWindow}`,
     `job=${job.job}`,
-    `stopWindowCommand=${job.stopWindowCommand}`,
-    `stopWindow=${job.stopWindow}`,
-    `stopWindowPid=${job.stopWindowPid}`,
-    `stopWindowLog=${job.stopWindowLog}`,
-    `stopWindowPort=${String(job.stopWindowPort)}`,
+    // 停止窗口那五格**要么全在、要么全不在**：端口定不出来时整组不写，
+    // `launcher.js` 见到没有 `stopWindowPort` 就不拉起窗口（而不是绑一个 0 号端口）。
+    ...(job.stopWindowCommand === undefined
+      ? []
+      : [`stopWindowCommand=${job.stopWindowCommand}`]),
+    ...(job.stopWindow === undefined ? [] : [`stopWindow=${job.stopWindow}`]),
+    ...(job.stopWindowPid === undefined ? [] : [`stopWindowPid=${job.stopWindowPid}`]),
+    ...(job.stopWindowLog === undefined ? [] : [`stopWindowLog=${job.stopWindowLog}`]),
+    ...(job.stopWindowPort === undefined ? [] : [`stopWindowPort=${String(job.stopWindowPort)}`]),
     `markerPath=${job.markerPath}`,
   ]
   return `${lines.join('\r\n')}\r\n`

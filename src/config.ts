@@ -156,11 +156,19 @@ export function resolveConfig(
     configuredHome !== '' ? 'config' : envHome !== '' ? 'env' : 'default'
   const runtimeProfile = runtime.profile ?? ''
   const profile = config?.profile || runtimeProfile || env.DSH_PROFILE || DEFAULT_PROFILE
+  // schema 上的 `port: z.number().default(0)` 是「用户没填」的惯用占位符（socket 语义），
+  // 但它**只该活在 schema 边界**：`ResolvedConfig` 叫「已解析」，就不该再带着未解析的哨兵。
+  // 所以这里把 0 / 非正数一律折成 `undefined` —— 缺席比一个假的端口诚实。
+  const configuredPort = config?.port
+  const port =
+    configuredPort !== undefined && Number.isSafeInteger(configuredPort) && configuredPort > 0
+      ? configuredPort
+      : undefined
   return {
     dshHome,
     dshHomeSource,
     profile,
-    port: config?.port ?? 0,
+    port,
     timeoutMs: config?.timeoutMs ?? WORKLOAD_DEFAULT_BUDGET_MS.timeoutMs,
     schemaDumpTimeoutMs:
       config?.schemaDumpTimeoutMs ?? WORKLOAD_DEFAULT_BUDGET_MS.schemaDumpTimeoutMs,
