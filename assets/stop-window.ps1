@@ -31,6 +31,55 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# ============================================================================
+# CTRL+C IS READ AS A KEYSTROKE, NOT AS A SIGNAL (measured 2026-10-17)
+#
+# The launcher starts this window through `wscript show-window.vbs`, which uses
+# Shell.Run to create a NEW PROCESS GROUP. Windows disables Ctrl+C for such a
+# group, so the signal never reaches this process: the user held Ctrl+C and the
+# window simply ignored it, while closing the window still worked.
+#
+# `TreatControlCAsInput` sidesteps the whole question: Ctrl+C arrives in the
+# console input buffer as an ordinary key press, and the main loop polls for it.
+# That is independent of process-group flags, of console modes set by ancestors,
+# and of whether anything installed a control handler.
+#
+# Nothing else changes: however this process ends, the job handle closes and the
+# kernel terminates the host. This block only makes Ctrl+C one of the ways.
+# ============================================================================
+try {
+  [Console]::TreatControlCAsInput = $true
+} catch {
+  # No console (should not happen for this window). Closing the window still works.
+}
+
+<#
+.SYNOPSIS
+  Waits, and returns $true if Ctrl+C was pressed meanwhile.
+
+.DESCRIPTION
+  The wait is sliced into 100 ms steps so a key press is noticed promptly instead of
+  after the next full one-second tick.
+#>
+function Wait-OrCtrlC([int] $milliseconds) {
+  $deadline = (Get-Date).AddMilliseconds($milliseconds)
+  while ((Get-Date) -lt $deadline) {
+    try {
+      if ([Console]::KeyAvailable) {
+        $key = [Console]::ReadKey($true)
+        if ($key.Key -eq 'C' -and ($key.Modifiers -band [ConsoleModifiers]::Control)) {
+          return $true
+        }
+      }
+    } catch {
+      # Reading the console failed; fall back to plain sleeping.
+      Start-Sleep -Milliseconds 100
+    }
+    Start-Sleep -Milliseconds 100
+  }
+  return $false
+}
+
 function Say([string] $message) {
   try {
     Add-Content -LiteralPath $LogPath -Value ('{0:yyyy-MM-dd HH:mm:ss}  {1}' -f (Get-Date), $message) -Encoding UTF8
@@ -290,7 +339,10 @@ try {
       }
     }
 
-    Start-Sleep -Milliseconds 1000
+    if (Wait-OrCtrlC 1000) {
+      Say 'ctrl+c pressed; ending the window (and with it the host)'
+      break
+    }
   }
 }
 finally {

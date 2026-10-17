@@ -553,12 +553,28 @@ data
 窗口结束 ⇒ 最后一个句柄关闭 ⇒ **内核**终结宿主。所以关窗口 / Ctrl+C / 被强杀**三条路都成立**，
 包括 `finally` 根本不跑的那条（实测 0.3 s）。
 
+⚠️ **Ctrl+C 走的是按键通道，不是信号**（2026-10-17 真机踩过）：窗口由 `wscript` +
+`Shell.Run` 拉起，那会给子进程建**新进程组**，而 Windows 对 `CREATE_NEW_PROCESS_GROUP`
+**默认禁用 Ctrl+C** —— 信号根本不送达，用户一直按、窗口毫无反应，而**关窗口照常有效**。
+对策是 `[Console]::TreatControlCAsInput = $true`，让 Ctrl+C 以普通按键进输入缓冲，主循环
+每 100 ms 轮询。这条不依赖进程组标志、不依赖控制台模式、也不依赖祖先装过什么 handler。
+**同一个缺陷在原型里测不出来**：原型是用 `Start-Process -WindowStyle Normal` 起的（没有新进程组），
+Ctrl+C 是好的 —— 换到生产路径才暴露。教训：**验证要在真实启动路径上做**。
+
 ⚠️ **这不是「插件在杀进程」**：`src/**` 里没有 `taskkill` / `Stop-Process` / `process.kill`，B10 照旧绿。
 **也正因为如此，不许加「显式杀进程的兜底」** —— 那会把「内核动的手」降级成「我们的代码杀的」，
 并让两份实现开始漂。这一条由 `test/assets.test.ts` 守着。
 
 **身份按端口**（多实例）：真宿主的命令行里**没有** `--port` / `--profile` / `DSH_HOME`（实测），
 所以窗口轮询 `<port>` 的属主 pid，并要求进程名是 `node`。两个实例实测互不影响。
+
+⚠️ **端口必须经 `resolvePort` 解析，不能直接用 `config.port`**：那个字段默认是 `0`
+（语义是「自己推断」）。2026-10-17 真机 dry-run 抓到过 —— 它产出 `launch-0.job` /
+`stop-window-0.pid`，窗口去绑 0 号端口、永远找不到宿主，而**当时 931 条用例 + CI + lint
+全是绿的**（没有任何判据断言过端口是几）。现在有两条判据钉住（端口 > 0；解析不出来时如实为 0）。
+⚠️ **本机实测：宿主进程里没有 `DSH_WEB_URL`**（`dsh_check_auth` 报 `no port could be determined`），
+所以 `resolvePort` 的第三条来源在真机上不成立 —— 得靠插件配置里的 `port`。装完这个插件
+若发现窗口一直停在「Waiting for DSH to appear on port 0」，先查这一条。
 
 **单例**：命名 mutex + pidfile + 启动器拉起前先验活 ⇒ 连跑三次启动器窗口数恒为 **1**。
 
