@@ -83,10 +83,19 @@ import { RESTART_SANDBOX_MODE } from '../lib/restart-recovery.js'
 import {
   decideRecovery,
   hiddenLauncherAvailable,
+  launcherScriptPath,
+  launcherShimPath,
   planRestart,
+  powershellPath,
   readRestartMarker,
+  restartLauncherJobPath,
   restartLauncherLogPath,
-  restartLauncherPath,
+  restartMarkerPath,
+  restartStopWindowLogPath,
+  restartStopWindowPidPath,
+  serializeLauncherJob,
+  showWindowShimPath,
+  stopWindowScriptPath,
   wscriptPath,
   type BusySource,
   type GateId,
@@ -107,6 +116,7 @@ import { composeDescription, type ToolDescription } from './describe.js'
 import {
   assertResolvedDshHome,
   effectiveConfig,
+  resolvePort,
   resolvedLine,
   toOutput,
   toolOutput,
@@ -360,6 +370,24 @@ export interface RestartKey {
   /** 启动器自己的日志落点（与 `launcher` 同进同出）：失败与「还没到点」靠它分开。 */
   launcherLog?: string
   /**
+   * 拉起形态：**只在回退形态下出现**。
+   *
+   * 缺省 = 走 `wscript` 隐藏 shim（零窗口活动）。出现 `console-fallback` = 这台机器上
+   * `wscript.exe` 不在（VBScript 是 Windows 11 24H2 起可按需移除的功能），于是计划任务
+   * 直接跑 `node`，会**闪一个可见控制台**。这一格存在的唯一理由是让模型/人知道这次会闪。
+   */
+  launcherMode?: 'console-fallback'
+  /**
+   * 可见停止窗口脚本的落点（只有走 `wscript` 形态时出现）。
+   *
+   * 这个窗口是新宿主的**停止入口**：新宿主没有控制台（隐藏启动器把控制台省掉了），
+   * 而控制台原本就是用户唯一能停掉它的地方。窗口按端口绑宿主，关掉窗口或按 Ctrl+C
+   * 都由 Windows Job Object 的 `KILL_ON_JOB_CLOSE` 终结宿主 —— 见 docs/SHAPE.md。
+   */
+  stopWindow?: string
+  /** 停止窗口自己的日志（与 `stopWindow` 同进同出）：绑不上 / 建不出 job 时唯一留痕。 */
+  stopWindowLog?: string
+  /**
    * 交给 `schtasks /tr` 的那条调用 —— **只在它超限被拒时出现**。
    *
    * 为什么不是常驻字段：平时它对模型没有信息量（模型要复核的是**目标命令**，走 `relaunch`），
@@ -494,6 +522,9 @@ export function createRestartTool(deps: RestartToolDeps): ToolDefinition {
           parsed.delayMs,
           process.pid,
           deps.restart.pathExists,
+          // 端口的环境线索走**注入面**（与另外三个工具一致）。直接用 `process.env`
+          // 会让这条判据在本机与 CI 上说两种话（本机有 DSH_WEB_URL、CI 没有）。
+          deps.env,
         )
         const base = {
           gatesPassed: gatesPassedOf(probe),
@@ -501,8 +532,11 @@ export function createRestartTool(deps: RestartToolDeps): ToolDefinition {
           // `relaunch` 印**真正会跑的目标命令**（不是 `/tr` 那条启动器调用）：
           // 模型要复核的是「新宿主会以什么参数起来」，而启动器路径另有 `launcher` 一行。
           relaunch: planned.target,
-          ...(planned.scriptPath === undefined ? {} : { launcher: planned.scriptPath }),
-          ...(planned.logPath === undefined ? {} : { launcherLog: planned.logPath }),
+          launcher: planned.jobPath,
+          launcherLog: planned.logPath,
+          ...(planned.hidden ? {} : { launcherMode: 'console-fallback' as const }),
+          stopWindow: planned.stopWindowPidPath,
+          stopWindowLog: planned.stopWindowLogPath,
           sandbox: SANDBOX_MODE,
           resolved: effectiveConfig(config),
           carrier: carrier.kind,
@@ -639,36 +673,38 @@ export function createRestartTool(deps: RestartToolDeps): ToolDefinition {
 
         // ── ⑥ 拉起新进程（计划任务；失败 ⇒ 可诊断的结构化失败）────────────────
         stage = 'relaunch'
-        // 启动器脚本必须在拉起**之前**落盘：`/tr` 只指向它，脚本不在就是「任务跑了、
-        // 什么都没起」。写失败按「拉起没发生」收敛（marker 仍在盘上，可解释）。
-        if (planned.scriptPath !== undefined && planned.scriptText !== undefined) {
-          try {
-            await deps.restart.ports.fs.write(planned.scriptPath, planned.scriptText)
-          } catch (error) {
-            return toOutput(
-              fail(
-                {
-                  kind: 'command-failed',
-                  message: `the launcher script could not be written (${messageOf(error)})`,
+        // 作业文件必须在拉起**之前**落盘：`/tr` 只指向它，文件不在就是「任务跑了、什么都
+        // 没起」。写失败按「拉起没发生」收敛（marker 仍在盘上，可解释）。
+        //
+        // 为什么不再先写两个脚本：脚本现在是仓里的**静态资产**（`assets/`，可进 CI 校验），
+        // 这里只写「这次拉起的动态值」—— 一个 `key=value` 的作业文件。
+        try {
+          await deps.restart.ports.fs.write(planned.jobPath, planned.jobText)
+        } catch (error) {
+          return toOutput(
+            fail(
+              {
+                kind: 'command-failed',
+                message: `the launcher job file could not be written (${messageOf(error)})`,
+              },
+              {
+                verdict: `nothing was relaunched: the launcher job file at ${planned.jobPath} could not be written (${messageOf(error)}), so the scheduled task would have had nothing to run; this host keeps running and the marker is left armed`,
+                key: markerKey,
+                audit: {
+                  launcher: planned.jobPath,
+                  launcherLog: planned.logPath,
+                  stopWindowLog: planned.stopWindowLogPath,
+                  markerPath: plan.markerPath,
+                  reason: parsed.reason,
+                  carrier: carrierAudit,
                 },
-                {
-                  verdict: `nothing was relaunched: the launcher script at ${planned.scriptPath} could not be written (${messageOf(error)}), so the scheduled task would have had nothing to run; this host keeps running and the marker is left armed`,
-                  key: markerKey,
-                  audit: {
-                    launcher: planned.scriptPath,
-                    launcherLog: planned.logPath ?? '(none)',
-                    markerPath: plan.markerPath,
-                    reason: parsed.reason,
-                    carrier: carrierAudit,
-                  },
-                },
-                {
-                  manual: true,
-                  why: 'restart the host yourself when convenient (it is still running); the marker is left armed so the next startup can report that this restart never completed',
-                },
-              ),
-            )
-          }
+              },
+              {
+                manual: true,
+                why: 'restart the host yourself when convenient (it is still running); the marker is left armed so the next startup can report that this restart never completed',
+              },
+            ),
+          )
         }
         const relaunched = await deps.restart.launch.relaunch({
           command: planned.command,
@@ -1179,45 +1215,106 @@ function gatesPassedOf(plan: RestartPlan): readonly GateId[] {
 
 // ── 拉起 ───────────────────────────────────────────────────────────────────
 
-/** 一次拉起的计划（`/tr` 的值 + 启动器脚本 + 给人看的目标命令）。 */
+/** 一次拉起的计划（`/tr` 的值 + 作业文件 + 给人看的目标命令）。 */
 interface RelaunchPlan {
   command: string
   args: readonly string[]
   cwd: string
-  /** 交给 `schtasks /tr` 的**那一条**（隐藏启动器；回退形态下是 `cmd /c` 行本身）。 */
+  /** 交给 `schtasks /tr` 的**那一条**（隐藏 shim；回退形态下是 node 直跑 launcher.js）。 */
   commandLine: string
   /** 真正会跑的目标命令行（进 `key`，模型可复核）。 */
   target: string
-  /** 启动器脚本的落点；回退形态下没有。 */
-  scriptPath?: string
-  /** 启动器脚本内容；回退形态下没有。 */
-  scriptText?: string
-  /** 启动器日志的落点；回退形态下没有。 */
-  logPath?: string
+  /** 作业文件的落点（每次拉起都写，内容随实例不同）。 */
+  jobPath: string
+  /** 作业文件内容（`key=value`，见 `lib/restart.ts` 的 `serializeLauncherJob`）。 */
+  jobText: string
+  /** 启动器日志的落点。 */
+  logPath: string
+  /** 走的是隐藏 shim（`wscript`）还是回退形态（`node` 直跑，会闪一个可见控制台）。 */
+  hidden: boolean
+  /** 停止窗口的 pidfile（单例判据，启动器读它）。 */
+  stopWindowPidPath: string
+  /** 停止窗口的日志落点。 */
+  stopWindowLogPath: string
 }
 
 /**
- * 把计划层的启动命令变成**真正会跑的那条命令行**。
+ * 拼出「启动可见停止窗口」的那一条完整命令行。
  *
- * 两件事都必须写进目标命令行本身（`schtasks` 起的进程**不继承**本进程的环境与工作目录）：
- * 1. **`DSH_HOME`** —— 不写它，新宿主会去读默认的 `~/.dsh`，那是「看着重启了、
- *    其实起的是另一个实例」；
- * 2. **工作目录** —— 与 `launch.cwd` 一致。
+ * 它最终的消费者是 **VBScript 的 `Shell.Run`**（经 `show-window.vbs`），所以这里用的是
+ * 「给 shell 看的」引号规则 —— 与 `quoteArg` 的 cmd 规则不是一回事，两个不能混用。
  *
- * ## 目标命令**不经 `/tr`**（2026-10-17 起）
+ * ⚠️ **它只能经作业文件传递，不能当 argv 传给 VBS**：`node` 的 `spawn` 会把参数里的
+ * 双引号转义成反斜杠加引号，而 `wscript` 的参数解析器不还原 ⇒ `Shell.Run` 收到一条
+ * 带反斜杠的坏命令、静默失败，症状只是「没有窗口」（2026-10-17 真机实测）。
  *
- * 它被写进 `$DSH_HOME/<包名>/restart/relaunch.vbs`，`/tr` 只指那个脚本。
- * 两个收益：① 原已知限度③（`schtasks` 存储→重放之间的**引号保真度未实测**）**不再适用**
- * —— 那条串不过那两跳；② `/tr` 从 199 字符掉到 105 字符量级（实测），离 261 的上限远得多。
+ * @param input 五个落点与端口。
+ */
+function stopWindowCommandLine(input: {
+  powershell: string
+  script: string
+  port: number
+  pidPath: string
+  logPath: string
+  markerPath: string
+}): string {
+  const parts = [
+    `"${input.powershell}"`,
+    '-NoProfile',
+    '-ExecutionPolicy',
+    'Bypass',
+    '-File',
+    `"${input.script}"`,
+    '-Port',
+    String(input.port),
+    '-PidFile',
+    `"${input.pidPath}"`,
+    '-LogPath',
+    `"${input.logPath}"`,
+    '-MarkerPath',
+    `"${input.markerPath}"`,
+  ]
+  return parts.join(' ')
+}
+
+/**
+ * 把计划层的启动命令变成一个**目录文件 + 一条 `/tr`**，两者都由静态资产承担。
+ *
+ * ## 为什么不再在运行期拼脚本（2026-10-17 重构）
+ *
+ * 这一层原来在 TS 里拼出 `relaunch.vbs` 与 `stop-window.ps1` 两个脚本的全文。那两个
+ * 字符串**没有任何编译期检查**：写坏了在生成侧完全看不见，症状是「任务跑了、什么都没
+ * 起」——本仓最怕的静默坏。现在两个脚本都是仓里的静态资产（`assets/`），能进 CI 校验；
+ * 这里只负责写一个 `key=value` 的**目录文件**，把动态值交给它们。
+ *
+ * ## 分工
+ *
+ * | 文件 | 谁写 | 职责 |
+ * |---|---|---|
+ * | `assets/launcher.vbs` | 仓库（静态） | 只当 GUI 子系统那一跳：`wscript` 无控制台 |
+ * | `assets/launcher.js` | 仓库（静态） | 全部决策：等旧 pid、起新宿主、确保停止窗口 |
+ * | `assets/stop-window.ps1` | 仓库（静态） | 可见停止窗口：持 job 句柄 |
+ * | `restart/launch-<port>.job` | 本层 | 上面三个要的动态值 |
+ *
+ * ## 为什么 `DSH_HOME` 与工作目录不再进命令行
+ *
+ * 它们变成目录文件里的两个键，由 `launcher.js` 用 `env` / `cwd` 传给新宿主。于是
+ * `cmd /c set "DSH_HOME=…" && cd /d … & …` 这一整条（连同它的引号规则）**整体消失**。
+ *
+ * ## 目标命令仍不经 `/tr`
+ *
+ * `/tr` 只有 `wscript.exe "<静态 shim>" "<job 文件>"` 三段。原已知限度③（`schtasks`
+ * 存储→重放之间的引号保真度未实测）依旧不适用：真正会跑的那条命令不在 `/tr` 里。
  *
  * ## 回退形态（`wscript.exe` 不在时）
  *
- * 退回「等待写在命令行里」的老形态：能起，但**会创建一个可见控制台**
- * （`cmd.exe` 是控制台程序）。这一格如实体现在 `key` 的 `launcher` 字段里。
+ * 计划任务直接跑 `node "<launcher.js>" "<job 文件>"`。`node.exe` 是控制台程序 ⇒
+ * **会闪一个可见控制台**，但拉起本身照常成立（等待、无窗口宿主、停止窗口都在 JS 里）。
+ * 这一格如实体现在 `key` 的 `launcher` 字段里。
  *
  * @param launch 计划层定出的启动命令。
  * @param config 生效配置。
- * @param delayMs 等待上限（毫秒）—— 不是固定睡眠（见 {@link buildLauncherScript}）。
+ * @param delayMs 等待上限（毫秒）—— 不是固定睡眠（见 `assets/launcher.js` 的 `waitForExit`）。
  * @param pid 本进程号：启动器等的就是它消失。
  * @param pathExists 探路径存不存在的谓词（装配处注入 `existsSync`）—— 用来判隐藏启动器在不在。
  */
@@ -1227,146 +1324,70 @@ function relaunchPlanOf(
   delayMs: number,
   pid: number,
   pathExists: (path: string) => boolean,
+  env: NodeJS.ProcessEnv,
 ): RelaunchPlan {
-  const argv = [launch.command, ...launch.args].map(quoteArg).join(' ')
-  const setHome = `set "DSH_HOME=${config.dshHome}"`
-  const enter = launch.cwd.trim() === '' ? '' : ` && cd /d ${quoteArg(launch.cwd)}`
-  const target = `cmd /c ${setHome}${enter} & ${argv}`
+  // ⚠️ **不能用 `config.port`**：那个字段默认是 `0`，语义是「自己推断」
+  // （`src/config.ts` 的 `port: z.number().default(0)`）。2026-10-17 真机 dry-run 抓到
+  // 过这个错 —— 它产出了 `launch-0.job` / `stop-window-0.pid`，窗口会去绑 0 号端口、
+  // 永远找不到宿主。真正的端口要经 `resolvePort` 解析（配置 > `DSH_WEB_URL`）。
+  //
+  // `env` 是**注入**的而不是 `process.env`：本机有 `DSH_WEB_URL`、CI 没有，
+  // 直接读进程环境会让行为随机器变（本仓坑 24/25）。
+  const resolvedPort = resolvePort(undefined, config.port, env)
+  const port = resolvedPort?.port ?? 0
 
-  if (!hiddenLauncherAvailable(pathExists)) {
-    // 回退：cmd 里没有 sleep，等待只能用 `ping -n`（这台机器上已被实测用过的形态）。
-    const count = Math.max(1, Math.ceil(delayMs / 1000) + 1)
-    return {
-      command: launch.command,
-      args: launch.args,
-      cwd: launch.cwd,
-      target,
-      commandLine: `cmd /c ${setHome}${enter} && ping -n ${String(count)} 127.0.0.1 & ${argv}`,
-    }
-  }
-
-  const scriptPath = restartLauncherPath(config.dshHome)
   const logPath = restartLauncherLogPath(config.dshHome)
+  const jobPath = restartLauncherJobPath(config.dshHome, port)
+  // 停止窗口的三个落点都带端口：两个实例（3080 / 3081）各管各的窗口，互不影响。
+  const stopWindowPidPath = restartStopWindowPidPath(config.dshHome, port)
+  const stopWindowLogPath = restartStopWindowLogPath(config.dshHome, port)
+  const hidden = hiddenLauncherAvailable(pathExists)
+
+  const target = [launch.command, ...launch.args].map(quoteArg).join(' ')
+  const jobText = serializeLauncherJob({
+    node: process.execPath,
+    launcher: launcherScriptPath(),
+    log: logPath,
+    capMs: delayMs,
+    oldPid: pid,
+    command: launch.command,
+    args: launch.args,
+    cwd: launch.cwd,
+    dshHome: config.dshHome,
+    powershell: powershellPath(),
+    wscript: wscriptPath(),
+    showWindow: showWindowShimPath(),
+    job: jobPath,
+    stopWindowCommand: stopWindowCommandLine({
+      powershell: powershellPath(),
+      script: stopWindowScriptPath(),
+      port,
+      pidPath: stopWindowPidPath,
+      logPath: stopWindowLogPath,
+      markerPath: restartMarkerPath(config.dshHome),
+    }),
+    stopWindow: stopWindowScriptPath(),
+    stopWindowPid: stopWindowPidPath,
+    stopWindowLog: stopWindowLogPath,
+    stopWindowPort: port,
+    markerPath: restartMarkerPath(config.dshHome),
+  })
+
   return {
     command: launch.command,
     args: launch.args,
     cwd: launch.cwd,
     target,
-    scriptPath,
+    jobPath,
+    jobText,
     logPath,
-    scriptText: buildLauncherScript({ target, oldPid: pid, capMs: delayMs, logPath }),
-    commandLine: `${quoteArg(wscriptPath())} ${quoteArg(scriptPath)}`,
+    hidden,
+    stopWindowPidPath,
+    stopWindowLogPath,
+    commandLine: hidden
+      ? `${quoteArg(wscriptPath())} ${quoteArg(launcherShimPath())} ${quoteArg(jobPath)}`
+      : `${quoteArg(process.execPath)} ${quoteArg(launcherScriptPath())} ${quoteArg(jobPath)}`,
   }
-}
-
-/**
- * 把一段文本变成 VBScript 的字符串字面量（内部的 `"` 一律写成 `""`）。
- *
- * @param value 原始文本。
- */
-function vbsStringLiteral(value: string): string {
-  return `"${value.split('"').join('""')}"`
-}
-
-/**
- * 生成隐藏启动器（VBScript，交给 `wscript.exe` 跑）。
- *
- * ## 为什么是 VBScript + `wscript`（实测，不是推断）
- *
- * `wscript.exe` 是 **GUI 子系统**程序 —— 它自己**没有控制台**。而 `cmd.exe` /
- * `powershell.exe` 是控制台程序：在把 Windows Terminal 设为默认终端的机器上，它们
- * **一定**会被开成一个可见标签页。2026-10-17 实测四种形态（20ms 采样 7 秒）：
- *
- * | 形态 | 控制台活动 |
- * |---|---|
- * | `cmd /c …`（改前的形态） | **新控制台**（标题变成 `cmd.EXE`） |
- * | `powershell -WindowStyle Hidden -File …` | **新控制台**（`SW_HIDE` 管不到 ConPTY 下 WT 的标签页） |
- * | `powershell -File …`（不加隐藏） | **新控制台** |
- * | **`wscript.exe … .vbs` + `sh.Run(cmd, 0, False)`** | **零窗口活动** |
- *
- * ## 等待语义：`capMs` 是**上限**，不是固定睡眠
- *
- * 启动器轮询「旧进程（`oldPid`）还在不在」，一消失就立刻起新的，最多等到 `capMs`。
- * 旧进程通常在一秒内退干净 ⇒ 常见路径比原来的固定 3 秒更快。
- *
- * ⚠️ **PID 复用的前提**（本判据的适用边界）：这里判的是「存在一个进程号等于 `oldPid`
- * 的进程」。旧进程退出后系统把这个号分配给别的进程时，本判据会**多等一会儿**（直到上限），
- * 而不是误判成「旧进程还在、所以不起」—— 代价只是慢，方向安全。
- *
- * ⚠️ **本文件新增的风险：脚本写坏 = 静默不启动**。VBScript 的语法错在这里没有任何
- * 编译期拦截，所以脚本**第一步就写日志**，日志路径进工具的 `key` —— 「压根没跑」与
- * 「跑了但失败」靠那份日志分开。这是本仓最怕的「静默坏」在拉起这条路上的对策。
- *
- * @param input 目标命令行、旧进程号、等待上限、日志落点。
- */
-function buildLauncherScript(input: {
-  target: string
-  oldPid: number
-  capMs: number
-  logPath: string
-}): string {
-  const lines = [
-    "' dsh-plugin-debugging - relaunch launcher (generated; do not edit)",
-    "' Starts the host again with no visible window, waiting for the old process to exit",
-    "' (up to the cap) instead of sleeping a fixed time.",
-    'Option Explicit',
-    'Dim fso, sh, wmi, logPath, target, oldPid, capMs, waited, hasWmi',
-    `logPath = ${vbsStringLiteral(input.logPath)}`,
-    `target = ${vbsStringLiteral(input.target)}`,
-    `oldPid = ${String(input.oldPid)}`,
-    `capMs = ${String(input.capMs)}`,
-    'Set fso = CreateObject("Scripting.FileSystemObject")',
-    'Set sh = CreateObject("WScript.Shell")',
-    // ⚠️ **WMI 只取一次、且用无路径形态**：`GetObject("winmgmts:")` 默认落在本机
-    // `root` 的 `cimv2` 命名空间（这正是要的），顺带避开 TS 字符串里写
-    // `winmgmts:\\.\root\\cimv2` 的转义坑 —— `\r` 会被 TS 当成回车、生成出坏 moniker
-    // （lint 的 `no-useless-escape` 正是在拦这一处）。取不到 WMI 时 `hasWmi` 为假：
-    // `Alive` 恒假、等待退化成「立刻起」，与「不等」同向，不会卡住拉起。
-    'On Error Resume Next',
-    'Set wmi = GetObject("winmgmts:")',
-    'hasWmi = (Err.Number = 0)',
-    '',
-    'Sub Say(msg)',
-    '  On Error Resume Next',
-    '  Dim f',
-    '  Set f = fso.OpenTextFile(logPath, 8, True)',
-    '  f.WriteLine Now & "  " & msg',
-    '  f.Close',
-    'End Sub',
-    '',
-    'Function Alive(p)',
-    '  Dim q',
-    '  Alive = False',
-    '  If Not hasWmi Then Exit Function',
-    '  On Error Resume Next',
-    '  Set q = wmi.ExecQuery("SELECT ProcessId FROM Win32_Process WHERE ProcessId=" & p)',
-    '  If Err.Number = 0 Then',
-    '    If q.Count > 0 Then Alive = True',
-    '  End If',
-    'End Function',
-    '',
-    'Say "launcher started; wmi=" & hasWmi & "; waiting up to " & capMs & " ms for pid " & oldPid',
-    'waited = 0',
-    'Do While waited < capMs',
-    '  If Not Alive(oldPid) Then Exit Do',
-    '  WScript.Sleep 150',
-    '  waited = waited + 150',
-    'Loop',
-    'If Alive(oldPid) Then',
-    '  Say "pid " & oldPid & " still alive after " & capMs & " ms; launching anyway"',
-    'Else',
-    '  Say "pid " & oldPid & " gone after " & waited & " ms"',
-    'End If',
-    '',
-    'On Error Resume Next',
-    'sh.Run target, 0, False',
-    'If Err.Number <> 0 Then',
-    '  Say "LAUNCH FAILED: " & Err.Description',
-    'Else',
-    '  Say "launched hidden"',
-    'End If',
-  ]
-  return `${lines.join('\r\n')}\r\n`
 }
 
 /**
@@ -2094,6 +2115,15 @@ export function keyText(key: RestartKey): string[] {
   }
   if (typeof key?.launcherLog === 'string' && key.launcherLog !== '') {
     lines.push(`launcherLog: ${key.launcherLog}`)
+  }
+  if (key?.launcherMode === 'console-fallback') {
+    lines.push('launcherMode: console-fallback (a console window will flash)')
+  }
+  if (typeof key?.stopWindow === 'string' && key.stopWindow !== '') {
+    lines.push(`stopWindow: ${key.stopWindow}`)
+  }
+  if (typeof key?.stopWindowLog === 'string' && key.stopWindowLog !== '') {
+    lines.push(`stopWindowLog: ${key.stopWindowLog}`)
   }
   // 总闸档位**只在为假时印**（开着是默认路径、没有信息量；关着才是模型必须看见的那一格）。
   if (key?.restartEnabled === false) {

@@ -44,6 +44,7 @@
  * 与路径无关；白名单只放宽了另一条**路径**判据 `judgeHostDataWrites`）。
  */
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import type { CarrierObservation } from './carrier.js'
 import { relaunchRefusalFor, relaunchRouteFor } from './carrier.js'
@@ -227,6 +228,220 @@ export function restartLauncherPath(dshHome: string): string {
  */
 export function restartLauncherLogPath(dshHome: string): string {
   return join(dshHome, 'dsh-plugin-debugging', 'restart', 'relaunch.log')
+}
+
+/**
+ * 可见停止窗口脚本的落点：`$DSH_HOME/<包名>/restart/stop-window-<port>.ps1`。
+ *
+ * **为什么带端口**：窗口是「一个宿主实例」的影子，不是「一台机器」的影子。两个实例
+ * （3080 / 3081）各有自己的脚本、pidfile 与日志，关闭其中一个的窗口只终结它自己那个。
+ *
+ * ⚠️ 与 {@link restartMarkerPath} 同一条纪律：紧跟 `dshHome` 的第一段**必须是字符串字面量**
+ * （B10 的白名单只认字面量）。
+ *
+ * @param dshHome 宿主数据目录（`$DSH_HOME`）。
+ * @param port 这个实例监听的端口（窗口按端口认宿主）。
+ */
+export function restartStopWindowPath(dshHome: string, port: number): string {
+  return join(dshHome, 'dsh-plugin-debugging', 'restart', `stop-window-${String(port)}.ps1`)
+}
+
+/**
+ * 停止窗口自己的 pidfile：`$DSH_HOME/<包名>/restart/stop-window-<port>.pid`。
+ *
+ * 它存在的唯一理由是**单例判据**：启动器在拉起一个新窗口之前先读它、再用 WMI 验活，
+ * 活着就什么都不做。没有它，每次重启都会多开一个窗口（实测过：连跑两次启动器 ⇒ 两个窗口）。
+ *
+ * @param dshHome 宿主数据目录（`$DSH_HOME`）。
+ * @param port 实例端口。
+ */
+export function restartStopWindowPidPath(dshHome: string, port: number): string {
+  return join(dshHome, 'dsh-plugin-debugging', 'restart', `stop-window-${String(port)}.pid`)
+}
+
+/**
+ * 停止窗口自己的日志：`$DSH_HOME/<包名>/restart/stop-window-<port>.log`。
+ *
+ * 与 `relaunch.log` 同一个道理 —— 这个窗口是**可见但不会说话**的：它自己出错（绑不上、
+ * Job Object 建不出来）时，唯一留痕就是这份日志。路径要进工具的 `key`，否则等于没写。
+ *
+ * @param dshHome 宿主数据目录（`$DSH_HOME`）。
+ * @param port 实例端口。
+ */
+export function restartStopWindowLogPath(dshHome: string, port: number): string {
+  return join(dshHome, 'dsh-plugin-debugging', 'restart', `stop-window-${String(port)}.log`)
+}
+
+/**
+ * 拉起脚本（`job` 文件）的落点：`$DSH_HOME/<包名>/restart/launch-<port>.job`。
+ *
+ * 它只有一项职责：把**动态值**（新宿主的命令、旧进程号、等待上限、各种落点）从 TS
+ * 交给仓里的静态资产。格式见 {@link serializeLauncherJob}。
+ *
+ * **为什么是文件而不是命令行参数**：`/tr` 的取值上限是 261 字符（见
+ * {@link ../tools/dsh_restart.ts} 的 `SCHTASKS_TR_MAX_CHARS`），而一个真实的目标命令行
+ * 实测已达 269 字符 —— 塞不进 `/tr`。文件内容不过 `schtasks` 存储→重放那两跳。
+ *
+ * ⚠️ 与 {@link restartMarkerPath} 同一条纪律：紧跟 `dshHome` 的第一段**必须是字符串字面量**
+ * （B10 的白名单只认字面量）。
+ *
+ * @param dshHome 宿主数据目录（`$DSH_HOME`）。
+ * @param port 这个实例监听的端口（两个实例各写各的）。
+ */
+export function restartLauncherJobPath(dshHome: string, port: number): string {
+  return join(dshHome, 'dsh-plugin-debugging', 'restart', `launch-${String(port)}.job`)
+}
+
+/**
+ * 包根下的静态资产路径。
+ *
+ * ## 为什么用 `import.meta.url` 而不是 `__dirname`
+ *
+ * 本文件在源码树里是 `src/lib/restart.ts`、编译后是 `lib/lib/restart.js`，**两者都距包根
+ * 两级**。于是同一个 `'../../assets'` 在源码与产物里解析到同一个目录 —— 测试（跑源码）与
+ * 运行时（跑产物）拿到的是同一份资产，不需要两套写法。
+ *
+ * 本层**不 import `node:fs`**（`test/tools/restart-fs.test.ts` 钉着这一条）：这里只算路径，
+ * 存在性由装配处注入的谓词去探。
+ *
+ * @param name 资产文件名。
+ */
+export function restartAssetPath(name: string): string {
+  return fileURLToPath(new URL(`../../assets/${name}`, import.meta.url))
+}
+
+/**
+ * 隐藏启动器 shim（静态 `launcher.vbs`）的绝对路径。
+ *
+ * 它只做一件事：用 `wscript.exe`（GUI 子系统，无控制台）把 `launcher.js` 隐藏着跑起来。
+ * 2026-10-17 实测：`node.exe` 是控制台程序，被计划任务直接跑起来**一定**会开一个可见窗口，
+ * 而 `schtasks` 没有隐藏开关 ⇒ 这一跳删不掉，但它不含任何逻辑。
+ */
+export function launcherShimPath(): string {
+  return restartAssetPath('launcher.vbs')
+}
+
+/**
+ * 启动器逻辑（静态 `launcher.js`）的绝对路径。
+ *
+ * 全部决策都在这里，所以它能单测：等旧 pid 退出、起新宿主（`windowsHide`）、确保停止窗口。
+ */
+export function launcherScriptPath(): string {
+  return restartAssetPath('launcher.js')
+}
+
+/**
+ * 可见停止窗口脚本（静态 `stop-window.ps1`）的绝对路径。
+ *
+ * 它持有一个 `KILL_ON_JOB_CLOSE` 的 Job Object 句柄 ⇒ 关窗口 / Ctrl+C / 强杀都会让内核
+ * 终结宿主。这是「新宿主没有控制台」之后唯一可见的停止入口。
+ */
+export function stopWindowScriptPath(): string {
+  return restartAssetPath('stop-window.ps1')
+}
+
+/**
+ * `powershell.exe` 的绝对路径（**Windows 系统目录**，不走 PATH）。
+ *
+ * 与 {@link wscriptPath} 同一个理由：`launcher.js` 由计划任务起，`PATH` 不是交互终端的
+ * `PATH`，裸名解析失败时的症状是「窗口没出现」。
+ */
+export function powershellPath(): string {
+  const root = process.env['SystemRoot'] ?? process.env['windir'] ?? 'C:\\Windows'
+  return join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+}
+
+/**
+ * 一个拉起作业的全部动态值。
+ *
+ * 字段与 `assets/launcher.js` 读的键**一一对应**；这里不做校验（序列化只负责格式），
+ * 值的合法性由调用方（`relaunchPlanOf`）保证。
+ */
+export interface LauncherJob {
+  /** `node.exe` 的绝对路径（shim 用它起 `launcher.js`）。 */
+  node: string
+  /** `launcher.js` 的绝对路径。 */
+  launcher: string
+  /** 启动器日志；窗口与启动器共用它以外的两份，日志在这里。 */
+  log: string
+  /** 等旧进程退出的上限（毫秒）。 */
+  capMs: number
+  /** 旧进程号：启动器等的就是它消失。 */
+  oldPid: number
+  /** 新宿主的可执行文件（绝对路径）。 */
+  command: string
+  /** 新宿主的参数（逐项，不走 shell ⇒ 没有引号规则）。 */
+  args: readonly string[]
+  /** 新宿主的工作目录。 */
+  cwd: string
+  /** 新宿主的 `DSH_HOME`（以环境变量传递，不拼进命令行）。 */
+  dshHome: string
+  /** `powershell.exe` 的绝对路径。 */
+  powershell: string
+  /** `wscript.exe` 的绝对路径（两个 shim 都要用它）。 */
+  wscript: string
+  /** 让窗口可见的那一跳（`show-window.vbs`）。 */
+  showWindow: string
+  /** 作业文件自己的绝对路径（两个 shim 都只收路径，不收命令行）。 */
+  job: string
+  /**
+   * 停止窗口的完整命令行，写进作业文件、由 `show-window.vbs` 原样交给 `Shell.Run`。
+   *
+   * ⚠️ 它**不能**当 argv 传给 VBS：Node 会把参数里的双引号转义成反斜杠加引号，而
+   * `wscript` 的参数解析器不还原 ⇒ 命令串带反斜杠进去、`Shell.Run` 静默失败，
+   * 症状只是「没有窗口」。2026-10-17 实测：同一个串由 PowerShell 直传能起，由
+   * `node` 的 `spawn` 传就起不来。
+   */
+  stopWindowCommand: string
+  /** 停止窗口脚本。 */
+  stopWindow: string
+  /** 停止窗口的 pidfile（单例判据）。 */
+  stopWindowPid: string
+  /** 停止窗口的日志。 */
+  stopWindowLog: string
+  /** 停止窗口盯的端口。 */
+  stopWindowPort: number
+  /** marker 落点：停止窗口用它区分「重启途中」与「被人停了」。 */
+  markerPath: string
+}
+
+/**
+ * 把 {@link LauncherJob} 序列化成 `key=value` 的行文本。
+ *
+ * 三条有意的选择：
+ * - **一行一个键**：`launcher.vbs` 要用 VBScript 读它，而 VBScript 没有 JSON 解析器。
+ *   shim 只读前两个键（`node` / `launcher`），其余原样交给 `launcher.js`。
+ * - **`args` 用 JSON 数组**：参数里可能有空格、引号、`&`、`=`。`key=value` 的切分只按
+ *   **第一个** `=` 切，值里再有 `=` 也不影响；而 JSON 数组是唯一能无损承载「带空格的
+ *   参数列表」又不必让 VBScript 去解析的形态。
+ * - **值是单行的**：换行会把一个键拆成两行，让 `launcher.js` 读到半截值。
+ *   参数里真有换行是极端的，此时行为是「读到一个坏键」，方向是**不启动**而不是乱启动。
+ *
+ * @param job 动态值。
+ */
+export function serializeLauncherJob(job: LauncherJob): string {
+  const lines = [
+    `node=${job.node}`,
+    `launcher=${job.launcher}`,
+    `log=${job.log}`,
+    `capMs=${String(job.capMs)}`,
+    `oldPid=${String(job.oldPid)}`,
+    `command=${job.command}`,
+    `args=${JSON.stringify(job.args)}`,
+    `cwd=${job.cwd}`,
+    `dshHome=${job.dshHome}`,
+    `powershell=${job.powershell}`,
+    `wscript=${job.wscript}`,
+    `showWindow=${job.showWindow}`,
+    `job=${job.job}`,
+    `stopWindowCommand=${job.stopWindowCommand}`,
+    `stopWindow=${job.stopWindow}`,
+    `stopWindowPid=${job.stopWindowPid}`,
+    `stopWindowLog=${job.stopWindowLog}`,
+    `stopWindowPort=${String(job.stopWindowPort)}`,
+    `markerPath=${job.markerPath}`,
+  ]
+  return `${lines.join('\r\n')}\r\n`
 }
 
 /**
@@ -1217,3 +1432,24 @@ function blockingSessions(decision: GatePass, callingSession: string): readonly 
 
 // `isString` / `messageOf` 的唯一实现在 errors.ts（2026-10-16 审计 A1 / A3 收敛，
 // 本文件原有两份已删）。
+
+/**
+ * 让窗口**可见**的那一跳（静态 `show-window.vbs`）的绝对路径。
+ *
+ * ## 为什么需要它（实测，不是推断）
+ *
+ * Node 无法向 Windows 请求 `CREATE_NEW_CONSOLE`：
+ * - `spawn(..., { detached: true })` 在 Windows 上映射成 `DETACHED_PROCESS` ⇒ **完全没有**
+ *   控制台（这正是拉起宿主时想要的）；
+ * - 不 detached 的子进程则**继承父进程的控制台** —— 而父进程是个无控制台的宿主 ⇒
+ *   子进程也没有控制台。
+ *
+ * 于是「从一个无控制台的进程里开出一个**可见**窗口」只能靠这一跳：`wscript.exe` 是
+ * GUI 子系统程序，`Shell.Run` 用窗口样式 **1**（normal）会要一个新可见控制台。
+ *
+ * 它与 {@link launcherShimPath} 是同一对原语的两半：那边要样式 **0**（隐藏），这边要 1。
+ * 两个文件都不含逻辑。
+ */
+export function showWindowShimPath(): string {
+  return restartAssetPath('show-window.vbs')
+}
