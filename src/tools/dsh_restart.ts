@@ -116,6 +116,7 @@ import { composeDescription, type ToolDescription } from './describe.js'
 import {
   assertResolvedDshHome,
   effectiveConfig,
+  resolvePort,
   resolvedLine,
   toOutput,
   toolOutput,
@@ -521,6 +522,9 @@ export function createRestartTool(deps: RestartToolDeps): ToolDefinition {
           parsed.delayMs,
           process.pid,
           deps.restart.pathExists,
+          // 端口的环境线索走**注入面**（与另外三个工具一致）。直接用 `process.env`
+          // 会让这条判据在本机与 CI 上说两种话（本机有 DSH_WEB_URL、CI 没有）。
+          deps.env,
         )
         const base = {
           gatesPassed: gatesPassedOf(probe),
@@ -1320,12 +1324,23 @@ function relaunchPlanOf(
   delayMs: number,
   pid: number,
   pathExists: (path: string) => boolean,
+  env: NodeJS.ProcessEnv,
 ): RelaunchPlan {
+  // ⚠️ **不能用 `config.port`**：那个字段默认是 `0`，语义是「自己推断」
+  // （`src/config.ts` 的 `port: z.number().default(0)`）。2026-10-17 真机 dry-run 抓到
+  // 过这个错 —— 它产出了 `launch-0.job` / `stop-window-0.pid`，窗口会去绑 0 号端口、
+  // 永远找不到宿主。真正的端口要经 `resolvePort` 解析（配置 > `DSH_WEB_URL`）。
+  //
+  // `env` 是**注入**的而不是 `process.env`：本机有 `DSH_WEB_URL`、CI 没有，
+  // 直接读进程环境会让行为随机器变（本仓坑 24/25）。
+  const resolvedPort = resolvePort(undefined, config.port, env)
+  const port = resolvedPort?.port ?? 0
+
   const logPath = restartLauncherLogPath(config.dshHome)
-  const jobPath = restartLauncherJobPath(config.dshHome, config.port)
+  const jobPath = restartLauncherJobPath(config.dshHome, port)
   // 停止窗口的三个落点都带端口：两个实例（3080 / 3081）各管各的窗口，互不影响。
-  const stopWindowPidPath = restartStopWindowPidPath(config.dshHome, config.port)
-  const stopWindowLogPath = restartStopWindowLogPath(config.dshHome, config.port)
+  const stopWindowPidPath = restartStopWindowPidPath(config.dshHome, port)
+  const stopWindowLogPath = restartStopWindowLogPath(config.dshHome, port)
   const hidden = hiddenLauncherAvailable(pathExists)
 
   const target = [launch.command, ...launch.args].map(quoteArg).join(' ')
@@ -1346,7 +1361,7 @@ function relaunchPlanOf(
     stopWindowCommand: stopWindowCommandLine({
       powershell: powershellPath(),
       script: stopWindowScriptPath(),
-      port: config.port,
+      port,
       pidPath: stopWindowPidPath,
       logPath: stopWindowLogPath,
       markerPath: restartMarkerPath(config.dshHome),
@@ -1354,7 +1369,7 @@ function relaunchPlanOf(
     stopWindow: stopWindowScriptPath(),
     stopWindowPid: stopWindowPidPath,
     stopWindowLog: stopWindowLogPath,
-    stopWindowPort: config.port,
+    stopWindowPort: port,
     markerPath: restartMarkerPath(config.dshHome),
   })
 

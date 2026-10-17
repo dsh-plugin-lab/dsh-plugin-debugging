@@ -206,6 +206,13 @@ interface HarnessOptions {
   /** 拉起端口自己抛（用来钉「兜底分支的 `key.stage` 按调用点报」）。 */
   relaunchThrows?: boolean
   /**
+   * 注入给工具的环境变量（端口的第三条来源）。
+   *
+   * ⚠️ **必须显式给**，不能沿用 `process.env`：本机有 `DSH_WEB_URL`、CI 没有，
+   * 于是同一条判据会说两种话（本仓坑 24/25）。给 `{}` = 明确声明「这一格没有环境线索」。
+   */
+  env?: NodeJS.ProcessEnv
+  /**
    * 隐藏启动器（`wscript.exe`）在不在。
    *
    * **必须显式钉住分支**（本仓纪律：平台相关判据不许按真实平台走，见 `test/AGENTS.md`）：
@@ -356,7 +363,11 @@ function harnessFor(home: string, options: HarnessOptions = {}): Harness {
   // 本文件其余用例要测的都是「开关**开**着」的那条路（默认关是另一条，见第 22 节）。
   const config = configFor(home, { enableRestart: volatileOf(true), ...options.config })
   // 载体**显式给**（默认「命令行 × win32」= 唯一有已实测回归路线的那一格）。
-  const deps = depsFor(config, { carrier: options.carrier ?? carrierOf('cli', 'win32') })
+  const deps = depsFor(config, {
+    carrier: options.carrier ?? carrierOf('cli', 'win32'),
+    // 端口那条环境线索**显式钉住**：不给就沿用 `process.env`，而那让判据随机器变。
+    ...(options.env === undefined ? {} : { env: options.env }),
+  })
   // ⚠️ 显式对象构造（不是往窄类型的形参里塞多余字段）：替身被静默丢掉是本仓踩过的坑 40。
   const tool = createRestartTool({ ...deps, restart: host })
   return {
@@ -1141,6 +1152,52 @@ describe('dsh_restart · 拉起的命令可复核', () => {
     // 回退形态必须**如实进 key**：缺省即隐藏形态，出现这一格就是「会闪一个控制台」。
     expect(data.key['launcherMode']).toBe('console-fallback')
     expect(String(data.key['relaunch']), 'key 里仍应是目标命令').toContain('bin.js')
+  })
+
+  it('停止窗口的落点按**解析后的端口**取名，不是 `config.port`（那个字段默认 0）', async () => {
+    // 2026-10-17 真机 dry-run 抓到的缺陷：`config.port` 的默认值是 `0`（语义是「自己推断」），
+    // 直接用它产出了 `launch-0.job` / `stop-window-0.pid` —— 窗口会去绑 0 号端口、
+    // 永远找不到宿主，而**所有单测与门禁当时都是绿的**（没人断言端口是几）。
+    // 端口真源是 `resolvePort`（配置 > `DSH_WEB_URL`）。
+    //
+    // ⚠️ 环境线索**显式注入**：不钉的话本机（有 DSH_WEB_URL）绿、CI（没有）红 ——
+    // 第一次提交就是这么红的（本仓坑 24/25）。
+    const home = await tempDshHome()
+    const h = harnessFor(home, {
+      policy: 'never',
+      env: { DSH_WEB_URL: 'http://127.0.0.1:3080' },
+    })
+    await run(h.tool, ARGS, execFor())
+    const job = String(h.fs.writes.find((entry) => entry.path.endsWith('.job'))?.text)
+    const portLine = job.split('\r\n').find((line) => line.startsWith('stopWindowPort=')) ?? ''
+    const port = Number(portLine.slice('stopWindowPort='.length))
+    expect(port, '端口是 0 —— 用了 config.port 而不是 resolvePort').toBe(3080)
+    // 落点名必须与那个端口一致（否则窗口写 pidfile 的地方与启动器读的地方不是一个）。
+    expect(String(h.launchCalls[0]?.commandLine)).toContain('launch-3080.job')
+    expect(job).toContain('-3080.pid')
+  })
+
+  it('配置里的 `port` 优先于环境变量（两条来源都注入，断言取的是配置那条）', async () => {
+    const home = await tempDshHome()
+    const h = harnessFor(home, {
+      policy: 'never',
+      config: { port: 3099 },
+      env: { DSH_WEB_URL: 'http://127.0.0.1:3080' },
+    })
+    await run(h.tool, ARGS, execFor())
+    const job = String(h.fs.writes.find((entry) => entry.path.endsWith('.job'))?.text)
+    expect(job).toContain('stopWindowPort=3099')
+  })
+
+  it('端口解析不出来时（不配置、也没有 `DSH_WEB_URL`）落点为 0，且**如实暴露**', async () => {
+    // 上面那条判据的反面：两者一起才能证明「端口真的来自解析」，而不是某个常量。
+    // `env: {}` 也顺带钉住「工具不读 `process.env`」—— 本机有 DSH_WEB_URL，
+    // 若实现偷读进程环境，这一条就会拿到 3080 而不是 0。
+    const home = await tempDshHome()
+    const h = harnessFor(home, { policy: 'never', env: {} })
+    await run(h.tool, ARGS, execFor())
+    const job = String(h.fs.writes.find((entry) => entry.path.endsWith('.job'))?.text)
+    expect(job).toContain('stopWindowPort=0')
   })
 })
 
