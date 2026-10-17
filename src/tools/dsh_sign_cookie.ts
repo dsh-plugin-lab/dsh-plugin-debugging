@@ -203,7 +203,7 @@ async function issueCookie(
   const missing = assertResolvedDshHome(call.config)
   if (missing !== undefined) return toOutput(missing)
 
-  const resolvedPort = resolvePort(args.port, call.config.port, call.env)
+  const resolvedPort = resolvePort(args.port, call.config.port, call.env, call.hostPort())
   if (resolvedPort === undefined) {
     return toOutput(
       fail(

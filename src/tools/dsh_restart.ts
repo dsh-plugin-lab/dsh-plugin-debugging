@@ -529,9 +529,11 @@ export function createRestartTool(deps: RestartToolDeps): ToolDefinition {
           parsed.delayMs,
           process.pid,
           deps.restart.pathExists,
-          // 端口的环境线索走**注入面**（与另外三个工具一致）。直接用 `process.env`
-          // 会让这条判据在本机与 CI 上说两种话（本机有 DSH_WEB_URL、CI 没有）。
+          // 端口的两条线索都走**注入面**（与另外三个工具一致）：宿主实际监听端口
+          // （`ctx.webServer.port`）与环境变量。都不读进程环境 —— 那会让判据随机器变。
           deps.env,
+          // 传 thunk 而不是值：`relaunchPlanOf` 自己决定什么时候取（也便于测试注入）。
+          deps.hostPort,
         )
         const base = {
           gatesPassed: gatesPassedOf(probe),
@@ -1350,6 +1352,7 @@ function relaunchPlanOf(
   pid: number,
   pathExists: (path: string) => boolean,
   env: NodeJS.ProcessEnv,
+  hostPort: () => number | undefined,
 ): RelaunchPlan {
   // ⚠️ **端口必须解析，不能直接把配置值当端口**。这一段曾经把 `config.port` 直接传下去，
   // 而那个字段的默认值是 `0`（语义是「自己推断」），于是产出了 `launch-0.job` /
@@ -1359,7 +1362,7 @@ function relaunchPlanOf(
   //
   // `env` 是**注入**的而不是 `process.env`：本机有 `DSH_WEB_URL`、CI 没有，
   // 直接读进程环境会让行为随机器变（本仓坑 24/25）。
-  const resolvedPort = resolvePort(undefined, config.port, env)
+  const resolvedPort = resolvePort(undefined, config.port, env, hostPort())
   const port = resolvedPort?.port
 
   const logPath = restartLauncherLogPath(config.dshHome)

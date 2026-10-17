@@ -207,7 +207,7 @@ async function probeAuthentication(
   const missing = assertResolvedDshHome(deps.config)
   if (missing !== undefined) return toOutput(missing)
 
-  const resolvedPort = resolvePort(args.port, deps.config.port, deps.env)
+  const resolvedPort = resolvePort(args.port, deps.config.port, deps.env, deps.hostPort())
   if (resolvedPort === undefined) {
     return toOutput(
       fail(

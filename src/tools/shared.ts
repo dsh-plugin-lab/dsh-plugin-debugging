@@ -37,6 +37,15 @@ export interface ToolDeps {
   /** 环境变量；只为测试注入（默认 `process.env`）。 */
   readonly env: NodeJS.ProcessEnv
   /**
+   * 宿主自己的**实际监听端口**（`ctx.webServer.port`）；`undefined` = 没监听 / 服务不在场。
+   *
+   * 是**函数**不是值，两个理由：
+   * 1. 服务要**用的时候现取** —— `webServer` 在 `listen` 绑定之前 `port` 是 undefined，
+   *    而本插件 `apply` 早于绑定（本仓在 `restart-recovery` 上吃过同形的亏）；
+   * 2. `ctx.get` 必须每次现调用，不能把某一刻的结论冻结进 `deps`。
+   */
+  readonly hostPort: () => number | undefined
+  /**
    * 读宿主 Loader 树（用来**观测** `fiber.state`）。
    *
    * 做成**闭包**而不是把 `ctx` 传进工具：工具实现因此仍然不依赖 Cordis，
@@ -86,12 +95,19 @@ export function createToolDeps(
     fetch: overrides.fetch ?? defaultFetchImpl,
     now: overrides.now ?? Date.now,
     env: overrides.env ?? process.env,
+    hostPort: overrides.hostPort ?? (() => undefined),
     loader: overrides.loader ?? unavailableLoader,
   }
 }
 
-/** 端口是从哪来的 —— 「谁给的」比「是什么」更值得留在输出里。 */
-export type PortSource = 'tool-argument' | 'plugin-config' | 'env:DSH_WEB_URL'
+/**
+ * 端口是从哪来的 —— 「谁给的」比「是什么」更值得留在输出里。
+ *
+ * `host:webServer` 是**宿主自己的实际监听端口**（`ctx.webServer.port`）。它排第三位、
+ * 在环境变量之前，因为它是进程内的权威事实；`env:DSH_WEB_URL` 只在子进程形态下才有值
+ * （见 {@link resolvePort} 的注释）。
+ */
+export type PortSource = 'tool-argument' | 'plugin-config' | 'host:webServer' | 'env:DSH_WEB_URL'
 
 /** 定出来的端口 + 它的来源。 */
 export interface ResolvedPort {
@@ -102,28 +118,50 @@ export interface ResolvedPort {
 /**
  * 定端口。
  *
- * 顺序：显式参数 > 配置里的 `port` > 环境变量 `DSH_WEB_URL` 里的端口。
+ * 顺序：显式参数 > 配置里的 `port` > **宿主实际监听端口** > 环境变量 `DSH_WEB_URL`。
  *
- * 为什么要看 `DSH_WEB_URL`：配置里 `port: 0` 的语义是「自己推断」，而本工具**不猜**。
- * 宿主启动时会把自己的地址放进 `DSH_WEB_URL`（本机实测形如
- * `http://127.0.0.1:3080`，且**不含任何 token**）—— 那是宿主自己给的答案，
- * 比猜一个 3080 诚实得多。三条都没有时返回 `undefined`，由调用方显式失败
- * 或（`dsh_diagnose_plugin_load` 那种文件层仍能答的工具）照实报 `none`。
+ * ## 为什么第三位是 `webServer.port`，而不是环境变量（2026-10-17 修的）
+ *
+ * 这里原先只有三段，第三段读 `env.DSH_WEB_URL`，注释写着「宿主启动时会把自己的地址放进
+ * `DSH_WEB_URL`」。**那条假设是错的**：`DSH_WEB_URL` 是宿主注册给 **`shellEnv`** 的变量
+ * （`dsh-web-app` 里的 `shellEnv.register({ variables: { DSH_WEB_URL: … } })`），只注入到
+ * **它派生的子进程**里，宿主**自己的 `process.env` 从来没有它**（`[已核]` 装好的
+ * `dsh-web-app/lib/index.js`）。所以这一条在宿主进程内**永不命中** —— 不是某台机器的
+ * 环境差异，是结构性的。
+ *
+ * 后果不只是「少一个来源」：没配 `port` 的机器上，`dsh_check_auth` / `dsh_sign_cookie`
+ * 会报「no port could be determined」**并建议设 `DSH_WEB_URL`——而那条建议在这种载体上
+ * 是死路**。`[已实测]` 本机 `dsh_check_auth` 就是这么失败的。
+ *
+ * 正确的来源就在进程内：`@deepseek-ai/dsh-host-webserver` 的 `WebServer` 服务
+ * `get port()` 返回**实际监听端口**（`:0` 由 OS 分配时也会回填真实值），与
+ * `--public-url` 无关（`[已核]` 该文件的 getter 注释与本仓实测）。
+ *
+ * ⚠️ 顺序上**配置优先于实际端口**是有意的：配置那条是「跨实例观察」的唯一手段
+ * （`docs/SHAPE.md` §1.2 的 D′：拿别人的端口去探别人），不能被自己进程的端口盖掉。
+ *
+ * 四段都没有时返回 `undefined`，由调用方显式失败或（`dsh_diagnose_plugin_load` 那种
+ * 文件层仍能答的工具）照实报 `none`。
  *
  * @param explicit 工具参数里的端口。
- * @param configured 配置里的端口。
- * @param env 环境变量。
+ * @param configured 配置里的端口（`undefined` = 没配）。
+ * @param env 环境变量（子进程形态下才有 `DSH_WEB_URL`）。
+ * @param hostPort 宿主自己的实际监听端口（`undefined` = 没监听 / 服务不在场）。
  */
 export function resolvePort(
   explicit: number | undefined,
   configured: number | undefined,
   env: NodeJS.ProcessEnv,
+  hostPort?: number,
 ): ResolvedPort | undefined {
   if (explicit !== undefined && Number.isSafeInteger(explicit) && explicit > 0) {
     return { port: explicit, source: 'tool-argument' }
   }
   if (configured !== undefined && Number.isSafeInteger(configured) && configured > 0) {
     return { port: configured, source: 'plugin-config' }
+  }
+  if (hostPort !== undefined && Number.isSafeInteger(hostPort) && hostPort > 0) {
+    return { port: hostPort, source: 'host:webServer' }
   }
   const fromEnv = portFromUrl(env.DSH_WEB_URL)
   return fromEnv === undefined ? undefined : { port: fromEnv, source: 'env:DSH_WEB_URL' }

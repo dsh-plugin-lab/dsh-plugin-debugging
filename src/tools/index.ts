@@ -63,6 +63,15 @@ export function registerTools(ctx: Context, state: PluginState): void {
   const deps = createToolDeps(state.config, {
     loader: () => readLoaderEntries(loaderFrom(ctx)),
     carrier: state.carrier,
+    // 端口的第一条**进程内**线索：宿主实际监听的端口。
+    //
+    // 为什么是闭包：`webServer` 在 `listen` 绑定之前 `port` 是 undefined，而本插件
+    // `apply` 早于绑定 ⇒ 只能「用的时候现取」。这与上面 loader 那条同一个理由，
+    // 也是本仓在 restart-recovery 上吃过的亏（服务不能提前取一次存起来）。
+    //
+    // 为什么用可选服务：`webServer` 只在 web 载体上存在。写成 `inject` 会让 CLI /
+    // 桌面载体把整插件挂成静默 PENDING（`src/AGENTS.md` 的 inject 纪律）。
+    hostPort: () => webServerPortOf(ctx),
   })
   const factories = [
     createEffectModeTool,
@@ -108,4 +117,35 @@ export function registerTools(ctx: Context, state: PluginState): void {
       restart: restartHostFrom(ctx, state.config, state.carrier, deps.spawn, existsSync),
     }),
   )
+}
+
+/**
+ * 读宿主**实际监听的端口**（`ctx.webServer.port`）；取不到 ⇒ `undefined`。
+ *
+ * ## 为什么需要它（2026-10-17 修的根）
+ *
+ * 本仓原先假定「宿主会把地址放进 `DSH_WEB_URL` 环境变量」，于是 `resolvePort` 的第三条
+ * 来源读 `process.env`。**那条假设是错的**：`DSH_WEB_URL` 由 `dsh-web-app` 注册进
+ * `shellEnv`，只注入到宿主**派生的子进程**，宿主自己的 `process.env` 从来没有它。
+ * ⇒ 那条来源在宿主进程内**永不命中**，于是没配 `port` 的机器上 `dsh_check_auth` /
+ * `dsh_sign_cookie` / `dsh_restart` 全都定不出端口（前者还建议你去设那个变量 —— 死路）。
+ *
+ * 权威来源就在进程内：`@deepseek-ai/dsh-host-webserver` 的 `WebServer` 服务，
+ * `get port()` 的注释是「the listening port (the OS-assigned value when config.port
+ * is 0), or undefined before listen binds」—— 与 `--public-url` 无关，
+ * `config.port = 0` 那种「让 OS 挑」的情形也会回填真实值。
+ *
+ * ## 三值纪律
+ *
+ * 返回三态而不是布尔：服务不在场（非 web 载体）/ 服务在但还没绑定 / 有端口。
+ * 前两者都返回 `undefined`，由 `resolvePort` 继续往下一条来源走，**不在这里猜**。
+ *
+ * @param ctx 宿主上下文。
+ */
+function webServerPortOf(ctx: Context): number | undefined {
+  const getter = (ctx as { get?: (name: string) => unknown }).get
+  if (typeof getter !== 'function') return undefined
+  const server = getter.call(ctx, 'webServer') as { port?: unknown } | undefined
+  const port = server?.port
+  return typeof port === 'number' && Number.isSafeInteger(port) && port > 0 ? port : undefined
 }
