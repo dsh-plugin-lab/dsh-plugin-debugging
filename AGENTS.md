@@ -154,16 +154,6 @@ git diff --check
 
 **还开着的：**
 
-- [ ] **停止窗口拿不到端口时只能退化成「没有窗口」—— 宿主自己的端口应当被自动发现。**
-      现状：`dsh_restart` 用 `resolvePort` 定端口（显式参数 > 插件配置 > `DSH_WEB_URL`），
-      而本机实测**宿主进程里没有 `DSH_WEB_URL`** ⇒ 只剩插件配置一条路 ⇒ **装了这个插件的人
-      得自己配 `port`**，否则重启后新宿主既无控制台、又无可见停止入口（会如实报
-      `stopWindowSkipped`，但那已经是降级）。
-      可做的方向：拿**本进程自己的 pid** 反查它在监听哪个端口（宿主就是自己，不需要猜），
-      作为 `resolvePort` 的第四条来源。它是 IO（Windows 上要起查询子进程），而
-      `relaunchPlanOf` 目前是同步的 ⇒ 得把它提到 `planRestart` 的异步侧。
-      形态与实测 → [docs/SHAPE.md](docs/SHAPE.md) §6.1.2 的端口段。
-
 - [ ] **技能压过用户级同名技能 —— 机制已实现，代价仍在**：动态 scope 注入让 rank 250 真正赢；
       成本是技能此后**只在装了本插件的 profile 里**可见（见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §3）。
       决策与「静态写进 preset 为何被否决」→ [.agents/notes/2026-10-13-skill-registers-twice-dynamic-scope.md](.agents/notes/2026-10-13-skill-registers-twice-dynamic-scope.md)。

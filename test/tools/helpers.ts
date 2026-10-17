@@ -145,6 +145,13 @@ export function depsFor(
     now?: () => number
     loader?: () => LoaderReadResult
     carrier?: CarrierObservation
+    /**
+     * 宿主实际监听端口（ctx.webServer.port 的替身）。
+     *
+     * ⚠️ **不给就是 `undefined`**（等价于「服务不在场」）。要断言「端口来自宿主」的用例
+     * 必须显式给 —— 否则它会悄悄走 environment 那条，判据看起来绿、其实测的是别的东西。
+     */
+    hostPort?: () => number | undefined
   } = {},
 ): ToolDeps {
   return createToolDeps(config, {
@@ -153,6 +160,7 @@ export function depsFor(
     env: overrides.env ?? {},
     ...(overrides.now === undefined ? {} : { now: overrides.now }),
     ...(overrides.loader === undefined ? {} : { loader: overrides.loader }),
+    ...(overrides.hostPort === undefined ? {} : { hostPort: overrides.hostPort }),
     // ⚠️ **不注入就落 `UNKNOWN_CARRIER`**（`createToolDeps` 的兜底）：那是 fail-closed 的
     // 那一端 —— 忘了注入的用例会在 `dsh_restart` 闸④上响亮失败，而不是悄悄拿到一条
     // 它在真机上并不拥有的回归路线（`task-scheduler`）。凡是断言「能拉起」的用例

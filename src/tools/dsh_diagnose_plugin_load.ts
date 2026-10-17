@@ -453,7 +453,7 @@ export function createDiagnosePluginLoadTool(deps: ToolDeps): ToolDefinition {
 
         const { dshHome, profile } = call.config
         const dir = profileDir(dshHome, profile)
-        const resolvedPort = resolvePort(args.port, call.config.port, call.env)
+        const resolvedPort = resolvePort(args.port, call.config.port, call.env, call.hostPort())
         const resolved = effectiveConfig(call.config, resolvedPort)
         const keyResolved = toResolvedKey(resolved)
 

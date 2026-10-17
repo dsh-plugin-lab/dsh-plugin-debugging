@@ -573,20 +573,34 @@ Ctrl+C 是好的 —— 换到生产路径才暴露。教训：**验证要在真
 `launch-0.job` / `stop-window-0.pid`，窗口去绑 0 号端口、永远找不到宿主，而**当时 931 条用例 +
 CI + lint 全是绿的**（没有任何判据断言过端口是几）。
 
-**已按「把哨兵挡在边界」修掉**（同日）：
+**端口有四条来源**（顺序即优先级，`resolvePort` 的唯一实现）：
 
-| 层 | 现在的形状 |
-|---|---|
-| schema（`Config.port`） | `z.number().default(0)` 照旧 —— `0` 在**用户没填**这个位置是合理的惯用法 |
-| `ResolvedConfig.port` | `number \| undefined`：**「没写」而不是「0」**。「忘了解析」从静默的 0 变成类型上的缺席 |
-| `resolvePort` | 三段优先级不变（显式参数 > 配置 > `DSH_WEB_URL`），只接受 `number \| undefined` |
-| 拼文件名的三个函数 | 收到非正数**抛 `RangeError`**（断言而非控制流）—— 哨兵真正咬人的就是这一层 |
-| 端口定不出来时 | **不创建停止窗口**，作业文件名退化成 `launch.job`，且 `key.stopWindowSkipped` 明说原因 |
+| # | 来源 | 什么时候命中 |
+|---|---|---|
+| 1 | 工具参数 `port` | 调用方显式指定 |
+| 2 | 插件配置 `port` | 用户写了；**跨实例观察**（D′）只能靠这条，所以它排在实际端口之前 |
+| 3 | **`ctx.webServer.port`** | 宿主自己在监听 ⇒ **任何 web 用户开箱即用** |
+| 4 | `DSH_WEB_URL` 环境变量 | 只对**子进程**有意义（见下） |
 
-⚠️ **本机实测：宿主进程里没有 `DSH_WEB_URL`**（`dsh_check_auth` 报 `no port could be determined`），
-所以 `resolvePort` 的第三条来源在真机上不成立 —— 得靠插件配置里的 `port`。**代价是装了这个插件
-的人必须自己配端口**，否则重启后没有停止窗口（会如实报 `stopWindowSkipped`，不是静默失败）。
-这一条是**待修缺口**：见根 [AGENTS.md](../AGENTS.md) 待办里的「自动发现宿主自己的端口」。
+⚠️ **第 4 条在宿主进程内永不命中 —— 这是 2026-10-17 修掉的根因。** 本仓原先假定「宿主会把
+地址放进 `DSH_WEB_URL`」，实际它是 `dsh-web-app` 注册进 **`shellEnv`** 的变量，只注入到宿主
+**派生的子进程**；宿主自己的 `process.env` 从来没有它（`[已核]` 装好的
+`dsh-web-app/lib/index.js` 里 `shellEnv.register({ variables: { DSH_WEB_URL } })`）。
+后果不只是少一条来源：没配 `port` 的机器上 `dsh_check_auth` / `dsh_sign_cookie` /
+`dsh_restart` 全都定不出端口，而前两者的错误文案还建议去设 `DSH_WEB_URL` —— **死路**
+（`[已实测]` 本机 `dsh_check_auth` 就是这么失败的）。
+
+权威来源是 `@deepseek-ai/dsh-host-webserver` 的 `WebServer` 服务：`get port()` 的注释写明
+它是「the listening port (the OS-assigned value when `config.port` is 0), or `undefined`
+before `listen` binds」—— 与 `--public-url` 无关，`:0` 让 OS 挑的端口也会回填。
+本仓在装配处经**可选服务**取它（`ctx.get('webServer')`，**不**写进 `inject`，否则 CLI / 桌面
+载体把整插件挂成静默 PENDING），且**每次调用现取**（`listen` 之前它是 `undefined`）。
+
+**哨兵只在 schema 边界**：`Config.port` 仍是 `z.number().default(0)`（`0` = 用户没填，惯用法），
+但 `ResolvedConfig.port` 是 `number | undefined`（「没写」而**不是** `0`），`resolveConfig`
+把 `0` 与非正数一律折成 `undefined`；三个把端口拼进文件名的函数收到非正数**抛 `RangeError`**
+（断言而非控制流 —— 哨兵真正咬人的就是那一层）。端口定不出来时照旧**不创建停止窗口**、
+作业文件名退化成 `launch.job`，并由 `key.stopWindowSkipped` 明说。
 
 **单例**：命名 mutex + pidfile + 启动器拉起前先验活 ⇒ 连跑三次启动器窗口数恒为 **1**。
 
