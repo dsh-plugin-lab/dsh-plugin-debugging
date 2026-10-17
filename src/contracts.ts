@@ -86,8 +86,24 @@ export interface ResolvedConfig extends WorkloadBudgetConfig {
   dshHomeSource: 'config' | 'env' | 'default' | 'tool-argument'
   /** profile 名：用于拼 `<dshHome>/profiles/<profile>`。 */
   profile: string
-  /** 要探测的宿主端口；`0` = 自己按监听端口推断。 */
-  port: number
+  /**
+   * 用户在**插件配置**里写的端口；`undefined` = 没写（不是「端口 0」）。
+   *
+   * ## 为什么是 `undefined` 而不是 `0`（2026-10-17 改）
+   *
+   * 这里曾经是 `number`，默认值 `0`，语义是「自己推断」。问题在于**哨兵值跑出了边界**：
+   * `resolveConfig` 的名字说「已解析」，却把一个「未解析」的 0 交给下游，于是每个消费者
+   * 都必须**记得**去调 `resolvePort`，忘了就静默拿到 0。
+   *
+   * 后果是真机故障而不是理论风险：`dsh_restart` 用它拼出了 `launch-0.job` /
+   * `stop-window-0.pid`，停止窗口去绑 0 号端口、永远找不到宿主，而当时 931 条用例 +
+   * CI + lint **全绿** —— 没有任何判据问过端口是几。
+   *
+   * 改成 `undefined` 之后，「忘了解析」从**静默的 0** 变成**类型上的缺席**：想把它当数字用
+   * 就必须先过 `resolvePort`。哨兵只留在 schema 边界（`Config.port` 的 `default(0)`），
+   * 那里它才是合理的惯用法。
+   */
+  port?: number
   /**
    * `dsh_restart` 的总闸（**默认关**，`resolveConfig` 显式兜底成 `false`）。
    *

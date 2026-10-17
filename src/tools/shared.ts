@@ -116,13 +116,13 @@ export interface ResolvedPort {
  */
 export function resolvePort(
   explicit: number | undefined,
-  configured: number,
+  configured: number | undefined,
   env: NodeJS.ProcessEnv,
 ): ResolvedPort | undefined {
   if (explicit !== undefined && Number.isSafeInteger(explicit) && explicit > 0) {
     return { port: explicit, source: 'tool-argument' }
   }
-  if (Number.isSafeInteger(configured) && configured > 0) {
+  if (configured !== undefined && Number.isSafeInteger(configured) && configured > 0) {
     return { port: configured, source: 'plugin-config' }
   }
   const fromEnv = portFromUrl(env.DSH_WEB_URL)

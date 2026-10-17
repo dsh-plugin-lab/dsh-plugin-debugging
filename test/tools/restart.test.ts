@@ -43,7 +43,11 @@ import {
   planRestart,
   readRestartMarker,
   RESTART_COOLDOWN_MS,
+  restartLauncherJobPath,
   restartMarkerPath,
+  restartStopWindowLogPath,
+  restartStopWindowPath,
+  restartStopWindowPidPath,
   serializeMarker,
   SUPPORTED_MARKER_VERSIONS,
   type BusySource,
@@ -943,6 +947,36 @@ describe('lib/restart · B10 命名空间字面量自证', () => {
     expect(/\bfrom\s+['"]node:fs/u.test(source)).toBe(false)
     // 自证这条正则不是恒真：同样的形态出现在别处时它必须认出来。
     expect(/\bfrom\s+['"]node:fs/u.test("import { readFile } from 'node:fs/promises'")).toBe(true)
+  })
+})
+
+describe('lib/restart · 端口进文件名之前的守卫（2026-10-17 事故的钉子）', () => {
+  // 事故形状：调用方把插件配置的哨兵值 `0`（语义「自己推断」）直接传进来，
+  // `restartStopWindowPidPath(home, 0)` 返回了一个**看起来很正常的路径**
+  // `.../stop-window-0.pid`。没有异常、没有日志，下游窗口去绑 0 号端口、永远等不到宿主，
+  // 界面显示「Waiting for DSH to appear on port 0」——看起来像「DSH 没在运行」。
+  // 所以这三个函数必须**抛**而不是生成假路径。
+  const home = '/tmp/home'
+
+  for (const [name, build] of [
+    ['restartStopWindowPath', restartStopWindowPath],
+    ['restartStopWindowPidPath', restartStopWindowPidPath],
+    ['restartStopWindowLogPath', restartStopWindowLogPath],
+  ] as const) {
+    it(`${name} 收到 0 / 负数 / 非整数 ⇒ 抛 RangeError（不生成假路径）`, () => {
+      for (const bad of [0, -1, 1.5, Number.NaN]) {
+        expect(() => build(home, bad), `${name} 接受了 ${String(bad)}`).toThrow(RangeError)
+      }
+      // 正数照常（否则「全都抛」也会让上面那些断言通过 —— 反空转）。
+      expect(build(home, 3080)).toContain('3080')
+    })
+  }
+
+  it('作业文件的落点**不抛**：端口定不出来时退化成不带端口后缀的名字（重启本身仍成立）', () => {
+    expect(restartLauncherJobPath(home, undefined)).toMatch(/launch\.job$/u)
+    expect(restartLauncherJobPath(home, 3080)).toMatch(/launch-3080\.job$/u)
+    // 但给了个坏数字仍然抛 —— 「缺席」与「假的端口」是两件事。
+    expect(() => restartLauncherJobPath(home, 0)).toThrow(RangeError)
   })
 })
 

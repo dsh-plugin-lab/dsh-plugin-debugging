@@ -568,13 +568,25 @@ Ctrl+C 是好的 —— 换到生产路径才暴露。教训：**验证要在真
 **身份按端口**（多实例）：真宿主的命令行里**没有** `--port` / `--profile` / `DSH_HOME`（实测），
 所以窗口轮询 `<port>` 的属主 pid，并要求进程名是 `node`。两个实例实测互不影响。
 
-⚠️ **端口必须经 `resolvePort` 解析，不能直接用 `config.port`**：那个字段默认是 `0`
-（语义是「自己推断」）。2026-10-17 真机 dry-run 抓到过 —— 它产出 `launch-0.job` /
-`stop-window-0.pid`，窗口去绑 0 号端口、永远找不到宿主，而**当时 931 条用例 + CI + lint
-全是绿的**（没有任何判据断言过端口是几）。现在有两条判据钉住（端口 > 0；解析不出来时如实为 0）。
+⚠️ **端口必须经 `resolvePort` 解析，不能直接拿配置值当端口**。2026-10-17 真机 dry-run 抓到过
+这个错：当时 `ResolvedConfig.port` 是 `number`、默认 `0`（语义是「自己推断」），直接传下去产出
+`launch-0.job` / `stop-window-0.pid`，窗口去绑 0 号端口、永远找不到宿主，而**当时 931 条用例 +
+CI + lint 全是绿的**（没有任何判据断言过端口是几）。
+
+**已按「把哨兵挡在边界」修掉**（同日）：
+
+| 层 | 现在的形状 |
+|---|---|
+| schema（`Config.port`） | `z.number().default(0)` 照旧 —— `0` 在**用户没填**这个位置是合理的惯用法 |
+| `ResolvedConfig.port` | `number \| undefined`：**「没写」而不是「0」**。「忘了解析」从静默的 0 变成类型上的缺席 |
+| `resolvePort` | 三段优先级不变（显式参数 > 配置 > `DSH_WEB_URL`），只接受 `number \| undefined` |
+| 拼文件名的三个函数 | 收到非正数**抛 `RangeError`**（断言而非控制流）—— 哨兵真正咬人的就是这一层 |
+| 端口定不出来时 | **不创建停止窗口**，作业文件名退化成 `launch.job`，且 `key.stopWindowSkipped` 明说原因 |
+
 ⚠️ **本机实测：宿主进程里没有 `DSH_WEB_URL`**（`dsh_check_auth` 报 `no port could be determined`），
-所以 `resolvePort` 的第三条来源在真机上不成立 —— 得靠插件配置里的 `port`。装完这个插件
-若发现窗口一直停在「Waiting for DSH to appear on port 0」，先查这一条。
+所以 `resolvePort` 的第三条来源在真机上不成立 —— 得靠插件配置里的 `port`。**代价是装了这个插件
+的人必须自己配端口**，否则重启后没有停止窗口（会如实报 `stopWindowSkipped`，不是静默失败）。
+这一条是**待修缺口**：见根 [AGENTS.md](../AGENTS.md) 待办里的「自动发现宿主自己的端口」。
 
 **单例**：命名 mutex + pidfile + 启动器拉起前先验活 ⇒ 连跑三次启动器窗口数恒为 **1**。
 
