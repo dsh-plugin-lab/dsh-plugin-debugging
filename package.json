@@ -37,6 +37,7 @@
   "files": [
     "lib",
     "!lib/**/*.map",
+    "assets",
     "icon.svg",
     "locale/*.json",
     "skills/dsh-plugin-debugging/SKILL.md",

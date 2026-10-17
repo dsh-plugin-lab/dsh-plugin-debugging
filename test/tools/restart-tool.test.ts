@@ -1071,7 +1071,7 @@ describe('dsh_restart · 顺序：闸门全过之后才轮到审批门', () => {
 // ── 10. 拉起命令可复核 ─────────────────────────────────────────────────────
 
 describe('dsh_restart · 拉起的命令可复核', () => {
-  it('`key.relaunch` 是**目标命令**；`/tr` 只指向启动器，两者都在 key 里能对上', async () => {
+  it('`key.relaunch` 是**目标命令**；`/tr` 只指向隐藏 shim + 作业文件，两者都能对上', async () => {
     const home = await tempDshHome()
     const h = harnessFor(home, { policy: 'never' })
     const result = await run(h.tool, ARGS, execFor())
@@ -1079,58 +1079,53 @@ describe('dsh_restart · 拉起的命令可复核', () => {
     const relaunch = String(data.key['relaunch'])
     expect(relaunch).toContain('bin.js')
     expect(relaunch).toContain('--profile web')
-    // 新宿主必须看到**同一个** home（计划任务不继承本进程的环境变量）。
-    expect(relaunch).toContain(home)
     expect(h.launchCalls).toHaveLength(1)
-    // ⚠️ 交给拉起端口的**不是**那条目标命令，而是启动器调用（2026-10-17 起）：
-    // 目标命令进了脚本文件，`/tr` 只指它 —— 这样引号不过 `schtasks` 的存储/重放两跳。
+    // 交给拉起端口的是**隐藏 shim 的调用**，不是目标命令，也不是新宿主的 home：
+    // 目标命令与 DSH_HOME 都进了作业文件，`/tr` 只有三段（shim + 作业文件）。
     const tr = String(h.launchCalls[0]?.commandLine)
     expect(tr).toContain('wscript.exe')
-    expect(tr).toContain('relaunch.vbs')
+    expect(tr, 'shim 是仓里的静态资产').toContain('launcher.vbs')
     expect(tr, '目标命令不该再出现过 /tr 里').not.toContain('bin.js')
+    expect(tr, 'DSH_HOME 也不该再拼进 /tr').not.toContain('DSH_HOME')
     // 渲染文本里也要有（L2 才是模型真正读的那一层）。
     expect(renderText(h.tool, ARGS, result)).toContain('bin.js')
   })
 
-  it('落盘的启动器脚本：设 home → 进工作目录 → 起宿主，且**不含**说明性文字', async () => {
+  it('落盘的作业文件：home → 工作目录 → 目标命令 + argv，且**不含**说明性文字', async () => {
     const home = await tempDshHome()
     const h = harnessFor(home, { policy: 'never' })
     await run(h.tool, ARGS, execFor())
-    const script = h.fs.writes.find((entry) => entry.path.endsWith('relaunch.vbs'))
-    expect(script, '启动器脚本没落盘 —— `/tr` 指的就是它').toBeDefined()
-    const vbs = String(script?.text)
-    expect(h.launchCalls[0]?.commandLine).toContain(String(script?.path))
-    // 目标命令行逐字进脚本（VBS 里 `"` 写成 `""`，所以比较的是去转义后的形状）。
-    expect(vbs).toContain(`set ""DSH_HOME=${home}""`)
-    expect(vbs).toContain('cd /d C:/repo')
-    expect(vbs).toContain('node bin.js --profile web')
-    // 隐藏执行：窗口样式 0（这是**没有可见控制台**的那一刀）。
-    expect(vbs).toContain('sh.Run target, 0, False')
-    // WMI moniker 必须是无路径形态：写成 `winmgmts:\\.\root\cimv2` 时 TS 会把 `\r`
-    // 解释成回车，生成出一条坏 moniker（lint 的 no-useless-escape 抓过一次）。
-    expect(vbs).toContain('GetObject("winmgmts:")')
-    expect(vbs, 'moniker 里带反斜杠 = 踩了 TS 转义').not.toMatch(/winmgmts:\\/u)
-    expect(vbs, 'moniker 里混进了真回车').not.toMatch(/winmgmts:[\r\n]/u)
-    // 脚本第一步就写日志 —— 脚本写坏 = 静默不启动，靠这份日志分开「没跑」与「跑了失败」。
-    expect(vbs).toContain('Say "launcher started')
-    expect(vbs, '启动器里掺了给人看的括注').not.toContain('(cwd')
-    expect(vbs, '启动器里出现了给人看的 home 括注').not.toContain('home ')
+    const job = h.fs.writes.find((entry) => entry.path.endsWith('.job'))
+    expect(job, '作业文件没落盘 —— `/tr` 指的就是它').toBeDefined()
+    const text = String(job?.text)
+    expect(h.launchCalls[0]?.commandLine).toContain(String(job?.path))
+    // 新宿主必须看到**同一个** home —— 改由 `launcher.js` 用 env 传，不再拼进命令行。
+    expect(text).toContain(`dshHome=${home}`)
+    expect(text).toContain('cwd=C:/repo')
+    expect(text).toContain('command=node')
+    // argv 走 JSON 数组：参数里的空格/引号/`&` 都无损，且**不经过任何 shell**。
+    const argsLine = text.split('\r\n').find((line) => line.startsWith('args=')) ?? ''
+    expect(JSON.parse(argsLine.slice('args='.length))).toEqual(['bin.js', '--profile', 'web'])
+    // 停止窗口的三个作动值也在这份文件里（launcher.js 靠它们 ensure 窗口）。
+    expect(text).toContain('stopWindow=')
+    expect(text).toContain('stopWindowPid=')
+    expect(text).toContain('markerPath=')
+    expect(text, '作业文件里掺了给人看的括注').not.toContain('(cwd')
   })
 
-  it('等待是**上限**：进脚本的是 capMs 与旧进程号，不再是命令行里的 `ping -n`', async () => {
+  it('等待是**上限**：进作业文件的是 capMs 与旧进程号，不再是命令行里的 `ping -n`', async () => {
     const home = await tempDshHome()
     const h = harnessFor(home, { policy: 'never' })
     await run(h.tool, { ...ARGS, delayMs: 30_000 }, execFor())
     expect(h.launchCalls[0]?.delayMs).toBe(30_000)
-    const vbs = String(h.fs.writes.find((entry) => entry.path.endsWith('relaunch.vbs'))?.text)
-    expect(vbs).toContain('capMs = 30000')
-    expect(vbs).toContain(`oldPid = ${String(process.pid)}`)
-    expect(vbs, '固定睡眠应已被 PID 等待取代').toContain('Do While waited < capMs')
+    const text = String(h.fs.writes.find((entry) => entry.path.endsWith('.job'))?.text)
+    expect(text).toContain('capMs=30000')
+    expect(text).toContain(`oldPid=${String(process.pid)}`)
     expect(String(h.launchCalls[0]?.commandLine)).not.toContain('ping')
     expect(h.launchCalls[0]?.budgetMs).toBeGreaterThan(0)
   })
 
-  it('回退形态（`wscript.exe` 不在）：退回 cmd 行 + `ping`，且**不写**启动器脚本', async () => {
+  it('回退形态（`wscript.exe` 不在）：`/tr` 直接跑 launcher.js，且**如实进 key**', async () => {
     // 两条分支都在**任意平台**上被真跑到：这一条显式把谓词钉成「不在」——
     // CI 是 ubuntu（真机上必然不在）、本机是 Windows（真机上在），按真实平台判
     // 总有一条分支在某个环境里永远跑不到（`test/AGENTS.md` 的平台纪律）。
@@ -1138,16 +1133,13 @@ describe('dsh_restart · 拉起的命令可复核', () => {
     const h = harnessFor(home, { policy: 'never', hiddenLauncher: false })
     const data = expectOk(await run(h.tool, ARGS, execFor()))
     const tr = String(h.launchCalls[0]?.commandLine)
-    expect(tr.startsWith(`cmd /c set "DSH_HOME=${home}"`)).toBe(true)
-    expect(tr, '回退形态的等待只能靠 ping').toContain('ping -n 4')
-    expect(tr).toContain('node bin.js --profile web')
-    expect(
-      h.fs.writes.some((entry) => entry.path.endsWith('relaunch.vbs')),
-      '回退却写了 VBS',
-    ).toBe(false)
-    // 回退形态必须**如实进 key**：没有 `launcher` / `launcherLog` 两格即是回退的信号。
-    expect(data.key['launcher']).toBeUndefined()
-    expect(data.key['launcherLog']).toBeUndefined()
+    expect(tr, '回退形态没有 shim').not.toContain('launcher.vbs')
+    expect(tr).toContain('launcher.js')
+    expect(tr).toContain('.job')
+    expect(tr, '固定睡眠与 cmd 那一套都应已消失').not.toContain('ping')
+    expect(tr).not.toContain('cmd /c')
+    // 回退形态必须**如实进 key**：缺省即隐藏形态，出现这一格就是「会闪一个控制台」。
+    expect(data.key['launcherMode']).toBe('console-fallback')
     expect(String(data.key['relaunch']), 'key 里仍应是目标命令').toContain('bin.js')
   })
 })
@@ -1824,10 +1816,10 @@ describe('dsh_restart · 拉起的命令行长度上限（schtasks /tr 的文档
   })
 })
 
-// ── 18. 命令行里的 cmd 元字符必须加引号（EXTRA-1） ────────────────────────
+// ── 18. 目标命令的展示形态 + argv 的无损传递 ────────────────────────────────
 
-describe('dsh_restart · 命令行对 cmd 元字符加引号', () => {
-  it('路径里**没有空格但有 `&`** ⇒ 那条 argv 必须带引号（否则 cmd 在那里断开、错起一条命令）', async () => {
+describe('dsh_restart · 目标命令的引号与 argv 传递', () => {
+  it('`key.relaunch` 是**给人复核的展示串**：含 cmd 元字符的参数必须带引号', async () => {
     const home = await tempDshHome()
     const h = harnessFor(home, {
       policy: 'never',
@@ -1842,18 +1834,12 @@ describe('dsh_restart · 命令行对 cmd 元字符加引号', () => {
     })
     const data = expectOk(await run(h.tool, ARGS, execFor()))
     const line = String(data.key['relaunch'])
-    // 判据是**引号真的在**：把 bug 改回去（只按空格/制表/引号判）时这三段全是裸的 ⇒ 判红。
+    // 判据是**引号真的在**：把 bug 改回去（只按空格/制表/引号判）时这两段全是裸的 ⇒ 判红。
     expect(line).toContain('"C:/R&D/node.exe"')
     expect(line).toContain('"C:/R&D/bin.js"')
-    expect(line).toContain('cd /d "C:/R&D"')
-    // 交出去的是启动器调用；那条目标行逐字进了脚本文件（`"` 在 VBS 里写成 `""`）。
-    const vbs = String(h.fs.writes.find((entry) => entry.path.endsWith('relaunch.vbs'))?.text)
-    expect(vbs).toContain('""C:/R&D/node.exe""')
-    expect(vbs).toContain('""C:/R&D/bin.js""')
-    expect(vbs).toContain('cd /d ""C:/R&D""')
   })
 
-  it('其余元字符（`|` `^` `<` `>` `(` `)`）与空白同样加引号', async () => {
+  it('其余元字符（`|` `^` `<` `>` `(` `)`）与空白同样加引号，普通参数不加', async () => {
     const home = await tempDshHome()
     const h = harnessFor(home, {
       policy: 'never',
@@ -1861,7 +1847,7 @@ describe('dsh_restart · 命令行对 cmd 元字符加引号', () => {
         known: true,
         value: {
           command: 'node',
-          args: ['a|b', 'c^d', 'e<f', 'g>h', 'i(j)', 'k l', 'm\tn'],
+          args: ['a|b', 'c^d', 'e<f', 'g>h', 'i(j)', 'k l', 'm\tn', 'plain'],
           cwd: 'C:/repo',
         },
       },
@@ -1871,8 +1857,24 @@ describe('dsh_restart · 命令行对 cmd 元字符加引号', () => {
     for (const raw of ['a|b', 'c^d', 'e<f', 'g>h', 'i(j)', 'k l', 'm\tn']) {
       expect(line, `${raw} 没被加引号`).toContain(`"${raw}"`)
     }
-    // 反空转：不含元字符的普通参数**不许**被无谓地加引号（否则这条判据对「一律加引号」也绿）。
-    expect(line).toContain('& node')
+    // 反空转：不含元字符的参数**不许**被无谓地加引号（否则这条判据对「一律加引号」也绿）。
+    expect(line).toContain(' plain')
+    expect(line).not.toContain('"plain"')
+  })
+
+  it('argv 通过作业文件的 JSON 数组传递 ⇒ 元字符与引号**原样到达**，不经过任何 shell', async () => {
+    // 这条取代了原先「cmd 会在 `&` 处断开」的判据：现在根本不存在 cmd —— 宿主由
+    // `launcher.js` 以 argv 数组 spawn。判据因此从「引号加对了」升级成「值无损」。
+    const home = await tempDshHome()
+    const nasty = ['a&b', 'c|d', 'e"f', 'g h', 'i\tj', 'k=l']
+    const h = harnessFor(home, {
+      policy: 'never',
+      launch: { known: true, value: { command: 'node', args: nasty, cwd: 'C:/repo' } },
+    })
+    await run(h.tool, ARGS, execFor())
+    const text = String(h.fs.writes.find((entry) => entry.path.endsWith('.job'))?.text)
+    const argsLine = text.split('\r\n').find((line) => line.startsWith('args=')) ?? ''
+    expect(JSON.parse(argsLine.slice('args='.length))).toEqual(nasty)
   })
 })
 
