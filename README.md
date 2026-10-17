@@ -45,7 +45,11 @@ This plugin lets the agent decide which case you're in, and what to do next.
 
 ## What it does
 
-After installation, the agent gains a set of tools and a skill document. The skill loads on demand.
+After installation, the agent gains a set of tools and a skill document. The skill loads on demand; you invoke it with a slash command.
+
+<p align="center">
+  <img src="assets/invoke-skill.png" alt="Invoking the skill with a slash command" width="600">
+</p>
 
 ### Tools
 

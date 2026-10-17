@@ -45,7 +45,11 @@
 
 ## 它做什么
 
-装上之后，agent 多了一组工具和一份 skill（技能）文档，skill 按需加载。
+装上之后，agent 多了一组工具和一份 skill（技能）文档，skill 按需加载，用斜杠命令调用。
+
+<p align="center">
+  <img src="assets/invoke-skill.png" alt="用斜杠命令调用 skill" width="600">
+</p>
 
 ### 工具
 
