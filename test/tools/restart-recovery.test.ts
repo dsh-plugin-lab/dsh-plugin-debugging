@@ -961,9 +961,11 @@ describe('apply 接线（活跃坑 42：判据被测 ≠ 接进了入口）', ()
     try {
       const host = fakeHost()
       apply(host.ctx as never, { dshHome: HOME })
-      expect(host.disposers).toHaveLength(1)
-
-      host.disposers[0]?.()
+      // `apply` 现在挂两个 effect：恢复半 + 「发布停止窗口地址」。
+      // 两个都必须被收好，所以断言的是**个数下限 + 全部可调用**，而不是写死 1
+      // —— 写死个数会让「以后再加一个 effect」变成一条假红，而假红会诱人去放宽判据。
+      expect(host.disposers.length).toBeGreaterThanOrEqual(1)
+      for (const dispose of host.disposers) dispose()
       await vi.advanceTimersByTimeAsync(RECOVERY_STARTUP_DELAY_MS * 3)
       await flushMicrotasks()
 

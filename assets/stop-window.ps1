@@ -221,19 +221,177 @@ public static class DshStopWindowJob
 }
 '@
 
-$job = 0
-try {
-  $job = [DshStopWindowJob]::CreateKillOnCloseJob()
-  Say ('job created (handle ' + $job + ')')
-} catch {
-  Say ('could not create the job: ' + $_.Exception.Message)
+$script:job = 0
+$script:adoptedPid = 0
+$script:everBound = $false
+$script:lastTarget = 0
+$script:reArmedFor = 0
+$script:lastBindNote = ""
+
+# Liveness only: nothing in this file ends a process (see the file header).
+function HostAlive([int] $ProcessId) {
+  if ($ProcessId -le 0) { return $false }
+  return ($null -ne (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue))
 }
+
+# Writes a note once per distinct message. The bind path runs every second, so a plain
+# Say buried the log in identical lines (measured: 30+ lines per failed restart).
+function Bind-Note([string] $Message) {
+  if ($Message -ne $script:lastBindNote) {
+    $script:lastBindNote = $Message
+    Say $Message
+  }
+}
+
+<#
+.SYNOPSIS
+  Creates the control job and makes it the current one.
+
+.DESCRIPTION
+  Deliberately does NOT close the handle it replaces. Closing a KILL_ON_JOB_CLOSE job
+  ends every process still inside it, and "is anything still inside it" is the one thing
+  this script cannot know for sure. An abandoned empty job costs one handle until this
+  process ends; a wrong close costs a running host.
+#>
+function Open-ControlJob([string] $Why) {
+  try {
+    $script:job = [DshStopWindowJob]::CreateKillOnCloseJob()
+    Say ('control job created (handle ' + $script:job + '; ' + $Why + ')')
+  } catch {
+    $script:job = 0
+    Say ('could not create the control job: ' + $_.Exception.Message)
+  }
+}
+
+<#
+.SYNOPSIS
+  Adopts a host pid into the control job, re-arming the job when the hierarchy forbids it.
+
+.DESCRIPTION
+  A job handle is fixed to one branch of the job hierarchy by its FIRST adoption: once it
+  holds a process, Windows refuses (win32 5, ERROR_ACCESS_DENIED) to add a process coming
+  from a different tree. That is why a window that survived a restart could never take
+  control of the new host again (measured 2026-10-18: one handle adopted 29260 at 13:26
+  and refused 33696 at 13:40, while a freshly started window adopted a host immediately).
+  A new handle starts a new hierarchy, so re-arming is the fix.
+
+  The re-arm is guarded: it happens only while the previously adopted host is GONE, which
+  is the only situation where abandoning the old handle cannot end a live process.
+#>
+function Bind-Host([int] $ProcessId) {
+  if ($script:lastTarget -ne $ProcessId) {
+    $script:lastTarget = $ProcessId
+    $script:reArmedFor = 0
+  }
+  if ($script:job -eq 0) { Open-ControlJob 'initial' }
+
+  try {
+    [DshStopWindowJob]::PutInJob($script:job, $ProcessId)
+    $script:adoptedPid = $ProcessId
+    $script:everBound = $true
+    $script:lastBindNote = ""
+    Say ('bound to host pid ' + $ProcessId)
+    return $true
+  } catch {
+    Bind-Note ('could not bind pid ' + $ProcessId + ': ' + $_.Exception.Message)
+  }
+
+  if (-not $script:everBound) { return $false }
+  if (HostAlive $script:adoptedPid) { return $false }
+  if ($script:reArmedFor -eq $ProcessId) { return $false }
+
+  $script:reArmedFor = $ProcessId
+  Open-ControlJob ('re-armed for pid ' + $ProcessId + '; the previous handle sat in another job tree')
+  if ($script:job -eq 0) { return $false }
+  try {
+    [DshStopWindowJob]::PutInJob($script:job, $ProcessId)
+    $script:adoptedPid = $ProcessId
+    $script:lastBindNote = ""
+    Say ('bound to host pid ' + $ProcessId + ' after re-arming the control job')
+    return $true
+  } catch {
+    Say ('re-arming did not help for pid ' + $ProcessId + ': ' + $_.Exception.Message)
+    return $false
+  }
+}
+
+Open-ControlJob 'initial'
 
 $bound = 0
 $waited = 0
 
+# The address file sits next to this window's pid file and carries the same port suffix,
+# so the launcher does not have to pass it: the window derives it from what it already has.
+$UrlFile = Join-Path (Split-Path -Parent $PidFile) ('url-' + $Port + '.txt')
+
+# The last panel drawn, so an unchanged screen is not cleared and redrawn every second.
+$script:lastPanel = ''
+
+<#
+.SYNOPSIS
+  Reads the address the running host published for this port; empty string when absent.
+
+.DESCRIPTION
+  The file names the pid that published it, and only a match against the host this window
+  actually controls is accepted. That is what stops a leftover file from a previous run
+  from being shown: an expired token looks authoritative and answers 401, which is worse
+  than showing nothing.
+#>
+function Read-PublishedUrl {
+  if ($bound -eq 0) { return '' }
+  try {
+    if (-not (Test-Path -LiteralPath $UrlFile)) { return '' }
+    $lines = Get-Content -LiteralPath $UrlFile -Encoding UTF8 -ErrorAction Stop
+  } catch {
+    return ''
+  }
+  $publisher = 0
+  $address = ''
+  foreach ($line in $lines) {
+    if ($line -like 'pid=*') { [void][int]::TryParse($line.Substring(4).Trim(), [ref] $publisher) }
+    elseif ($line -like 'url=*') { $address = $line.Substring(4).Trim() }
+  }
+  if ($publisher -ne $bound) { return '' }
+  return $address
+}
+
+<#
+.SYNOPSIS
+  Breaks a long address into indented lines that fit the window.
+
+.DESCRIPTION
+  A token URL is one unbreakable run of characters, and a wrapped one is still copyable.
+  Truncating it would not be: the shown value has to be the whole thing.
+#>
+function Format-Url([string] $Address) {
+  $width = 0
+  try { $width = [Console]::WindowWidth } catch { }
+  if ($width -le 0) { $width = 100 }
+  $limit = $width - 8
+  if ($limit -lt 24) { $limit = 24 }
+  $result = @()
+  $rest = $Address
+  while ($rest.Length -gt $limit) {
+    $result += ('    ' + $rest.Substring(0, $limit))
+    $rest = $rest.Substring($limit)
+  }
+  $result += ('    ' + $rest)
+  return $result
+}
+
+<#
+.SYNOPSIS
+  Draws the panel, but only when something actually changed.
+
+.DESCRIPTION
+  Clear-Host blanks the whole screen before rewriting it. Running that every second made
+  the window flicker even while the text was identical, so the text is compared first.
+#>
 function Show-Panel {
   param([string] $Title, [string[]] $Lines, [string] $Colour)
+  $signature = $Title + '|' + $Colour + '|' + ($Lines -join '|')
+  if ($signature -eq $script:lastPanel) { return }
+  $script:lastPanel = $signature
   try { $Host.UI.RawUI.WindowTitle = $Title } catch { }
   Clear-Host
   foreach ($line in $Lines) { Write-Host $line -ForegroundColor $Colour }
@@ -257,32 +415,36 @@ try {
       $waited = 0
 
       if ($owner -ne $bound) {
-        if ($job -ne 0 -and $ownerName -eq 'node') {
-          try {
-            [DshStopWindowJob]::PutInJob($job, $owner)
-            $bound = $owner
-            Say ('bound to host pid ' + $owner)
-          } catch {
-            $bound = 0
-            Say ('could not bind pid ' + $owner + ': ' + $_.Exception.Message)
-          }
+        if ($ownerName -eq 'node') {
+          if (Bind-Host $owner) { $bound = $owner } else { $bound = 0 }
         }
         elseif ($ownerName -ne 'node') {
           # Never adopt a process that is not a DSH host: adopting it would make closing
           # this window end something unrelated.
           $bound = 0
-          Say ('refusing to bind pid ' + $owner + ': process name is ' + $ownerName + ', not node')
+          Bind-Note ('refusing to bind pid ' + $owner + ': process name is ' + $ownerName + ', not node')
         }
       }
 
       if ($bound -ne 0) {
-        Show-Panel -Title ('DSH ' + $Port + ' (pid ' + $bound + ')') -Colour 'Green' -Lines @(
+        $address = Read-PublishedUrl
+        $lines = @(
+          ('DSH is running  (pid ' + $bound + ', port ' + $Port + ')')
           ''
-          ('  DSH is running  (pid ' + $bound + ', port ' + $Port + ')')
-          ''
-          '  DSH lives as long as this window.'
-          '  Ending this window ends DSH: close it, or press Ctrl+C.'
         )
+        $lines += '  > Open in browser:'
+        if ($address -ne '') {
+          $lines += (Format-Url $address)
+        }
+        else {
+          # Not an error: a host that has not published yet (no web carrier, or still
+          # starting) simply has no address to offer. Never invent one without a token.
+          $lines += '    (the host has not published an address yet)'
+        }
+        $lines += ''
+        $lines += '  > Stop DSH:'
+        $lines += '    Close this window, or press Ctrl+C.'
+        Show-Panel -Title ('DSH ' + $Port + ' (pid ' + $bound + ')') -Colour 'Green' -Lines $lines
       }
       else {
         Show-Panel -Title ('DSH ' + $Port + ' (not bound)') -Colour 'Yellow' -Lines @(
