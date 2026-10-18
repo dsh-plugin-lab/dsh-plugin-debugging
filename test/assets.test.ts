@@ -82,7 +82,38 @@ describe('assets · 静态资产（取代运行期拼脚本）', () => {
     expect(text).toContain('JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE')
     expect(text).toContain('AssignProcessToJobObject')
     expect(text, '句柄必须由本进程一直持有').toContain(
-      '$job = [DshStopWindowJob]::CreateKillOnCloseJob()',
+      '$script:job = [DshStopWindowJob]::CreateKillOnCloseJob()',
+    )
+  })
+
+  it('停止窗口能对「第二次收编」重新起一个 job（而不是一辈子只绑一个）', () => {
+    // 2026-10-18 真机缺陷：一个 job 句柄的层级由**第一次收编**决定，之后来自另一条
+    // job 树的宿主永远加不进去（win32 5）。窗口本来就要跨重启存活，于是第二个宿主
+    // 起不来 —— 而窗口会安静地退化成「黄字 + 关不掉」。修法是失败后**重建**句柄。
+    //
+    // 这里判的是**修法的存在与顺序**，不是「症状消失」：真机上的效果由 integration 那侧
+    // 验（本目录不跑真进程）。没有这段结构，重建就不会发生；重建放错了地方，就可能
+    // 在旧宿主还活着时把它一起收掉。
+    const text = readAsset('assets/stop-window.ps1')
+
+    // ① 建新 job 的入口是一个可重复调用的函数，而不是一次性语句
+    expect(text, '必须有一条可重复执行的建 job 路径').toContain('function Open-ControlJob')
+
+    // ② 失败后重试之前，必须先确认上一个宿主已经死了 —— 这是唯一能安全放弃旧句柄的条件
+    const reArm = text.indexOf('re-armed for pid')
+    expect(reArm, '没有重建分支').toBeGreaterThan(-1)
+    const guard = text.indexOf('if (HostAlive $script:adoptedPid) { return $false }')
+    expect(guard, '重建前缺少「旧宿主必须已死」的守卫').toBeGreaterThan(-1)
+    expect(guard, '守卫必须在重建之前').toBeLessThan(reArm)
+
+    // ③ 同一个目标只重建一次，否则每秒钟都会漏一个 job 句柄
+    expect(text, '缺少「每个目标只重建一次」的闸').toContain(
+      'if ($script:reArmedFor -eq $ProcessId) { return $false }',
+    )
+
+    // ④ 危险动作必须**不存在**：关闭旧句柄是唯一能误杀活宿主的一步，本文件不许有
+    expect(text, '不许关闭旧 job 句柄（那是误杀活宿主的唯一途径）').not.toContain(
+      'CloseJobHandle',
     )
   })
 })

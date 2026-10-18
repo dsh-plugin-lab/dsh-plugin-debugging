@@ -221,13 +221,101 @@ public static class DshStopWindowJob
 }
 '@
 
-$job = 0
-try {
-  $job = [DshStopWindowJob]::CreateKillOnCloseJob()
-  Say ('job created (handle ' + $job + ')')
-} catch {
-  Say ('could not create the job: ' + $_.Exception.Message)
+$script:job = 0
+$script:adoptedPid = 0
+$script:everBound = $false
+$script:lastTarget = 0
+$script:reArmedFor = 0
+$script:lastBindNote = ""
+
+# Liveness only: nothing in this file ends a process (see the file header).
+function HostAlive([int] $ProcessId) {
+  if ($ProcessId -le 0) { return $false }
+  return ($null -ne (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue))
 }
+
+# Writes a note once per distinct message. The bind path runs every second, so a plain
+# Say buried the log in identical lines (measured: 30+ lines per failed restart).
+function Bind-Note([string] $Message) {
+  if ($Message -ne $script:lastBindNote) {
+    $script:lastBindNote = $Message
+    Say $Message
+  }
+}
+
+<#
+.SYNOPSIS
+  Creates the control job and makes it the current one.
+
+.DESCRIPTION
+  Deliberately does NOT close the handle it replaces. Closing a KILL_ON_JOB_CLOSE job
+  ends every process still inside it, and "is anything still inside it" is the one thing
+  this script cannot know for sure. An abandoned empty job costs one handle until this
+  process ends; a wrong close costs a running host.
+#>
+function Open-ControlJob([string] $Why) {
+  try {
+    $script:job = [DshStopWindowJob]::CreateKillOnCloseJob()
+    Say ('control job created (handle ' + $script:job + '; ' + $Why + ')')
+  } catch {
+    $script:job = 0
+    Say ('could not create the control job: ' + $_.Exception.Message)
+  }
+}
+
+<#
+.SYNOPSIS
+  Adopts a host pid into the control job, re-arming the job when the hierarchy forbids it.
+
+.DESCRIPTION
+  A job handle is fixed to one branch of the job hierarchy by its FIRST adoption: once it
+  holds a process, Windows refuses (win32 5, ERROR_ACCESS_DENIED) to add a process coming
+  from a different tree. That is why a window that survived a restart could never take
+  control of the new host again (measured 2026-10-18: one handle adopted 29260 at 13:26
+  and refused 33696 at 13:40, while a freshly started window adopted a host immediately).
+  A new handle starts a new hierarchy, so re-arming is the fix.
+
+  The re-arm is guarded: it happens only while the previously adopted host is GONE, which
+  is the only situation where abandoning the old handle cannot end a live process.
+#>
+function Bind-Host([int] $ProcessId) {
+  if ($script:lastTarget -ne $ProcessId) {
+    $script:lastTarget = $ProcessId
+    $script:reArmedFor = 0
+  }
+  if ($script:job -eq 0) { Open-ControlJob 'initial' }
+
+  try {
+    [DshStopWindowJob]::PutInJob($script:job, $ProcessId)
+    $script:adoptedPid = $ProcessId
+    $script:everBound = $true
+    $script:lastBindNote = ""
+    Say ('bound to host pid ' + $ProcessId)
+    return $true
+  } catch {
+    Bind-Note ('could not bind pid ' + $ProcessId + ': ' + $_.Exception.Message)
+  }
+
+  if (-not $script:everBound) { return $false }
+  if (HostAlive $script:adoptedPid) { return $false }
+  if ($script:reArmedFor -eq $ProcessId) { return $false }
+
+  $script:reArmedFor = $ProcessId
+  Open-ControlJob ('re-armed for pid ' + $ProcessId + '; the previous handle sat in another job tree')
+  if ($script:job -eq 0) { return $false }
+  try {
+    [DshStopWindowJob]::PutInJob($script:job, $ProcessId)
+    $script:adoptedPid = $ProcessId
+    $script:lastBindNote = ""
+    Say ('bound to host pid ' + $ProcessId + ' after re-arming the control job')
+    return $true
+  } catch {
+    Say ('re-arming did not help for pid ' + $ProcessId + ': ' + $_.Exception.Message)
+    return $false
+  }
+}
+
+Open-ControlJob 'initial'
 
 $bound = 0
 $waited = 0
@@ -257,21 +345,14 @@ try {
       $waited = 0
 
       if ($owner -ne $bound) {
-        if ($job -ne 0 -and $ownerName -eq 'node') {
-          try {
-            [DshStopWindowJob]::PutInJob($job, $owner)
-            $bound = $owner
-            Say ('bound to host pid ' + $owner)
-          } catch {
-            $bound = 0
-            Say ('could not bind pid ' + $owner + ': ' + $_.Exception.Message)
-          }
+        if ($ownerName -eq 'node') {
+          if (Bind-Host $owner) { $bound = $owner } else { $bound = 0 }
         }
         elseif ($ownerName -ne 'node') {
           # Never adopt a process that is not a DSH host: adopting it would make closing
           # this window end something unrelated.
           $bound = 0
-          Say ('refusing to bind pid ' + $owner + ': process name is ' + $ownerName + ', not node')
+          Bind-Note ('refusing to bind pid ' + $owner + ': process name is ' + $ownerName + ', not node')
         }
       }
 
