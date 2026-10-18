@@ -320,8 +320,78 @@ Open-ControlJob 'initial'
 $bound = 0
 $waited = 0
 
+# The address file sits next to this window's pid file and carries the same port suffix,
+# so the launcher does not have to pass it: the window derives it from what it already has.
+$UrlFile = Join-Path (Split-Path -Parent $PidFile) ('url-' + $Port + '.txt')
+
+# The last panel drawn, so an unchanged screen is not cleared and redrawn every second.
+$script:lastPanel = ''
+
+<#
+.SYNOPSIS
+  Reads the address the running host published for this port; empty string when absent.
+
+.DESCRIPTION
+  The file names the pid that published it, and only a match against the host this window
+  actually controls is accepted. That is what stops a leftover file from a previous run
+  from being shown: an expired token looks authoritative and answers 401, which is worse
+  than showing nothing.
+#>
+function Read-PublishedUrl {
+  if ($bound -eq 0) { return '' }
+  try {
+    if (-not (Test-Path -LiteralPath $UrlFile)) { return '' }
+    $lines = Get-Content -LiteralPath $UrlFile -Encoding UTF8 -ErrorAction Stop
+  } catch {
+    return ''
+  }
+  $publisher = 0
+  $address = ''
+  foreach ($line in $lines) {
+    if ($line -like 'pid=*') { [void][int]::TryParse($line.Substring(4).Trim(), [ref] $publisher) }
+    elseif ($line -like 'url=*') { $address = $line.Substring(4).Trim() }
+  }
+  if ($publisher -ne $bound) { return '' }
+  return $address
+}
+
+<#
+.SYNOPSIS
+  Breaks a long address into indented lines that fit the window.
+
+.DESCRIPTION
+  A token URL is one unbreakable run of characters, and a wrapped one is still copyable.
+  Truncating it would not be: the shown value has to be the whole thing.
+#>
+function Format-Url([string] $Address) {
+  $width = 0
+  try { $width = [Console]::WindowWidth } catch { }
+  if ($width -le 0) { $width = 100 }
+  $limit = $width - 8
+  if ($limit -lt 24) { $limit = 24 }
+  $result = @()
+  $rest = $Address
+  while ($rest.Length -gt $limit) {
+    $result += ('    ' + $rest.Substring(0, $limit))
+    $rest = $rest.Substring($limit)
+  }
+  $result += ('    ' + $rest)
+  return $result
+}
+
+<#
+.SYNOPSIS
+  Draws the panel, but only when something actually changed.
+
+.DESCRIPTION
+  Clear-Host blanks the whole screen before rewriting it. Running that every second made
+  the window flicker even while the text was identical, so the text is compared first.
+#>
 function Show-Panel {
   param([string] $Title, [string[]] $Lines, [string] $Colour)
+  $signature = $Title + '|' + $Colour + '|' + ($Lines -join '|')
+  if ($signature -eq $script:lastPanel) { return }
+  $script:lastPanel = $signature
   try { $Host.UI.RawUI.WindowTitle = $Title } catch { }
   Clear-Host
   foreach ($line in $Lines) { Write-Host $line -ForegroundColor $Colour }
@@ -357,13 +427,24 @@ try {
       }
 
       if ($bound -ne 0) {
-        Show-Panel -Title ('DSH ' + $Port + ' (pid ' + $bound + ')') -Colour 'Green' -Lines @(
+        $address = Read-PublishedUrl
+        $lines = @(
+          ('DSH is running  (pid ' + $bound + ', port ' + $Port + ')')
           ''
-          ('  DSH is running  (pid ' + $bound + ', port ' + $Port + ')')
-          ''
-          '  DSH lives as long as this window.'
-          '  Ending this window ends DSH: close it, or press Ctrl+C.'
         )
+        $lines += '  > Open in browser:'
+        if ($address -ne '') {
+          $lines += (Format-Url $address)
+        }
+        else {
+          # Not an error: a host that has not published yet (no web carrier, or still
+          # starting) simply has no address to offer. Never invent one without a token.
+          $lines += '    (the host has not published an address yet)'
+        }
+        $lines += ''
+        $lines += '  > Stop DSH:'
+        $lines += '    Close this window, or press Ctrl+C.'
+        Show-Panel -Title ('DSH ' + $Port + ' (pid ' + $bound + ')') -Colour 'Green' -Lines $lines
       }
       else {
         Show-Panel -Title ('DSH ' + $Port + ' (not bound)') -Colour 'Yellow' -Lines @(

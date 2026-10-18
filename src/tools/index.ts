@@ -34,6 +34,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { PluginState } from '../contracts.js'
 import { readLoaderEntries, loaderFrom } from '../lib/loader.js'
 import { reloadHostFrom } from '../lib/hot-reload.js'
+import { listeningPortOf, type StopUrlContextLike } from '../lib/stop-url.js'
 import { createCheckAuthTool } from './dsh_check_auth.js'
 import { createDiagnosePluginLoadTool } from './dsh_diagnose_plugin_load.js'
 import { createDumpConfigTool } from './dsh_dump_config.js'
@@ -140,12 +141,14 @@ export function registerTools(ctx: Context, state: PluginState): void {
  * 返回三态而不是布尔：服务不在场（非 web 载体）/ 服务在但还没绑定 / 有端口。
  * 前两者都返回 `undefined`，由 `resolvePort` 继续往下一条来源走，**不在这里猜**。
  *
+ * ## 实现住在 `lib/stop-url.ts`（一处一事实）
+ *
+ * 启动期的「发布停止窗口地址」也要读同一格端口，那份逻辑不在工具层。所以真正的实现
+ * 搬到 `listeningPortOf`，本处只做转发 —— 两份实现迟早会漂（例如一边认 `> 0`、
+ * 另一边认 `>= 0`），而那种漂移没有任何判据照得到。
+ *
  * @param ctx 宿主上下文。
  */
 function webServerPortOf(ctx: Context): number | undefined {
-  const getter = (ctx as { get?: (name: string) => unknown }).get
-  if (typeof getter !== 'function') return undefined
-  const server = getter.call(ctx, 'webServer') as { port?: unknown } | undefined
-  const port = server?.port
-  return typeof port === 'number' && Number.isSafeInteger(port) && port > 0 ? port : undefined
+  return listeningPortOf(ctx as unknown as StopUrlContextLike)
 }

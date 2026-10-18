@@ -112,9 +112,7 @@ describe('assets · 静态资产（取代运行期拼脚本）', () => {
     )
 
     // ④ 危险动作必须**不存在**：关闭旧句柄是唯一能误杀活宿主的一步，本文件不许有
-    expect(text, '不许关闭旧 job 句柄（那是误杀活宿主的唯一途径）').not.toContain(
-      'CloseJobHandle',
-    )
+    expect(text, '不许关闭旧 job 句柄（那是误杀活宿主的唯一途径）').not.toContain('CloseJobHandle')
   })
 })
 

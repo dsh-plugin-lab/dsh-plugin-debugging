@@ -300,6 +300,23 @@ export function restartStopWindowLogPath(dshHome: string, port: number): string 
 }
 
 /**
+ * 停止窗口读的「已发布地址」：`$DSH_HOME/<包名>/restart/url-<port>.txt`。
+ *
+ * **为什么不把这个落点写进作业文件**：窗口已经拿到 pidfile 的路径
+ * （`stop-window-<port>.pid`），而本文件与它同目录、同端口后缀 ⇒ 窗口自己就能推出路径。
+ * 少一格动态值意味着 job 序列化、`show-window.vbs`、`launcher.js` 三处都不用改 ——
+ * 「同一件事只在一个地方知道」。
+ *
+ * 内容与语义（含 pid 门控与 token 落盘的代价）见 `src/lib/stop-url.ts`。
+ *
+ * @param dshHome 宿主数据目录（`$DSH_HOME`）。
+ * @param port 这个实例监听的端口。
+ */
+export function restartStopWindowUrlPath(dshHome: string, port: number): string {
+  return join(dshHome, 'dsh-plugin-debugging', 'restart', `url-${String(requireResolvedPort(port))}.txt`)
+}
+
+/**
  * 拉起作业文件（`job` 文件）的落点：`$DSH_HOME/<包名>/restart/launch-<port>.job`。
  *
  * 端口**定不出来**时退化成 `launch.job`（不带端口后缀）：作业文件本身不需要端口，
