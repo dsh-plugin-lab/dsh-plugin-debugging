@@ -111,17 +111,38 @@ describe('端口来自宿主自己（ctx.webServer.port），不靠环境变量'
 
 describe('装配处真的把 webServer 接进了 deps（否则上面那些判据都靠替身空转）', () => {
   const source = readFileSync(new URL('../../src/tools/index.ts', import.meta.url), 'utf8')
+  const library = readFileSync(new URL('../../src/lib/stop-url.ts', import.meta.url), 'utf8')
 
-  it('tools/index.ts 里有 webServer 的取用，且是 `port` 而不是 `host` 或 `protocol`', () => {
-    expect(source).toContain("getter.call(ctx, 'webServer')")
-    expect(source).toContain('.port')
+  it('取的是 `webServer.port`，而不是 `host` 或 `protocol`', () => {
+    // 实现住在 `lib/stop-url.ts` 的 `listeningPortOf`（启动期发布地址那一半也要读同一格，
+    // 见那个文件的文件头）；工具层只转发。判据因此点进**实现**，不在装配处找字符串 ——
+    // 否则「谁搬了实现」会被读成「谁破坏了接线」。
+    //
+    // ⚠️ 同一个文件里还有 `stopWindowUrlOf`，它**合法地**要 `getAdvertisedUrl`（根地址）
+    // ⇒ 反面判据必须只作用于 `listeningPortOf` 的正文，不能对整个文件下结论。
+    const start = library.indexOf('export function listeningPortOf')
+    expect(start, '找不到 listeningPortOf').toBeGreaterThan(-1)
+    const rest = library.slice(start)
+    const end = rest.indexOf('\n}')
+    expect(end, 'listeningPortOf 的正文没闭合').toBeGreaterThan(-1)
+    const body = rest.slice(0, end)
+
+    expect(body).toContain('WEB_SERVER_SERVICE')
+    expect(body).toContain('port')
     // 反面：拿 `getAdvertisedUrl()` 或 `host` 都是错的 —— 前者受 `--public-url` 影响、
     // 后者是绑定地址不是端口。这条防止「接了、但接错了那一格」。
-    expect(source, '接错成 advertisedUrl 了').not.toContain('getAdvertisedUrl')
+    expect(body, '接错成 advertisedUrl 了').not.toContain('getAdvertisedUrl')
+    expect(body, '接错成 host 了').not.toContain('.host')
+    expect(body, '接错成 protocol 了').not.toContain('.protocol')
+    // 装配处仍必须是**转发到那一格**，而不是自己另写一份（那一份会与实现漂）。
+    expect(source).toContain('listeningPortOf(')
+    expect(source, '工具层又自己读了一遍端口（两份实现会漂）').not.toContain(
+      "getter.call(ctx, 'webServer')",
+    )
   })
 
-  it('那条读的是**可选服务**（`ctx.get`），没写进 inject —— 否则 CLI/桌面载体会挂成 PENDING', () => {
-    expect(source).toMatch(/ctx as \{ get\?:/u)
+  it('那条读的是**可选服务**，没写进 inject —— 否则 CLI/桌面载体会挂成 PENDING', () => {
+    expect(library).toMatch(/get\?:/u)
     const agentRules = readFileSync(new URL('../../src/index.ts', import.meta.url), 'utf8')
     // `inject` 只列硬依赖；`webServer` 只在 web 载体上存在，写进去会让别的载体整插件 PENDING。
     expect(agentRules).not.toContain("inject = ['tools', 'webServer']")
