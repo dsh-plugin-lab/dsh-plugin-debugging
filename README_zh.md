@@ -5,7 +5,7 @@
 <h1 align="center">dsh-plugin-debugging</h1>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/dsh-plugin-lab/dsh-plugin-debugging/main/assets/banner.gif" alt="dsh-plugin-debugging：让 DSH Agent 自检自修它身处的运行时" width="600">
+  <img src="assets/banner.gif" alt="dsh-plugin-debugging：让 DSH Agent 自检自修它身处的运行时" width="600">
 </p>
 
 <div align="center">
@@ -48,7 +48,7 @@
 装上之后，agent 多了一组工具和一份 skill（技能）文档，skill 按需加载，用斜杠命令调用。
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/dsh-plugin-lab/dsh-plugin-debugging/main/assets/invoke-skill.png" alt="用斜杠命令调用 skill" width="600">
+  <img src="assets/invoke-skill.png" alt="用斜杠命令调用 skill" width="600">
 </p>
 
 ### 工具
