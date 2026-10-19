@@ -840,20 +840,27 @@ describe('B7 files 覆盖随包必需的路径', () => {
 })
 
 /**
- * B31 判据：**只在 README 里出现的门面图不进 npm 包，但两边都看得见。**
+ * B31 判据：**门面图不进 npm 包，README 用相对路径引用它。**
  *
- * 为什么需要它：`assets/` 是整目录进包的，而门面里那两张大图（横幅 4.0 MB 的动画 GIF、
- * 一张 32 KB 截图）只在两份 README 里当插图 —— 它们跟着包发出去，占掉整包 **78%** 的体积，
+ * 两条独立的理由，合成同一条判据（它们必须一起成立，缺一条就是另一种坏法）：
+ *
+ * **① 体积**：本仓 `assets/` 曾经整目录进包，而门面里那两张大图（横幅 4.0 MB 的动画 GIF、
+ * 一张 32 KB 截图）只在两份 README 里当插图 —— 它们跟着包发出去时占掉整包 **78%** 的体积，
  * 而市场的每小时构建要把四个包都抓下来读 `locale/` 与图标，本仓一个包就占了那一轮下载的 91%
- * （单次 16 秒，其余三个各 1–2 秒）。见 .agents/notes/2026-10-20-readme-images-out-of-tarball.md。
+ * （单次 16 秒，其余三个各 1–2 秒）。见
+ * .agents/notes/2026-10-20-readme-images-out-of-tarball.md。→ 图**不进包**。
  *
- * 判据的形状是**三条一起**才成立，缺一条就会变成另一种坏法：
- *   1. 两份门面都用**绝对 raw URL** 引用 —— 相对路径在 npm 页面上是否被改写取决于 npm 的渲染行为，
- *      而绝对 URL 在 GitHub 与 npm 两边都成立，不依赖那个行为。
- *   2. 文件**在仓里存在** —— 绝对 URL 写错或文件被删时，没人会收到任何报错（图片静默不显示）。
- *   3. 它们**没被 `files` 覆盖** —— 只改 README 不改 `files` 等于白改（体积一分没省）。
- * 另外钉住反向：**运行期资产必须仍在包里** —— 防止「顺手把 assets 全排掉」那种过度收窄，
- * 那会让 `launcher.js` / `*.vbs` / `stop-window.ps1` 缺席，而这些是代码在运行期按包内路径找的。
+ * **② 写法**：README 一律用**相对路径**。npm 会把 README 的相对图片路径解析到仓库的 raw 文件
+ * （维护者 2026-10-20 在 npm 页面上实地确认：图正常显示），所以「不进包 + 相对引用」是成立且
+ * 统一的组合 —— 四个插件仓都这么写。绝对 URL 是**例外形态**：它把 owner/repo/分支硬编码进散文，
+ * 仓改名或转移就静默破图，而且旧版本页面会跟着 `main` 走。只有「图确实在别的仓」时才该用它。
+ *
+ * 判据的四面：
+ *   1. 两份门面都用**相对路径**引用这两张图，且没有它们对应的绝对 raw 形态；
+ *   2. 文件**在仓里存在** —— 相对路径写错或文件被删时没人会收到报错（图静默不显示）；
+ *   3. 它们**没被 `files` 覆盖** —— 只改 README 不改 `files` 等于白改（体积一分没省）；
+ *   4. 反向钉住：**运行期资产必须仍在包里** —— 防止「顺手把 assets 全排掉」那种过度收窄，
+ *      那会让 `launcher.js` / `*.vbs` / `stop-window.ps1` 缺席，而这些是代码在运行期按包内路径找的。
  */
 const README_ONLY_IMAGES = ['assets/banner.gif', 'assets/invoke-skill.png'] as const
 
@@ -866,8 +873,31 @@ const RUNTIME_ASSETS = [
   'assets/stop-window.ps1',
 ] as const
 
-/** 门面图在两份 README 里的绝对 URL 前缀（指向默认分支；门面换图时两边一起变）。 */
-const RAW_PREFIX = 'https://raw.githubusercontent.com/dsh-plugin-lab/dsh-plugin-debugging/main/'
+/**
+ * 判据本体：一份门面里，门面图该是相对路径、且不该有对应的绝对 raw 形态。
+ *
+ * 抽成函数是为了**否证能真的跑起来**（把真实文本变异后喂回来），而不是只断言「现在通过」。
+ *
+ * @param readme - README 文件名，只用于报错文案。
+ * @param body - README 正文。
+ * @returns 违规描述；空数组表示通过。
+ */
+function facadeImageOffenders(readme: string, body: string): string[] {
+  const offenders: string[] = []
+  for (const image of README_ONLY_IMAGES) {
+    if (!body.includes(`src="${image}"`)) {
+      offenders.push(`${readme} 没有用相对路径引用 ${image}`)
+    }
+    // 同一张图的绝对形态：`/assets/<文件名>` 出现即视为写回了绝对 URL。
+    const absolute = new RegExp(
+      `src="https?://[^"]*/${image.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"`,
+    )
+    if (absolute.test(body)) {
+      offenders.push(`${readme} 里 ${image} 是绝对 URL —— 家族统一用相对路径`)
+    }
+  }
+  return offenders
+}
 
 /**
  * 某条 `files` 取反条目能不能命中目标路径。
@@ -904,22 +934,15 @@ function shippedInPackage(files: readonly string[] | undefined, target: string):
   return covered && !negated
 }
 
-describe('B31 只在 README 里的门面图不进包，且用绝对 URL 引用', () => {
-  it('两份门面都用绝对 raw URL 引用这两张图', () => {
+describe('B31 门面图不进包，且 README 用相对路径引用', () => {
+  it('两份门面都用相对路径引用这两张图，且没有绝对 raw 形态', () => {
     for (const readme of ['README.md', 'README_zh.md']) {
-      const body = readRepo(readme)
-      for (const image of README_ONLY_IMAGES) {
-        expect(body, `${readme} 没有引用 ${image}`).toContain(`${RAW_PREFIX}${image}`)
-        // 相对路径一旦回来，npm 页面的显示就取决于 npm 的改写行为（见上方注释）。
-        expect(
-          body.includes(`src="${image}"`),
-          `${readme} 里 ${image} 又变回相对路径了 —— 用绝对 raw URL`,
-        ).toBe(false)
-      }
+      const offenders = facadeImageOffenders(readme, readRepo(readme))
+      expect(offenders, describeOffenders('门面图写法不对', offenders)).toEqual([])
     }
   })
 
-  it('绝对 URL 指向的文件在仓里存在（否则图片静默不显示，没有任何报错）', () => {
+  it('绝对路径指向的文件在仓里存在（否则图片静默不显示，没有任何报错）', () => {
     for (const image of README_ONLY_IMAGES)
       expect(existsRepo(image), `${image} 不在仓里`).toBe(true)
   })
@@ -929,7 +952,7 @@ describe('B31 只在 README 里的门面图不进包，且用绝对 URL 引用',
     const wronglyShipped = README_ONLY_IMAGES.filter((image) => shippedInPackage(files, image))
     expect(
       wronglyShipped,
-      describeOffenders('门面图跟着包发出去了（占整包约 78% 体积）', wronglyShipped),
+      describeOffenders('门面图跟着包发出去了（曾占整包约 78% 体积）', wronglyShipped),
     ).toEqual([])
 
     const missing = RUNTIME_ASSETS.filter((asset) => !shippedInPackage(files, asset))
@@ -939,20 +962,24 @@ describe('B31 只在 README 里的门面图不进包，且用绝对 URL 引用',
     ).toEqual([])
   })
 
-  it('判据可被否证：删掉取反条目、或把 URL 改回相对，都会红', () => {
+  it('判据可被否证：改成绝对 URL、或删掉取反条目，都会红', () => {
+    // 变异 1：把一张门面图写回绝对 raw URL —— 判据必须红。
+    const absoluteForm = readRepo('README.md').replace(
+      'src="assets/banner.gif"',
+      'src="https://raw.githubusercontent.com/dsh-plugin-lab/dsh-plugin-debugging/main/assets/banner.gif"',
+    )
+    expect(absoluteForm, '变异没落地：README.md 里找不到相对引用的 banner.gif').not.toBe(
+      readRepo('README.md'),
+    )
+    expect(facadeImageOffenders('README.md', absoluteForm).length).toBeGreaterThan(0)
+
+    // 变异 2：删掉 `!assets/` 取反条目 —— 图会被算成随包。
     const files = packageJson.files ?? []
-    // 变异必须真的落地 —— 否则这条否证在空转（本仓坑 18 同族）。
     const stripped = files.filter((entry) => !entry.startsWith('!assets/'))
     expect(stripped.length, '`files` 里没有 `!assets/` 条目 —— 变异没落地').toBeLessThan(
       files.length,
     )
     expect(shippedInPackage(stripped, 'assets/banner.gif')).toBe(true)
-
-    const relativeReadme = readRepo('README.md').replace(
-      `${RAW_PREFIX}assets/banner.gif`,
-      'assets/banner.gif',
-    )
-    expect(relativeReadme.includes(`${RAW_PREFIX}assets/banner.gif`)).toBe(false)
   })
 })
 

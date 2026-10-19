@@ -261,6 +261,9 @@ npm pack --dry-run          # 看清单里有没有 lib/ 与 skills/
 - **workflow 日志会自证 provenance**：`Signed provenance statement … from GitHub Actions` 与
   `Provenance statement published to transparency log` 两行同时出现，才说明 `--provenance` 真的生效。
 - 核对该版本是否已经在 `latest`（预发布则应在 `alpha`，且 `latest` 未动）。
+- **npm 页面渲染的是「已发布版本」里的 `README`** —— 所以 README 的改动（包括门面图的路径写法）
+  **只有发版后才出现在 npm 上**，攒版本期间别把它当成已上线，也别为它单独发版。
+  路径**文本**随版本冻结；图**文件内容**跟的是默认分支，所以换图会同时改变所有历史版本的展示。
 
 ## 发布后缺陷处理
 
