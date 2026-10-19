@@ -839,6 +839,123 @@ describe('B7 files 覆盖随包必需的路径', () => {
   })
 })
 
+/**
+ * B31 判据：**只在 README 里出现的门面图不进 npm 包，但两边都看得见。**
+ *
+ * 为什么需要它：`assets/` 是整目录进包的，而门面里那两张大图（横幅 4.0 MB 的动画 GIF、
+ * 一张 32 KB 截图）只在两份 README 里当插图 —— 它们跟着包发出去，占掉整包 **78%** 的体积，
+ * 而市场的每小时构建要把四个包都抓下来读 `locale/` 与图标，本仓一个包就占了那一轮下载的 91%
+ * （单次 16 秒，其余三个各 1–2 秒）。见 .agents/notes/2026-10-20-readme-images-out-of-tarball.md。
+ *
+ * 判据的形状是**三条一起**才成立，缺一条就会变成另一种坏法：
+ *   1. 两份门面都用**绝对 raw URL** 引用 —— 相对路径在 npm 页面上是否被改写取决于 npm 的渲染行为，
+ *      而绝对 URL 在 GitHub 与 npm 两边都成立，不依赖那个行为。
+ *   2. 文件**在仓里存在** —— 绝对 URL 写错或文件被删时，没人会收到任何报错（图片静默不显示）。
+ *   3. 它们**没被 `files` 覆盖** —— 只改 README 不改 `files` 等于白改（体积一分没省）。
+ * 另外钉住反向：**运行期资产必须仍在包里** —— 防止「顺手把 assets 全排掉」那种过度收窄，
+ * 那会让 `launcher.js` / `*.vbs` / `stop-window.ps1` 缺席，而这些是代码在运行期按包内路径找的。
+ */
+const README_ONLY_IMAGES = ['assets/banner.gif', 'assets/invoke-skill.png'] as const
+
+/** 运行期资产：代码按包内路径引用，**必须**随包发出去。 */
+const RUNTIME_ASSETS = [
+  'assets/launcher.js',
+  'assets/launcher.d.ts',
+  'assets/launcher.vbs',
+  'assets/show-window.vbs',
+  'assets/stop-window.ps1',
+] as const
+
+/** 门面图在两份 README 里的绝对 URL 前缀（指向默认分支；门面换图时两边一起变）。 */
+const RAW_PREFIX = 'https://raw.githubusercontent.com/dsh-plugin-lab/dsh-plugin-debugging/main/'
+
+/**
+ * 某条 `files` 取反条目能不能命中目标路径。
+ *
+ * 与本文件的 `fileEntryCovers` 同一个取舍：只实现本仓真实用到的形态（显式路径、`dir/**`），
+ * 不做通用 glob —— 一个「看起来像完整 minimatch」的实现比一个窄的更容易被误信。
+ * @param entry - 以 `!` 开头的 `files` 条目。
+ * @param target - 仓库相对路径。
+ * @returns 命中时为 true。
+ */
+function negationMatches(entry: string, target: string): boolean {
+  const pattern = entry.slice(1).replace(/^\.\//, '')
+  if (pattern === '') return false
+  if (pattern.endsWith('/**')) return target.startsWith(`${pattern.slice(0, -3)}/`)
+  const clean = pattern.replace(/\/+$/, '')
+  return target === clean || target.startsWith(`${clean}/`)
+}
+
+/**
+ * 某个路径**是否真的会进包**：既被某条正向条目覆盖，又没被任何取反条目命中。
+ *
+ * @param files - `package.json` 的 `files`。
+ * @param target - 仓库相对路径。
+ * @returns 会进包时为 true。
+ */
+function shippedInPackage(files: readonly string[] | undefined, target: string): boolean {
+  const list = files ?? []
+  const covered = list
+    .filter((entry) => !entry.startsWith('!'))
+    .some((e) => fileEntryCovers(e, target))
+  const negated = list
+    .filter((entry) => entry.startsWith('!'))
+    .some((e) => negationMatches(e, target))
+  return covered && !negated
+}
+
+describe('B31 只在 README 里的门面图不进包，且用绝对 URL 引用', () => {
+  it('两份门面都用绝对 raw URL 引用这两张图', () => {
+    for (const readme of ['README.md', 'README_zh.md']) {
+      const body = readRepo(readme)
+      for (const image of README_ONLY_IMAGES) {
+        expect(body, `${readme} 没有引用 ${image}`).toContain(`${RAW_PREFIX}${image}`)
+        // 相对路径一旦回来，npm 页面的显示就取决于 npm 的改写行为（见上方注释）。
+        expect(
+          body.includes(`src="${image}"`),
+          `${readme} 里 ${image} 又变回相对路径了 —— 用绝对 raw URL`,
+        ).toBe(false)
+      }
+    }
+  })
+
+  it('绝对 URL 指向的文件在仓里存在（否则图片静默不显示，没有任何报错）', () => {
+    for (const image of README_ONLY_IMAGES)
+      expect(existsRepo(image), `${image} 不在仓里`).toBe(true)
+  })
+
+  it('这两张图不进包，而运行期资产必须进包', () => {
+    const files = packageJson.files
+    const wronglyShipped = README_ONLY_IMAGES.filter((image) => shippedInPackage(files, image))
+    expect(
+      wronglyShipped,
+      describeOffenders('门面图跟着包发出去了（占整包约 78% 体积）', wronglyShipped),
+    ).toEqual([])
+
+    const missing = RUNTIME_ASSETS.filter((asset) => !shippedInPackage(files, asset))
+    expect(
+      missing,
+      describeOffenders('运行期资产没进包（代码按包内路径找它们，会运行期崩）', missing),
+    ).toEqual([])
+  })
+
+  it('判据可被否证：删掉取反条目、或把 URL 改回相对，都会红', () => {
+    const files = packageJson.files ?? []
+    // 变异必须真的落地 —— 否则这条否证在空转（本仓坑 18 同族）。
+    const stripped = files.filter((entry) => !entry.startsWith('!assets/'))
+    expect(stripped.length, '`files` 里没有 `!assets/` 条目 —— 变异没落地').toBeLessThan(
+      files.length,
+    )
+    expect(shippedInPackage(stripped, 'assets/banner.gif')).toBe(true)
+
+    const relativeReadme = readRepo('README.md').replace(
+      `${RAW_PREFIX}assets/banner.gif`,
+      'assets/banner.gif',
+    )
+    expect(relativeReadme.includes(`${RAW_PREFIX}assets/banner.gif`)).toBe(false)
+  })
+})
+
 describe('B8 exports 暴露 ./skills/*，且 bundle patch 文件真实存在', () => {
   it("exports 里有 './skills/*'", () => {
     // 缺这条子路径导出时，宿主按 <包名>/skills/... 解析会拿到

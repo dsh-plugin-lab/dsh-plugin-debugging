@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-debugging",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "For DSH plugin development: runtime diagnostics and in-place fixes your agent can run itself.",
   "keywords": [
     "dsh",
@@ -38,6 +38,8 @@
     "lib",
     "!lib/**/*.map",
     "assets",
+    "!assets/banner.gif",
+    "!assets/invoke-skill.png",
     "icon.svg",
     "locale/*.json",
     "skills/dsh-plugin-debugging/SKILL.md",
