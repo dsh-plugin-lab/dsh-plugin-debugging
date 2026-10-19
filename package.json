@@ -48,7 +48,7 @@
   ],
   "engines": {
     "node": ">=20",
-    "dsh": "^0.1.7-rc.1 || ^0.2.0-rc.1"
+    "dsh": "^0.1.7-rc.1 || ^0.2.1-rc.1"
   },
   "dsh": {
     "bundle": {
@@ -70,29 +70,30 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "check:release": "node scripts/check-release.mjs",
+    "check:declaration": "node scripts/check-declaration.mjs",
     "check": "pnpm run typecheck && pnpm run build && pnpm run test"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.4",
-    "@deepseek-ai/dsh-client-locale": "^0.1.7-rc.1 || ^0.2.0-rc.1",
-    "@deepseek-ai/dsh-client-ui-plugin-manager": "^0.1.7-rc.1 || ^0.2.0-rc.1",
-    "@deepseek-ai/dsh-client-ui-primitives": "^0.1.7-rc.1 || ^0.2.0-rc.1",
-    "@deepseek-ai/dsh-client-ui-renderer": "^0.1.7-rc.1 || ^0.2.0-rc.1",
-    "@deepseek-ai/dsh-client-ui-slots": "^0.1.7-rc.1 || ^0.2.0-rc.1",
-    "@deepseek-ai/dsh-skill": "^0.1.7-rc.1 || ^0.2.0-rc.1",
-    "@deepseek-ai/dsh-tools": "^0.1.7-rc.1 || ^0.2.0-rc.1",
-    "@deepseek-ai/schemastery": "^3.18.3"
+    "@deepseek-ai/dsh-client-locale": "^0.1.7-rc.1 || ^0.2.1-rc.1",
+    "@deepseek-ai/dsh-client-ui-plugin-manager": "^0.1.7-rc.1 || ^0.2.1-rc.1",
+    "@deepseek-ai/dsh-client-ui-primitives": "^0.1.7-rc.1 || ^0.2.1-rc.1",
+    "@deepseek-ai/dsh-client-ui-renderer": "^0.1.7-rc.1 || ^0.2.1-rc.1",
+    "@deepseek-ai/dsh-client-ui-slots": "^0.1.7-rc.1 || ^0.2.1-rc.1",
+    "@deepseek-ai/dsh-skill": "^0.1.7-rc.1 || ^0.2.1-rc.1",
+    "@deepseek-ai/dsh-tools": "^0.1.7-rc.1 || ^0.2.1-rc.1",
+    "@deepseek-ai/schemastery": "^3.18.5"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.4",
-    "@deepseek-ai/dsh-client-locale": "^0.1.7-rc.1 || ^0.2.0-rc.1",
-    "@deepseek-ai/dsh-client-ui-plugin-manager": "^0.1.7-rc.1 || ^0.2.0-rc.1",
-    "@deepseek-ai/dsh-client-ui-primitives": "^0.1.7-rc.1 || ^0.2.0-rc.1",
-    "@deepseek-ai/dsh-client-ui-renderer": "^0.1.7-rc.1 || ^0.2.0-rc.1",
-    "@deepseek-ai/dsh-client-ui-slots": "^0.1.7-rc.1 || ^0.2.0-rc.1",
-    "@deepseek-ai/dsh-skill": "^0.1.7-rc.1 || ^0.2.0-rc.1",
-    "@deepseek-ai/dsh-tools": "^0.1.7-rc.1 || ^0.2.0-rc.1",
-    "@deepseek-ai/schemastery": "^3.18.3",
+    "@deepseek-ai/dsh-client-locale": "^0.1.7-rc.1 || ^0.2.1-rc.1",
+    "@deepseek-ai/dsh-client-ui-plugin-manager": "^0.1.7-rc.1 || ^0.2.1-rc.1",
+    "@deepseek-ai/dsh-client-ui-primitives": "^0.1.7-rc.1 || ^0.2.1-rc.1",
+    "@deepseek-ai/dsh-client-ui-renderer": "^0.1.7-rc.1 || ^0.2.1-rc.1",
+    "@deepseek-ai/dsh-client-ui-slots": "^0.1.7-rc.1 || ^0.2.1-rc.1",
+    "@deepseek-ai/dsh-skill": "^0.1.7-rc.1 || ^0.2.1-rc.1",
+    "@deepseek-ai/dsh-tools": "^0.1.7-rc.1 || ^0.2.1-rc.1",
+    "@deepseek-ai/schemastery": "^3.18.5",
     "@eslint/js": "^10.0.1",
     "@types/node": "^22.20.0",
     "@types/react": "~18.3.1",
