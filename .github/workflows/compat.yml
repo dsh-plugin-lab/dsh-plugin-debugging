@@ -1,0 +1,161 @@
+# 兼容性巡检：每周把 `@deepseek-ai/dsh-*` 换到一条版本线上，看还构不构得出来、跑不跑得动。
+#
+# 与姊妹仓（dsh-zhihu-search / dsh-ds-balance / dsh-workbuddy-bridge）同一套判据、同一套脚本，
+# 本仓此前**没有这条线** —— 四个插件仓里唯一一个漏的。补齐的理由不是「保持一致」而是：
+# 声明面（`engines.dsh` + 每个 `@deepseek-ai/dsh-*` 区间）是对外承诺，没有巡检时它只会
+# **静默过期**，而过期的表现是使用者装不上或插件不加载，本仓自己的 CI 一条都不会红。
+#
+# 两个 job，两件事，刻意分开：
+#   declaration —— 只读 `package.json` 的声明区间 + 问 npm 该线实际指向的版本，
+#                  判「我们声明的范围还罩不罩得住」。不装依赖，几十秒出结果。
+#   swap        —— 真的换线、真的装、真的跑类型面、构建与全量测试。
+#   混在一起会互相遮蔽：声明面过期与代码真的跑不起来是两回事。
+#
+# **不挂 push**：这条线看的是**上游**动没动，本地提交改不了结论；而每次推送都重装整棵树
+# 是白花 runner 的钱。判据是「上游版本线」，不是「这次提交」——所以是 schedule + dispatch。
+#
+# 承诺线是 `next`（RC 线）：`engines.dsh` 与全部 `@deepseek-ai/dsh-*` 的区间落在这一条上，
+# 宿主在跑的也是这条线；它红了**必须修**（run 红、开跟踪 issue）。第二族（旧 RC 族，
+# 有真实使用者停在那里）用**版本前缀**定位（实测没有任何 dist-tag 指向它），只记录不阻断。
+#
+# **版本号不写在这里**（会漂），要现查跑：`node scripts/compat-swap.mjs check`。
+#
+# 「只记录」不等于「没人看」：承诺线红了会开或更新**一条固定标题的跟踪 issue**
+# （[scripts/report-compat-failure.mjs](../scripts/report-compat-failure.mjs)）。
+# 定时任务的失败邮件只发给最后改过 cron 的人，不能当主通知。
+name: compat
+
+on:
+  schedule:
+    # 每周一 02:00 UTC（北京时间 10:00）。
+    - cron: '0 2 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # 失败可见要开 / 更新跟踪 issue。
+  issues: write
+
+jobs:
+  # 声明面：只看 package.json 与 registry。**不装任何依赖**，所以也不挂 cache。
+  declaration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+
+      # 判据：声明的区间必须能覆盖我们告诉用户去装的那条线（README 的「版本兼容」点名的那条）。
+      # 区间是**若干个族的并集**（`||`）：npm 的预发布语义下，候选只有在区间里存在
+      # 「同一个 major.minor.patch、也带预发布段」的比较子时才匹配，所以宿主每往前推一个
+      # 补丁位的预发布，这条路就会再次红 —— 那是**信号**，处置见 docs/PUBLISHING.md。
+      - name: Check that the declaration covers the tracked line
+        id: declaration
+        run: node scripts/check-declaration.mjs
+
+      - name: Record the failure on the tracking issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          node scripts/report-compat-failure.mjs \
+            --check declaration \
+            --step "Check that the declaration covers the tracked line"
+
+  swap:
+    runs-on: ubuntu-latest
+    # 整轮上限：每次都要整棵重装 + 构建 + 全量测试。
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 承诺线（RC 族）：红了必须修。
+          # **这条腿也必须收窄**（姊妹仓 2026-10-12 实测）：并集区间下，安装器会在 `latest`
+          # 指向的版本能满足区间时优先用它 —— 不收窄就装出混合树，后面几步跑的不是目标族。
+          - line: next
+            only: '--only 0.2.1'
+            blocking: true
+          # 声明面承诺的第二族（旧 RC 族）：声明面承诺了它，所以它红了要看得见；
+          # 但它不是承诺线，所以只记录、不阻断 run。
+          - line: 0.1.7-rc
+            only: '--only 0.1.7-rc'
+            blocking: false
+    name: swap (${{ matrix.line }})
+    steps:
+      - uses: actions/checkout@v7
+
+      # pnpm 必须排在 setup-node 之前，否则 `cache: pnpm` 找不到 store。
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      # 先确认**起始状态**本身是好的：这样 swap 之后的红才只能归因于换线，
+      # 而不是「基线本来就坏」。
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile --config.node-linker=hoisted
+
+      # swap 内部先改写声明区间、清锁清树、再装（`pnpm install --no-frozen-lockfile`），最后跑 verify。
+      # verify 不是陪衬：装失败时 node_modules 会停在旧版本上，不回头确认实际装到了什么，
+      # 后面的步骤就跑在旧依赖上、给出与事实相反的信号。
+      - name: Swap onto the ${{ matrix.line }} line and confirm what got installed
+        id: swap
+        # 记录线红了**不阻断 run**，但换版失败同样要看得见 —— 阻断与否是「阻断 / 记录」的区别，
+        # 不是「看得见 / 看不见」的区别。
+        continue-on-error: ${{ !matrix.blocking }}
+        run: node scripts/compat-swap.mjs swap --line ${{ matrix.line }} ${{ matrix.only }}
+
+      # 收窄只服务两件事：**装**与**核对装了哪族**（都在上一步做完）。跑测试前把清单与锁文件
+      # 还原成提交时的样子：`test/redlines.test.ts` 的 A2 判的是**仓库的声明**（且要求承诺的族
+      # 不只一族），收窄后的单族清单会让那条红线红在判据错位上，而不是代码有问题。
+      #
+      # **锁文件必须一起还原**：swap 的安装会把 `pnpm-lock.yaml` 重写成收窄后的 specifier，
+      # 只还原 `package.json` 会让两者对不上，后续每个 `pnpm run <script>` 都先撞
+      # `ERR_PNPM_OUTDATED_LOCKFILE`（姊妹仓 2026-10-19 巡检实红）。
+      #
+      # **还原之后不能再让 pnpm 自动装**：清单与锁都回到提交态、`node_modules` 却还是换线后的树，
+      # 自动安装会静默把旧线的树装回来，随后 typecheck / 测试跑在旧树上 —— 报出一个假绿
+      # （姊妹仓 2026-10-19 本机实测：还原后自动安装把宿主包退回了旧线）。所以下面三步都带
+      # `--config.verify-deps-before-run=false`，判据是「换线后的树」。
+      - name: Restore the committed manifest and lockfile
+        if: always()
+        run: git checkout -- package.json pnpm-lock.yaml
+
+      - name: Typecheck
+        id: typecheck
+        continue-on-error: ${{ !matrix.blocking }}
+        run: pnpm --config.verify-deps-before-run=false run typecheck
+
+      - name: Build
+        id: build
+        continue-on-error: ${{ !matrix.blocking }}
+        run: pnpm --config.verify-deps-before-run=false run build
+
+      - name: Test
+        id: test
+        continue-on-error: ${{ !matrix.blocking }}
+        run: pnpm --config.verify-deps-before-run=false test
+
+      # 作业级 continue-on-error 免掉的是「阻断」，不是「可见」：哪条线、红在哪一步都进跟踪 issue
+      # —— 但只报**承诺线**（记录线红了不追 issue）。
+      - name: Record the failure on the tracking issue
+        if: failure() && matrix.blocking
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SWAP_OUTCOME: ${{ steps.swap.outcome }}
+          TYPECHECK_OUTCOME: ${{ steps.typecheck.outcome }}
+          BUILD_OUTCOME: ${{ steps.build.outcome }}
+          TEST_OUTCOME: ${{ steps.test.outcome }}
+        run: |
+          node scripts/report-compat-failure.mjs \
+            --check swap \
+            --line "${{ matrix.line }}" \
+            --step "swap=$SWAP_OUTCOME typecheck=$TYPECHECK_OUTCOME build=$BUILD_OUTCOME test=$TEST_OUTCOME"
