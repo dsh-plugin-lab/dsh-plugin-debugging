@@ -5802,6 +5802,57 @@ describe('B26 返回值必须可无损落 JSON（宿主边界的硬要求）', (
 })
 
 /**
+ * B32：**四个死代码开关是下限，不是偏好**。
+ *
+ * 判据来源：组织仓 `docs/criteria.md` 的
+ * 「**Four dead-code switches are a floor, not a preference**」（**Must agree** 档；
+ * 中文版同一行是「四个死代码开关是下限，不是偏好」）—— 那一行要求的执行体是
+ * 「各仓一条红线断言这四个都是 `true`」，组织仓的 `scripts/check-criteria.mjs` 再从外部读一遍。
+ * 本仓此前**没有**这条断言：这四个开关被谁删掉时，没有任何东西会红。
+ *
+ * 与 ESLint 的分工：这几个开关管**编译器**覆盖得到的那一层（未使用的符号、隐式返回、
+ * switch 贯穿），ESLint 管编译器覆盖不到的那一层。**下限就是这四个** —— 仓在上限多开什么是
+ * 它自己的事，这里只断言下限，不锁清单。`strict` 那一族（`strict` 及同伴）**不在本条里**，
+ * 它自成一节（判据里「TypeScript's strict switches」那一行）。
+ *
+ * 只读**根** `tsconfig.json`：本仓的 `tsconfig.client.json` 与 `tsconfig.test.json` 都
+ * `extends` 根配置，所以一处生效、三个 project 都被覆盖（与姊妹仓 `dsh-zhihu-search` 同一形状）。
+ * 哪天某个 project 改成**不** extends（像 `dsh-workbuddy-bridge` 那样各自独立一份），
+ * 这里就要跟着断言那一份 —— 否则那个半边就没人看着了。
+ */
+describe('B32 四个死代码开关都读到 true（判据：四个死代码开关是下限，不是偏好）', () => {
+  /** 去掉块注释与行注释：`tsconfig.json` 允许带说明，直接 `JSON.parse` 会抛。 */
+  function stripComments(source: string): string {
+    return source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1')
+  }
+
+  /** 判据点名的四个开关（逐字，顺序照判据那一行）。 */
+  const FLAGS = [
+    'noUnusedLocals',
+    'noUnusedParameters',
+    'noImplicitReturns',
+    'noFallthroughCasesInSwitch',
+  ] as const
+
+  const tsconfig = JSON.parse(stripComments(readRepo('tsconfig.json'))) as {
+    compilerOptions?: Record<string, unknown>
+  }
+
+  it('四个「通用 lint 那一档」的开关都在', () => {
+    // 自检：读不到 `compilerOptions` 时，下面那条 `?? undefined` 会当场判红
+    // （`undefined !== true`）—— 不会「恒为真地通过」。这条 `expect` 只是把话说清楚。
+    expect(
+      tsconfig.compilerOptions,
+      'tsconfig.json 里读不出 compilerOptions —— 判据没跑到',
+    ).toBeDefined()
+    // 第二参数是断言消息：哪一项红了要能一眼看出是哪个 flag，不用去数循环的第几轮。
+    for (const flag of FLAGS) {
+      expect(tsconfig.compilerOptions?.[flag], `tsconfig.json 的 ${flag}`).toBe(true)
+    }
+  })
+})
+
+/**
  * 找出**不可枚举**的自有属性（宿主拒、B26 原判据放过的那一类）。
  *
  * `Object.keys` 只列可枚举的，`JSON.stringify` 也只写可枚举的 ⇒ 一遍往返之后
