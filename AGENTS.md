@@ -132,6 +132,8 @@ git diff --check
 - 发布流程与判例 → [docs/PUBLISHING.md](docs/PUBLISHING.md)
 - 发布态不变量（可执行的检查脚本）→ [scripts/check-release.mjs](scripts/check-release.mjs)
 - 展示元数据 → `locale/en.json` · `locale/zh.json`（只住这里，别处只留指针）
+- 跨仓规范 → [plugin-conventions](https://github.com/dsh-plugin-lab/.github/blob/main/docs/plugin-conventions.md)
+  （插件仓共同遵守的公约；判这条算不算缺陷见 [criteria](https://github.com/dsh-plugin-lab/.github/blob/main/docs/criteria.md)）
 
 **子树手册**（各子树的职责、依赖与变更影响路由在各自的手册层里）：
 
