@@ -859,12 +859,17 @@ describe('B7 files 覆盖随包必需的路径', () => {
  * 「npm 会把 README 的相对图片路径改写到默认分支的 raw 地址」。顺序应当是**先在兄弟仓里搜既有
  * 结论，再自己论证** —— 详见上面那份决策记录的「教训」一节。
  *
- * 判据的四面：
+ * 判据的五面：
  *   1. 两份门面都用**相对路径**引用这两张图，且没有它们对应的绝对 raw 形态；
  *   2. 文件**在仓里存在** —— 相对路径写错或文件被删时没人会收到报错（图静默不显示）；
  *   3. 它们**没被 `files` 覆盖** —— 只改 README 不改 `files` 等于白改（体积一分没省）；
  *   4. 反向钉住：**运行期资产必须仍在包里** —— 防止「顺手把 assets 全排掉」那种过度收窄，
- *      那会让 `launcher.js` / `*.vbs` / `stop-window.ps1` 缺席，而这些是代码在运行期按包内路径找的。
+ *      那会让 `launcher.js` / `*.vbs` / `stop-window.ps1` 缺席，而这些是代码在运行期按包内路径找的；
+ *   5. **写法本身**：`files` **逐条列举**运行期资产、**不出现** `assets` 整目录条目 ——
+ *      只判「今天这两张图不在包里」的话，「整目录 + 按名排除」的旧写法同样绿，而新增一张截图
+ *      会静默重新进包 —— 判据守的是**方向**，不是今天的清单（组织判据把它判成真缺陷的那一轮）。
+ *      代价照实记：逐条列举意味着新增运行期资产要显式写进 `files`，于是另配一条兜底断言
+ *      （`assets/` 里每个文件要么是门面图、要么被列举），把「忘了列举」变成红而不是静默缺席。
  */
 const README_ONLY_IMAGES = ['assets/banner.gif', 'assets/invoke-skill.png'] as const
 
@@ -966,7 +971,58 @@ describe('B31 门面图不进包，且 README 用相对路径引用', () => {
     ).toEqual([])
   })
 
-  it('判据可被否证：改成绝对 URL、或删掉取反条目，都会红', () => {
+  /**
+   * `files` 不列 `assets/` 整个目录 —— 这一条把**写法本身**钉住。
+   *
+   * 只判「图不在包里」是不够的：`["assets", "!assets/banner.gif", "!assets/invoke-skill.png"]`
+   * 这种「整目录 + 按名排除」的旧写法当时也是绿的（图确实被排掉了），可新增一张截图会静默
+   * 重新进包 —— 判据守的是**方向**，不是今天的清单。详见决策记录
+   * .agents/notes/2026-10-20-readme-images-out-of-tarball.md 与取代它的那一条。
+   */
+  it('`files` 逐条列举 assets/ 里的运行期资产，不出现整目录条目', () => {
+    const files = packageJson.files ?? []
+    expect(
+      files.filter((entry) => entry === 'assets' || entry === 'assets/'),
+      '`files` 里出现了整目录条目 —— 新增的截图会跟着进包',
+    ).toEqual([])
+
+    const enumerated = files.filter((entry) => entry.startsWith('assets/'))
+    // 自检：一条都没列举时，上面那条断言恒为真 —— 那是「判据没跑到」。
+    expect(enumerated.length, '`files` 里一条 assets/<文件> 都没有 —— 判据没跑到').toBeGreaterThan(
+      0,
+    )
+    for (const asset of RUNTIME_ASSETS) {
+      expect(enumerated, `运行期资产 ${asset} 没有逐条列举`).toContain(asset)
+    }
+  })
+
+  /**
+   * 反向兜底，正是「改成白名单」的代价所在：新增一个运行期资产如果忘了写进 `files`，
+   * 它会**静默缺席**（`test/assets.test.ts` 从磁盘读，照样绿，只有真机才炸）。
+   *
+   * 所以判据取「`assets/` 里每个文件要么是门面图、要么在 `files` 里」——
+   * 新增任何一类文件都会当场红，红的时候自然要求人决定它该不该随包。
+   */
+  it('assets/ 里每个文件要么是门面图，要么被 files 列举（新增资产不会静默缺席）', () => {
+    const files = packageJson.files
+    const known = new Set<string>([...README_ONLY_IMAGES, ...RUNTIME_ASSETS])
+    // 自检：目录读不到时这条会把「没扫到」算成通过。
+    const present = readdirSync(join(REPO_ROOT, 'assets'))
+    expect(present.length, 'assets/ 是空目录 —— 判据没跑到').toBeGreaterThan(0)
+
+    const unclassified = present
+      .map((name) => `assets/${name}`)
+      .filter((path) => !known.has(path) && !shippedInPackage(files, path))
+    expect(
+      unclassified,
+      describeOffenders(
+        'assets/ 里有既不是门面图、又没被 files 列举的文件（新增运行期资产会静默不随包）',
+        unclassified,
+      ),
+    ).toEqual([])
+  })
+
+  it('判据可被否证：改成绝对 URL、或换回整目录写法，都会红', () => {
     // 变异 1：把一张门面图写回绝对 raw URL —— 判据必须红。
     const absoluteForm = readRepo('README.md').replace(
       'src="assets/banner.gif"',
@@ -977,13 +1033,17 @@ describe('B31 门面图不进包，且 README 用相对路径引用', () => {
     )
     expect(facadeImageOffenders('README.md', absoluteForm).length).toBeGreaterThan(0)
 
-    // 变异 2：删掉 `!assets/` 取反条目 —— 图会被算成随包。
+    // 变异 2：把逐条列举的 5 个运行期资产换回整目录 `assets` —— 门面图会被算成随包。
+    // 旧写法下的等价变异是「删掉 `!assets/` 取反条目」；判据意图没变（按名排除的写法会让
+    // 新截图悄悄进包），变的只是旧写法已经不存在了。
     const files = packageJson.files ?? []
-    const stripped = files.filter((entry) => !entry.startsWith('!assets/'))
-    expect(stripped.length, '`files` 里没有 `!assets/` 条目 —— 变异没落地').toBeLessThan(
+    const enumerated = RUNTIME_ASSETS as readonly string[]
+    const collapsed = files.filter((entry) => !enumerated.includes(entry))
+    expect(collapsed.length, '`files` 里没有逐条列举的运行期资产 —— 变异没落地').toBeLessThan(
       files.length,
     )
-    expect(shippedInPackage(stripped, 'assets/banner.gif')).toBe(true)
+    const collapsedFiles = [...collapsed, 'assets']
+    expect(shippedInPackage(collapsedFiles, 'assets/banner.gif')).toBe(true)
   })
 })
 
