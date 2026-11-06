@@ -177,7 +177,7 @@ git diff --check
 （坑 41 的证据在 [.agents/notes/2026-10-16-desktop-carrier-decision.md](.agents/notes/2026-10-16-desktop-carrier-decision.md)）。**
 ⚠️ = 静默坏 —— 错了不报错，最费人。
 
-1. **兼容性门是 `engines.dsh`（有它时它单独说了算），`peerDependencies` 只在它缺席时兜底。** 两段历史：0.2.1-alpha.3 之前 `engines.dsh` **没有任何读取者**、门在 peer（带 `includePrerelease`）；**自 0.2.1-alpha.3 起相反** —— 包自己声明了 `engines.dsh` 就只按它判，`@deepseek-ai/dsh*` 的 peer 范围**完全被忽略**，只有声明缺席才回退 peer。⚠️ 冲突被 `catch` 进 `skippedBundles`，插件像没装。**改依赖范围时 `engines.dsh` 与 peer 与 dev 三处同批改**（红线 A2 要求 `engines.dsh` 与每条 `dsh-*` 区间**逐字相同**）。⚠️ `engines.dsh` 里写 `workspace:` 视为不兼容；`engines` 不是对象、或 `engines.dsh` 不是字符串会让清单不可读并拒装。拒绝记录里 `peers` 已改名 `requirements`。
+1. **兼容性门是 `engines.dsh`（有它时它单独说了算），`peerDependencies` 只在它缺席时兜底。** 两段历史：**0.2.1-alpha.3 及更早**只按 peer 判、`engines.dsh` **没有任何读取者**（`plugin-compatibility.ts` 里连 `engines` 这个词都没有）；**自 0.2.1-alpha.4 起相反** —— 包自己声明了 `engines.dsh` 就只按它判，`@deepseek-ai/dsh*` 的 peer 范围**完全被忽略**，只有声明缺席才回退 peer（升级指南把它记在 `v0.2.1-alpha.3/plugin-engines-dsh` 目录下，但正文写的是「**In the next release**」⇒ **生效版本是 alpha.4**；落地提交 `3de3a977e0` 由 `git tag --contains` 核过，最早只见于 `alpha.4`）。⚠️ 冲突被 `catch` 进 `skippedBundles`，插件像没装。**改依赖范围时 `engines.dsh` 与 peer 与 dev 三处同批改**（红线 A2 要求 `engines.dsh` 与每条 `dsh-*` 区间**逐字相同**）。⚠️ `engines.dsh` 里写 `workspace:` 视为不兼容；`engines` 不是对象、或 `engines.dsh` 不是字符串会让清单不可读并拒装。拒绝记录里 `peers` 已改名 `requirements`。
 2. `parseSkillFile` **不是公开 API**（签名依赖 `ctx.fs` 与真实路径）⇒ frontmatter 自己解析。
 3. `ctx.skills.register()` **不校验 `content`** ⇒ 「正文为空」必须由本仓判成失败，否则要到渲染时才是空。
 4. 自定义 `SessionEventMap` 成员 + `session.append()` 会**写坏会话日志** ⇒ 走 `appendPluginRecord()`（`plugin:` 前缀、强制 `ignorable`）。
