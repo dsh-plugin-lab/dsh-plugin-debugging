@@ -1101,6 +1101,33 @@ function safeGet(target: unknown, key: string): unknown {
 }
 
 /**
+ * 取一个 fiber 的**原始** config —— 重挂时必须原样传回去的那一份。
+ *
+ * ## 字段名随 cordis 版本变过（两种形状都要认，顺序不能反）
+ *
+ * | cordis | 原始输入 | 已解析 | 说明 |
+ * |---|---|---|---|
+ * | 4.0.x（宿主 0.2.1 线） | `_config` | `config` | `_config` 是私有字段，`config` 是 schema 解析后的值 |
+ * | 4.1.0 起（宿主 0.2.2 线） | `config` | `effectiveConfig` | `rawConfig` 是 `config` 的 getter；**`_config` 已被删除** |
+ *
+ * ⇒ **先试 4.1 的两个，再退 4.0 的 `_config`**。反过来（先读 `config`）在 4.0.x 上会把
+ * **已解析值**当原始输入传进去，绕过 `internal/config` 钩子；只读 `_config` 则在 4.1.0 上
+ * 恒得 `undefined` —— 重挂后的插件静默失去全部配置（`enableRestart` 回到默认关、
+ * `dshHome` / `profile` / `port` 与三个超时全部归零），而工具照旧返回成功。
+ *
+ * 证据：宿主 `vendor/cordis/src/fiber.ts` 在 4.1.0 删除了 `_config` 字段、新增
+ * `get rawConfig()` / `get effectiveConfig()`；宿主自己的 HMR 同批把 `fiber._config`
+ * 改成了 `fiber.rawConfig`。本机 cordis 4.1.0 上的受控复现：`_config` 读到 `undefined`，
+ * `config` / `rawConfig` 都读到原始对象。
+ *
+ * @param fiber 旧 fiber（或 `registry.plugin()` 返回的包装对象，属性走原型链）。
+ * @returns 原始 config；三种形状都读不到时为 `undefined`（与旧行为一致，不抛）。
+ */
+function rawConfigOf(fiber: unknown): unknown {
+  return safeGet(fiber, 'rawConfig') ?? safeGet(fiber, '_config') ?? safeGet(fiber, 'config')
+}
+
+/**
  * 取 `loader.internal`（T1）。
  *
  * 拿不到就是宿主没给这条路 —— 调用方据此报 `no-internal` 并建议重启，
@@ -1302,7 +1329,7 @@ function bindEntry(raw: unknown): BoundEntry | undefined {
     const registry = safeGet(parent, 'registry')
     const pluginFn = asFunction(safeGet(registry, 'plugin'))
     if (pluginFn === undefined) throw new Error('the fiber has no registry.plugin to mount through')
-    const config = safeGet(old, '_config')
+    const config = rawConfigOf(old)
     const createdFiber = pluginFn.call(registry, plugin, config, undefined)
     // 新 fiber 要接管同一个 entry：entry.fiber 指向它，未来的 update 才找得到人。
     try {

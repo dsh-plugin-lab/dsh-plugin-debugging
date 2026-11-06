@@ -1333,3 +1333,90 @@ describe('lib/hot-reload · 真机 LoadCache 形状（回归 + 变异自证位�
     expect(outcome.ok).toBe(true)
   })
 })
+
+/**
+ * **重挂必须把原始 config 原样传回去**（否则插件静默失去全部配置）。
+ *
+ * 宿主 cordis 在 4.1.0（宿主 0.2.2 线）删掉了 `Fiber._config`，原始输入改叫 `config`，
+ * 并新增 `rawConfig` getter；4.0.x（0.2.1 线）则相反 —— `_config` 才是原始值，
+ * `config` 是**已解析**值。两种形状都要认，且 4.0 那份不能先读。
+ *
+ * ⚠️ **活跃坑 37**：只断言「重挂成功 / 不报错」是假绿 —— 传 `undefined` 也成功。
+ * 所以判据是**传进去的那个对象就是原对象**（逐字相等），并且**未解析值不被误当原始值**。
+ */
+describe('lib/hot-reload · 重挂时原始 config 的两种 cordis 形状', () => {
+  /** 造一条带 `parent.registry.plugin` 的假 fiber，记录 `plugin()` 收到的 config。 */
+  function makeMountableEntry(fiberShape: Record<string, unknown>): {
+    ctx: Record<string, unknown>
+    seen: Array<{ config: unknown; plugin: unknown }>
+  } {
+    const seen: Array<{ config: unknown; plugin: unknown }> = []
+    // 4.1.0 的 registry.plugin() 返回 Object.create(fiber) —— 属性走原型链。
+    const makeWrapper = (): Record<string, unknown> => ({
+      await: async () => undefined,
+      ctx: { get: () => undefined },
+    })
+    const fiber = {
+      state: 2,
+      inject: {},
+      ctx: { get: () => undefined },
+      runtime: { callback: () => undefined, fibers: [] },
+      parent: {
+        registry: {
+          plugin: (plugin: unknown, config: unknown) => {
+            seen.push({ plugin, config })
+            return makeWrapper()
+          },
+        },
+      },
+      ...fiberShape,
+    }
+    const loader = {
+      internal: { import: () => undefined, loadCache: makeRealisticLoadCache().loadCache },
+      entries: () => [
+        { options: { id: 'reloadable-bench', name: ENTRY_URL }, disabled: false, fiber },
+      ],
+      async import() {
+        return { plugin: 'fresh' }
+      },
+      unwrapExports: (value: unknown) => value,
+    }
+    return { ctx: { get: (name: string) => (name === 'loader' ? loader : undefined) }, seen }
+  }
+
+  const RAW_CONFIG = Object.freeze({ enableRestart: true, dshHome: 'C:/x', profile: 'web' })
+  const PARSED_CONFIG = Object.freeze({ enableRestart: true, dshHome: 'C:/x', profile: 'web' })
+
+  it('cordis 4.1.0 形状（无 `_config`）：原始 config 原样传到重挂', async () => {
+    // 4.1.0：`config` 是原始输入，`rawConfig` 是它的 getter。
+    const { ctx, seen } = makeMountableEntry({ config: RAW_CONFIG, rawConfig: RAW_CONFIG })
+
+    await hotReload(
+      reloadHostFrom(ctx),
+      { kind: 'entryId', value: 'reloadable-bench' },
+      { dryRun: false, expired: () => false },
+    )
+
+    expect(seen).toHaveLength(1)
+    expect(seen[0]?.config).toBe(RAW_CONFIG)
+  })
+
+  it('cordis 4.0.x 形状（只有 `_config`）：原始 config 原样传到重挂', async () => {
+    // 4.0.x：`_config` 是原始输入，`config` 是**已解析**值 —— 两者不同对象。
+    const { ctx, seen } = makeMountableEntry({
+      _config: RAW_CONFIG,
+      config: PARSED_CONFIG,
+    })
+
+    await hotReload(
+      reloadHostFrom(ctx),
+      { kind: 'entryId', value: 'reloadable-bench' },
+      { dryRun: false, expired: () => false },
+    )
+
+    expect(seen).toHaveLength(1)
+    // 判据是**原始**那份：拿到 `PARSED_CONFIG` 说明顺序反了（绕过 internal/config 钩子）。
+    expect(seen[0]?.config).toBe(RAW_CONFIG)
+    expect(seen[0]?.config).not.toBe(PARSED_CONFIG)
+  })
+})
