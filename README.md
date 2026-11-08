@@ -35,11 +35,11 @@
 
 ---
 
-You changed something and it didn't take effect? In DSH, that usually means one of three things:
+You changed a plugin and it didn't take effect? In DSH, that usually means one of three things:
 
-- **Config**: re-read on every change, so edits apply immediately. This presumes `hmr` is mounted in `profile`; without `hmr`, every change degrades to restart-required.
-- **Host code**: a process loads code once at startup, so edits need a restart.
-- **Front-end assets**: the browser swaps assets by fingerprint, so edits need a hot reload or refresh.
+- **Plugin config**: re-read on every change, so edits apply immediately. This presumes `hmr` is mounted in `profile`; without `hmr`, every change degrades to restart-required.
+- **Plugin host code**: a process loads code once at startup, so edits need a restart.
+- **Plugin front-end assets**: the browser swaps assets by fingerprint, so edits need a hot reload or refresh.
 
 This plugin lets the agent decide which case you're in, and what to do next.
 
