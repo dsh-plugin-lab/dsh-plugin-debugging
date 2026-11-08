@@ -278,6 +278,32 @@ function Open-ControlJob([string] $Why) {
   The re-arm is guarded: it happens only while the previously adopted host is GONE, which
   is the only situation where abandoning the old handle cannot end a live process.
 #>
+<#
+.SYNOPSIS
+  Whether a restart is still in flight, by the marker's state rather than its existence.
+
+.DESCRIPTION
+  The marker is never deleted - it stays on disk as an audit record - so testing for the
+  file is always true and the "host stopped, no restart in flight" branch below never runs.
+  The field that answers the question is `state`: `armed` means a restart was requested and
+  the recovery half has not consumed it yet; `consumed` means that restart is over.
+
+  A marker without a state, or one that cannot be parsed, is read as "not in flight": the
+  safer mistake is to let this window close than to keep it holding a job handle over a
+  port that a later, unrelated host may appear on.
+#>
+function RestartInFlight([string] $Path) {
+  if (-not (Test-Path -LiteralPath $Path)) { return $false }
+  try {
+    $marker = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json
+  } catch {
+    return $false
+  }
+  if ($null -eq $marker) { return $false }
+  $state = $marker.state
+  if ($null -eq $state) { return $false }
+  return ($state -eq 'armed')
+}
 function Bind-Host([int] $ProcessId) {
   if ($script:lastTarget -ne $ProcessId) {
     $script:lastTarget = $ProcessId
@@ -459,9 +485,9 @@ try {
     }
     else {
       if ($bound -ne 0) {
-        if (Test-Path -LiteralPath $MarkerPath) {
-          # A restart is in flight: the marker is still on disk and the new host is still
-          # starting (measured 21-22 s). Keep waiting instead of disappearing meanwhile.
+        if (RestartInFlight $MarkerPath) {
+          # A restart is in flight (marker state = armed) and the new host is still starting
+          # (measured 21-22 s). Keep waiting instead of disappearing meanwhile.
           $left = $RestartWaitSeconds - $waited
           if ($left -le 0) { Say 'gave up waiting for the host to come back'; break }
           $waited++

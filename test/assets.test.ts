@@ -133,6 +133,14 @@ describe('assets · 语法与编码（能跑起来才算资产）', () => {
     expect(result.status, '解析失败').toBe(0)
   })
 
+  it('停止窗口按 marker 的 `state` 判"重启在途"，**不**按文件存在', () => {
+    const text = readAsset('assets/stop-window.ps1')
+    // marker 永不删除（它留作审计记录），所以「文件在不在」恒为真，那个分支永远走不到；
+    // 判据必须是 state：armed 才算在途，consumed / 缺字段 / 读不出来都按「不在途」。
+    expect(text, '仍然按文件存在判在途').not.toContain('Test-Path -LiteralPath $MarkerPath')
+    expect(text).toContain('RestartInFlight $MarkerPath')
+    expect(text.replace(/\r?\n/gu, '\n')).toContain("  return ($state -eq 'armed')")
+  })
   it('`launcher.js` 能被 import（语法与顶层 await 都成立）', async () => {
     const module = await import('../assets/launcher.js')
     expect(typeof module.runLauncher).toBe('function')
