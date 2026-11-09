@@ -221,7 +221,8 @@ function keyText(key: ReloadKey): string[] {
   if (key.newFiberState !== undefined) facts.push(`newFiberState=${String(key.newFiberState)}`)
   if (facts.length > 0) lines.push(`reload: ${facts.join(' ')}`)
 
-  if (key.moduleUrl !== undefined) lines.push(`moduleUrl: ${key.moduleUrl}`)
+  // ⚠️ **不再印 `moduleUrl:` 行**：同一个 URL 已经在 `entry:` 行的 `module=` 里，
+  // 两行逐字相同（B34-J3 抓的就是它）。模型要 URL 时从 `entry:` 取，一样拿得到。
   return lines
 }
 

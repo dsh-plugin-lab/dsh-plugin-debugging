@@ -428,7 +428,7 @@ describe('lib/hot-reload · 8 步算法', () => {
       expect(outcome.data.modulesCleared).toBe(2)
       expect(outcome.data.rolledBack).toBe(false)
       expect(outcome.data.oldFiberTouched).toBe(true)
-      expect(outcome.data.verdict).toContain('swapped=2 modules')
+      expect(outcome.data.verdict).toContain('2 module(s) were cleared')
     }
   })
 
@@ -584,7 +584,7 @@ describe('lib/hot-reload · 8 步算法', () => {
       expect(outcome.data.dryRun).toBe(true)
       expect(outcome.data.moduleCount).toBe(2)
       expect(outcome.data.modulesCleared).toBe(0)
-      expect(outcome.data.verdict).toContain('dryRun=true')
+      expect(outcome.data.verdict).toContain('dry run:')
     }
     expect(cache.calls).toEqual([])
     expect(calls).toEqual([])
@@ -742,7 +742,8 @@ describe('lib/hot-reload · 结果 → 工具结果（新契约的三键 data）
         oldFiberState: 2,
         newFiberState: 2,
         rolledBack: false,
-        verdict: 'entry=e · swapped=1 modules',
+        verdict:
+          'the swap completed: 1 module(s) were cleared and the old fiber was disposed, so nothing needs undoing',
       },
     })
     expect(result.ok).toBe(true)
@@ -824,7 +825,7 @@ describe('dsh_hot_reload · 工具层', () => {
     expect(keyEntry['entryId']).toBe('include:pkg-a')
     expect(data.key['modulesCleared']).toBe(2)
     expect(data.key['rolledBack']).toBe(false)
-    expect(String(data.verdict)).toContain('swapped=2 modules')
+    expect(String(data.verdict)).toContain('2 module(s) were cleared')
     // 闭包 URL 清单是复核用的 → audit（不进模型文本）。
     expect(data.audit['modules']).toContain(ENTRY_URL)
   })

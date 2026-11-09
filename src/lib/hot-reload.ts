@@ -722,7 +722,7 @@ export async function hotReload(
       data: {
         ...(withClosure as ReloadData),
         modulesCleared: 0,
-        verdict: dryRunVerdict(entry, files.length),
+        verdict: dryRunVerdict(files.length),
       },
     }
   }
@@ -806,7 +806,7 @@ export async function hotReload(
       oldFiberTouched,
       newFiberState: state,
       rolledBack: false,
-      verdict: successVerdict(entry, backup.entries.length, oldFiberTouched),
+      verdict: successVerdict({ cleared: backup.entries.length, oldFiberTouched }),
     },
   }
 }
@@ -886,11 +886,31 @@ function baseReport(entry: ReloadEntryPort, target: ReloadTarget, dryRun: boolea
  * @param cleared 清掉的模块数。
  * @param oldFiberTouched 旧 fiber 有没有被 dispose 过。
  */
-function successVerdict(entry: ReloadEntryPort, cleared: number, oldFiberTouched: boolean): string {
+function successVerdict(decision: SwapDecision): string {
+  // ⚠️ **形参只有「判定要用的量」**：这是 B34（L1 携带契约）逼出来的签名收窄。
+  // 旧签名是 `(entry, cleared, oldFiberTouched)` —— 把 L2 的三格事实原样收进来，
+  // 于是函数**只能**拼出 `entry=… swapped=… oldFiberTouched=… rolledBack=false`
+  // 那种字段枚举（模型每次白读一遍 L2）。判定句不需要 entryId，也不需要布尔名。
   return (
-    `entry=${entry.entryId} · swapped=${String(cleared)} modules · ` +
-    `oldFiberTouched=${String(oldFiberTouched)} · rolledBack=false`
+    `the swap completed: ${String(decision.cleared)} module(s) were cleared and ` +
+    (decision.oldFiberTouched
+      ? 'the old fiber was disposed, so nothing needs undoing'
+      : 'the old fiber was never touched, so nothing needs undoing')
   )
+}
+
+/**
+ * 一次成功换入的**判定输入**。
+ *
+ * 只有判定真的用得上的两格：清了几格缓存（进句子）、旧 fiber 碰没碰（决定「要不要收拾」）。
+ * `entryId` / `moduleUrl` / `rolledBack` **刻意不在**——它们在 L2 各有一行，判定句复述它们
+ * 就是 B34-J1/J3 要抓的那种重复。
+ */
+interface SwapDecision {
+  /** 清掉的模块数。 */
+  cleared: number
+  /** 旧 fiber 有没有被 dispose 过。 */
+  oldFiberTouched: boolean
 }
 
 /**
@@ -899,8 +919,9 @@ function successVerdict(entry: ReloadEntryPort, cleared: number, oldFiberTouched
  * @param entry 目标 entry。
  * @param count 闭包里的模块数。
  */
-function dryRunVerdict(entry: ReloadEntryPort, count: number): string {
-  return `entry=${entry.entryId} · wouldSwap=${String(count)} modules · dryRun=true (nothing was touched)`
+function dryRunVerdict(count: number): string {
+  // 同 {@link successVerdict}：不拼 `entry=… / dryRun=true`（那两格都在 L2）。
+  return `dry run: ${String(count)} module(s) would be swapped and nothing was touched`
 }
 
 /**
