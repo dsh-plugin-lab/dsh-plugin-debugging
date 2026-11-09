@@ -273,7 +273,7 @@ async function probeAuthentication(
     resolved,
     ...(credentials === undefined ? {} : { credentials }),
   })
-  const verdict = verdictOf(probe, authority)
+  const verdict = verdictOf(probe)
 
   if (probe.kind === 'timeout') {
     return toOutput(
@@ -365,20 +365,22 @@ async function probeAuthentication(
  * @param probe 探测结果。
  * @param authority 本次探测的 authority。
  */
-function verdictOf(probe: HttpProbeResult, authority: string): string {
+function verdictOf(probe: HttpProbeResult): string {
+  // ⚠️ **签名里没有 authority**：那是 L2 `authority:` 行的活（B34-J3）。判定句复述它，
+  // 模型就会把同一件事读两遍；而 `authority:` 就在 `verdict:` 的下一行，主语不会丢。
   switch (probe.kind) {
     case 'ok':
-      return `the service at ${authority} is up and this request was accepted, so authentication is not what is failing here`
+      return 'the service is up and this request was accepted, so authentication is not what is failing here'
     case 'unauthorized':
-      return `the service at ${authority} is up and requires authentication (401); this check sends no credentials, so it cannot tell whether any stored browser-session grant is valid`
+      return 'the service is up and requires authentication (401); this check sends no credentials, so it cannot tell whether any stored browser-session grant is valid'
     case 'not-running':
-      return `nothing is listening on ${authority}, so no authentication verdict exists — the host is down, or it moved to another port`
+      return 'nothing is listening, so no authentication verdict exists — the host is down, or it moved to another port'
     case 'timeout':
-      return `the probe of ${authority} timed out, so whether the host is up is unknown — this is not evidence of a 401`
+      return 'the probe timed out, so whether the host is up is unknown — this is not evidence of a 401'
     case 'cancelled':
-      return `the caller cancelled the probe of ${authority}, so no verdict was reached — this says nothing about the host or its credentials`
+      return 'the caller cancelled the probe, so no verdict was reached — this says nothing about the host or its credentials'
     case 'http-error':
-      return `the service at ${authority} is up but answered with neither 2xx/3xx nor 401, so "not running" is ruled out while authentication is not the whole story`
+      return 'the service is up but answered with neither 2xx/3xx nor 401, so "not running" is ruled out while authentication is not the whole story'
   }
 }
 
