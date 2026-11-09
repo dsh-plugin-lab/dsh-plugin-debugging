@@ -22,6 +22,8 @@ Thumbs.db
 *.bak-*
 *.orig
 *.rej
+# 本机复现台 / 调查脚本：只在本机跑，不进仓（`test/integration/README.md` 的同一约定）
+.local/
 
 # 本地凭据：绝不允许提交
 .env

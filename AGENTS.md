@@ -175,7 +175,7 @@ git diff --check
 
 **每条都是踩过的，按「错了会不会静默坏」排序。这里只留规则；证据（实测、复现、被否掉的方案）在
 [.agents/notes/2026-10-15-pitfall-evidence.md](.agents/notes/2026-10-15-pitfall-evidence.md)，编号 1–40 一一对应
-（坑 41 的证据在 [.agents/notes/2026-10-16-desktop-carrier-decision.md](.agents/notes/2026-10-16-desktop-carrier-decision.md)）。**
+（坑 41 的证据在 [.agents/notes/2026-10-16-desktop-carrier-decision.md](.agents/notes/2026-10-16-desktop-carrier-decision.md)；坑 43–46 的在同一时期的 notes 里，指针各条自带）。**
 ⚠️ = 静默坏 —— 错了不报错，最费人。
 
 1. **兼容性门是 `engines.dsh`（有它时它单独说了算），`peerDependencies` 只在它缺席时兜底。** 两段历史：**0.2.1-alpha.3 及更早**只按 peer 判、`engines.dsh` **没有任何读取者**（`plugin-compatibility.ts` 里连 `engines` 这个词都没有）；**自 0.2.1-alpha.4 起相反** —— 包自己声明了 `engines.dsh` 就只按它判，`@deepseek-ai/dsh*` 的 peer 范围**完全被忽略**，只有声明缺席才回退 peer（升级指南把它记在 `v0.2.1-alpha.3/plugin-engines-dsh` 目录下，但正文写的是「**In the next release**」⇒ **生效版本是 alpha.4**；落地提交 `3de3a977e0` 由 `git tag --contains` 核过，最早只见于 `alpha.4`）。⚠️ 冲突被 `catch` 进 `skippedBundles`，插件像没装。**改依赖范围时 `engines.dsh` 与 peer 与 dev 三处同批改**（红线 A2 要求 `engines.dsh` 与每条 `dsh-*` 区间**逐字相同**）。⚠️ `engines.dsh` 里写 `workspace:` 视为不兼容；`engines` 不是对象、或 `engines.dsh` 不是字符串会让清单不可读并拒装。拒绝记录里 `peers` 已改名 `requirements`。
@@ -223,3 +223,4 @@ git diff --check
 43. **「同一次输出里同一事实说两遍」没有任何现存红线看得见**（2026-11-09 审计，8 个工具 ~29 处）：B16 只跨 fixture 比、B18b 只抓严格相等、B20b 只比描述↔渲染。⚠️ 判据现在有了（B34），但它**只认逐字**：同义改写、改名复述（`swapped=`↔`cleared=`）、**派生值**（`cookie name`↔文件名 basename、`found 1`↔列表条数、`markerWritten`↔`marker:` 路径）**一律抓不到**，只能靠 SHAPE §3.0 那条规则与 review。⇒ **写新工具时先看 §3.0**，别等 B34 红 —— 它红不了 D 类。见 [.agents/notes/2026-11-09-l1-carry-contract.md](.agents/notes/2026-11-09-l1-carry-contract.md)。
 44. **判据的扫描面要写死在判据里，且配一条否证用例守着它**：B34 的 J3 只扫 L1∪L2、**明文排除 L3** —— 因为 `nextStep.args` 只引用 L2 的定位符，而 B17 的取值面排除 `nextStep:` 行；把 L3 算进去两边都红、没有第三种可能。⚠️ 这条边界靠「跨实例 fixture + 加宽必红」那对断言钉着，**删任一个都会让边界失守，而失守时 CI 全绿**（坑 24 的同族）。
 45. **JSON 里的 Windows 路径是双反斜杠**：`nextStep.args` 里的 `"C:\\Users\\…"` 与 L2 里的 `C:\Users\…` **不相等**。⚠️ 症状是**静默变绿** —— 拿它做定位符比对时，判据看着在跑、其实对 Windows 路径半瞎（B34 的否证用例第一版就撞在这上面）。比对前归一反斜杠。
+46. **撤旧 runtime 的顺序决定那个 entry 死不死**：`Fiber.dispose` 的 disposer 在 emit `internal/plugin` 时 **runtime 记录还在**，而 loader 把这个事件读成「插件自我卸载」⇒ `entry.options.disabled = true`（**内存树**上的字段，`commit()` 只 emit 不落盘）。后果：entry 下个 reconcile 被撤，它注册的工具**随 fiber 的 effect 一起消失**，`diagnose` 报 `inactive`，改 mtime 也不回来，只有重启才恢复。**正解是照宿主 hmr 的顺序：先 `registry.delete(callback)`、再让 disposer 收 fiber。** ⚠️ 症状与「自己换自己」没有因果关系 —— 真机上换任何插件都会掉工具。根治与复现台见 [.agents/notes/2026-11-09-self-swap-disables-the-entry.md](.agents/notes/2026-11-09-self-swap-disables-the-entry.md)。**同族的假绿**：成功报告里的 `newFiberState` 曾读绑定时的快照（恒等于旧 fiber 的相位）⇒ 「核过了」其实是没核，判据要现读。

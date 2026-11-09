@@ -80,6 +80,13 @@ export type ReloadFailureReason =
   | 'not-reloadable'
   | 'import-failed'
   | 'apply-failed'
+  /**
+   * 换完了，但 loader 把 entry 判成 disabled（下个 reconcile 就会撤掉它）。
+   *
+   * 单独一档而不是并进 `apply-failed`：代码确实挂上去了（apply 没抛），坏的是
+   * **树的记账**，下一步动作也不同（重启 + 重新启用 entry，不是「改代码再试」）。
+   */
+  | 'entry-disabled'
   | 'cancelled'
   | 'timeout'
 
@@ -163,8 +170,17 @@ export interface ReloadEntryPort {
   readonly fiberState?: number
   /** 模块名能不能热重载：空、或 `cordis:` 前缀不行。 */
   readonly reloadable: boolean
-  /** 第 6 步：dispose 旧 fiber。 */
-  disposeOld(): Promise<void>
+  /**
+   * 第 6 步：撤掉旧 runtime。
+   *
+   * ⚠️ **名字是「整个 runtime」不是「那几个 fiber」，因为顺序是判据**：
+   * 必须先抹掉 registry 里的 runtime 记录、再让它的 disposer 收拾 fiber。
+   * 反过来逐个 `fiber.dispose()` 会被 loader 的 `internal/plugin` 处理器读成
+   * 「这个插件自己把自己撤了」⇒ 它把 `entry.options.disabled = true` **落盘**，
+   * 这个 entry 就此关掉（= 真机上「热重载自己之后工具全没了、entry 变 inactive」）。
+   * 证据与复现台见 [.agents/notes/2026-11-09-self-swap-disables-the-entry.md]。
+   */
+  disposeRuntime(): Promise<void>
   /** 第 7 步：用新插件值挂载。apply 期抛错要冒到这里。 */
   mountFresh(plugin: unknown): Promise<void>
   /** 回滚：摘掉刚挂上的新 fiber。 */
@@ -173,6 +189,27 @@ export interface ReloadEntryPort {
   remountOld(): Promise<void>
   /** `entry.fiber === undefined` 那条路径：清完缓存后重新 init。 */
   refresh(): Promise<void>
+  /**
+   * **现读**这个 entry 此刻的 fiber 相位（没有 fiber ⇒ `undefined`）。
+   *
+   * ⚠️ 与上面的 `fiberState` 是两件事：那个是**绑定时**的快照（换之前长什么样），
+   * 这个每次调用都重新读。成功报告里的 `newFiberState` 必须走这一个 ——
+   * 拿快照当「换之后的证据」正是本工具的第一次假绿（`newFiberState=2` 是旧 fiber 的值）。
+   */
+  liveFiberState(): number | undefined
+  /**
+   * **现读**这个 entry 是否被判成 disabled。
+   *
+   * 为什么它要进成功判据：被关掉的 entry 下个 reconcile 就会被撤，工具会当场消失 ——
+   * 那不是「换成功了」，那是「换成功了然后立刻没了」。
+   */
+  entryDisabled(): boolean
+  /**
+   * 若 entry 在换的过程中被判成 disabled，把它**放回换之前的值**（并 commit）。
+   *
+   * @returns `undone` = 真的改回来了；`not-needed` = 本来就没被关；`failed` = 想改但改不动。
+   */
+  undoSpuriousDisable(): Promise<'undone' | 'not-needed' | 'failed'>
 }
 
 /** 宿主侧全部能力（真实实现在 `reloadHostFrom`）。 */
@@ -510,6 +547,13 @@ export interface ReloadData {
   oldFiberState: number | null
   newFiberState: number | null
   rolledBack: boolean
+  /**
+   * 换的过程中 entry 被 loader 误判成 disabled，已经**改回来**了。
+   *
+   * 它进 `audit` 而不是 `key`：模型据此做不了不同的下一步（换成功了、插件是活的），
+   * 但人复核时要看得到「这次差点把它关掉」。
+   */
+  spuriousDisableUndone?: boolean
   /** 结论（L1）。 */
   verdict: string
 }
@@ -769,8 +813,8 @@ export async function hotReload(
     }
   }
 
-  // 第 6–7 步 —— 再 dispose 旧 fiber、挂载新的。两步同一个 try：
-  // dispose 成功而挂载失败时，回滚必须连「摘掉新 fiber」一起做。
+  // 第 6–7 步 —— 再撤旧 runtime、挂载新的。两步同一个 try：
+  // 撤成功而挂载失败时，回滚必须连「摘掉新 fiber」一起做。
   let oldFiberTouched = false
   try {
     if (!entry.hasFiber) {
@@ -778,7 +822,8 @@ export async function hotReload(
       oldFiberTouched = false
       await entry.refresh()
     } else {
-      await entry.disposeOld()
+      // ⚠️ 顺序是判据：先抹 runtime 记录（`disposeRuntime` 的契约），再挂新的。
+      await entry.disposeRuntime()
       oldFiberTouched = true
       await entry.mountFresh(fresh)
     }
@@ -798,15 +843,45 @@ export async function hotReload(
     }
   }
 
-  const state = entry.fiberState ?? null
+  // 第 8 步 —— **真去看一眼**，不拿绑定时的快照冒充换完之后的观测。
+  const liveState = entry.liveFiberState() ?? null
+  let disabledUndo: 'undone' | 'not-needed' | 'failed' = 'not-needed'
+  if (entry.entryDisabled()) {
+    // 护栏（坑 37）：撤旧 runtime 的顺序一旦被改回「逐个 dispose」，就是在这里喊出来，
+    // 而不是报成功。症状在过去是「工具全没了、entry inactive、只有重启才回来」，
+    // 而工具当时说 `newFiberState=2` —— 那是**旧光纤**的值，也就是根本没核过。
+    //
+    // 为什么先尝试**改回来**再报失败：这个 disabled 是我们自己那次 dispose 引出来的
+    // （loader 把「fiber 没了而 runtime 还在」读成「插件自我卸载」），不修就等于把
+    // 用户的插件留在关掉的状态里。改不动才算失败。
+    disabledUndo = await entry.undoSpuriousDisable()
+    if (disabledUndo !== 'undone') {
+      return {
+        ok: false,
+        failure: {
+          reason: 'entry-disabled',
+          message: `the loader reports entry "${entry.entryId}" as disabled after the swap`,
+          verdict:
+            'the new code was mounted, but the loader marked this entry disabled in the same move and it could not be put back — treat this plugin as off: restart the host, then re-enable the entry',
+        },
+        data: {
+          ...(cleared as ReloadData),
+          oldFiberTouched,
+          newFiberState: liveState,
+          rolledBack: false,
+        },
+      }
+    }
+  }
   return {
     ok: true,
     data: {
       ...(cleared as ReloadData),
       oldFiberTouched,
-      newFiberState: state,
+      newFiberState: liveState,
       rolledBack: false,
       verdict: successVerdict({ cleared: backup.entries.length, oldFiberTouched }),
+      ...(disabledUndo === 'undone' ? { spuriousDisableUndone: true } : {}),
     },
   }
 }
@@ -1039,19 +1114,25 @@ function auditOf(data: Partial<ReloadData> | undefined): JsonValue {
     ...(data.modulesTruncated === undefined ? {} : { modulesTruncated: data.modulesTruncated }),
     ...(data.oldFiberCount === undefined ? {} : { oldFiberCount: data.oldFiberCount }),
     ...(data.oldFiberState === undefined ? {} : { oldFiberState: data.oldFiberState }),
+    ...(data.spuriousDisableUndone === undefined
+      ? {}
+      : { spuriousDisableUndone: data.spuriousDisableUndone }),
   }
 }
 
 /**
- * 成功后的下一步：让调用方**自己去看**新 fiber 到没到 active。
+ * 成功后的下一步：让调用方去看**这一行现在是什么相位**。
  *
- * @param data 报告。
+ * ⚠️ 措辞在 2026-11-09 改过一次：原来写「this tool reports what it did, not what the host
+ * ended up with」—— 那句在**当时是对的**（成功报告只回显旧 fiber 的快照），现在不成立了：
+ * 换完之后会现读 `entry.fiber` 的相位、并检查 entry 有没有被判 disabled。留着旧话就是
+ * 让 L3 说一句已经被改掉的实话。
  */
 function reloadNextStep(data: ReloadData): NextStep {
   return {
     tool: 'dsh_diagnose_plugin_load',
     args: { package: data.entry.moduleName },
-    why: 'confirm the new fiber reached active — this tool reports what it did, not what the host ended up with',
+    why: 'confirm the entry is still listed as active once the tree settles — the phase here was read once, right after the swap',
   }
 }
 
@@ -1334,6 +1415,13 @@ function bindEntry(raw: unknown): BoundEntry | undefined {
 
   const oldPlugin = safeGet(runtime, 'callback')
   let created: unknown[] = []
+  /**
+   * 换之前这个 entry 是不是已经被关掉了。
+   *
+   * `undoSpuriousDisable` 只在**原本没关**时才敢动它 —— 用户自己关掉的 entry 不该
+   * 被一次热重载顺手打开。
+   */
+  const disabledBefore = safeGet(record, 'disabled') === true
 
   const disposeFibers = async (fibers: readonly unknown[]): Promise<void> => {
     await Promise.all(
@@ -1377,8 +1465,84 @@ function bindEntry(raw: unknown): BoundEntry | undefined {
       : {}),
     reloadable: moduleName !== '' && !moduleName.startsWith('cordis:'),
 
-    disposeOld: async () => {
-      await disposeFibers(oldFibers)
+    /**
+     * 撤旧 runtime。**顺序是判据，不是风格**（见 `ReloadEntryPort.disposeRuntime`）。
+     *
+     * 宿主自己的 hmr 也是这么收的（`dsh-hmr` 的 `partialReload`：先
+     * `registry.delete(plugin)`、再 await 那些 fiber）。照抄它的顺序就能避开
+     * loader 那条「fiber 被撤而 runtime 还在 ⇒ 这个 entry 自我卸载」的判定。
+     *
+     * 缺 `registry.delete` 时**回退**到逐个 dispose（旧行为，会触发那条判定）——
+     * 但那条路走到时 entry 会被判 disabled，成功判据在 `hotReload` 末尾会拦住，
+     * 所以不会静默地报成功。
+     */
+    disposeRuntime: async () => {
+      const registry = safeGet(safeGet(oldFibers[0] ?? fiberRecord, 'parent'), 'registry')
+      const deleteFn = asFunction(safeGet(registry, 'delete'))
+      if (deleteFn !== undefined && oldPlugin !== undefined) {
+        try {
+          deleteFn.call(registry, oldPlugin)
+        } catch {
+          // 删记录失败不影响「把 fiber 收掉」这件事，往下照旧逐个 dispose。
+          await disposeFibers(oldFibers)
+        }
+      } else {
+        await disposeFibers(oldFibers)
+      }
+      // 无论走哪条，都要等那些 fiber 真的 unload 完 —— 否则新 fiber 会和旧的一半共存。
+      await Promise.all(
+        oldFibers.map(async (item) => {
+          const awaitFn = asFunction(safeGet(item, 'await'))
+          if (awaitFn === undefined) return
+          try {
+            await (awaitFn.call(item) as Promise<void>)
+          } catch {
+            // 旧 fiber 自己带错误不算这次失败：它已经不该在树上了。
+          }
+        }),
+      )
+    },
+
+    /** 现读 `entry.fiber` 的相位（`entry.fiber` 是 `Object.create(fiber)` 的包装，属性走原型）。 */
+    liveFiberState: () => {
+      const live = safeGet(record, 'fiber')
+      const state = safeGet(asRecord(live), 'state')
+      return typeof state === 'number' ? state : undefined
+    },
+
+    /** 现读 `entry.disabled`（它是 getter，会连带看祖先 group）。 */
+    entryDisabled: () => safeGet(record, 'disabled') === true,
+
+    /**
+     * 把被误判成 disabled 的 entry 放回换之前的值。
+     *
+     * 为什么这是**修**而不是「多此一举」：那个 disabled 是本插件那次 dispose 引出来的
+     * （loader 把「fiber 被撤而 runtime 记录还在」读成插件的自我卸载），不修就等于把
+     * 别人的插件留在关掉的状态里，而用户唯一的出路是重启。
+     *
+     * 只在**换之前它不是 disabled** 时才动它 —— 本来就被用户关掉的 entry 不该被我们打开。
+     */
+    undoSpuriousDisable: async () => {
+      if (safeGet(record, 'disabled') !== true) return 'not-needed'
+      if (disabledBefore) return 'failed'
+      try {
+        // ⚠️ 只能改 `options.disabled`，不能直接赋值 `record.disabled` —— 后者是
+        // **只读 getter**（`get disabled()` 逐级看 options 与祖先 group），
+        // 严格模式下赋值会抛，而「抛」在这里会被误读成「改不回来」。
+        const options = asRecord(safeGet(record, 'options'))
+        const group = safeGet(record, 'parent')
+        if (options !== undefined) {
+          delete (options as Record<string, unknown>)['disabled']
+          // 树的记账要跟着走：`commit` 同步通知宿主「有一行变了」。
+          // 它住在 tree 上（`Loader extends EntryTree`，真机上是 no-op + 一条事件）。
+          const tree = safeGet(group, 'tree')
+          const commitFn = asFunction(safeGet(tree, 'commit'))
+          if (commitFn !== undefined) commitFn.call(tree, { id: entryId, group, options })
+        }
+      } catch {
+        return 'failed'
+      }
+      return safeGet(record, 'disabled') === true ? 'failed' : 'undone'
     },
 
     mountFresh: async (plugin) => {
