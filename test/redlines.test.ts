@@ -6369,16 +6369,16 @@ function judgeL1Contract(run: RedlineRun): L1ContractHit[] {
 }
 
 /**
- * **报告模式的开关**：`true` 时只打印清单、不判红。
+ * **诊断出口，不是开关**：设了这个环境变量时，判据**额外**把命中清单写到那个路径。
  *
- * 落地顺序（维护者 2026-11-09 指定）：先出清单 → 审命中时**只许改判据**、说不清就当判据错
- * → 判据定稿后才接红线、一次一个工具改到全绿。所以这个常量是**流程的一部分**，
- * 不是临时调试残留；接红线时它变 `false`，并在同一次改动里删掉「报告」那条用例。
+ * ⚠️ **刻意没有「只报告不判红」的布尔开关**。落地期确实用过一次（先出清单、逐个工具修），
+ * 但那一阶段结束后开关必须消失 —— 一条能被关掉的红线，迟早会被关掉，而且关掉时全绿。
+ * 现在这里多出来的只是一个写文件的动作，**判红是恒定的**。
  */
-const L1_CONTRACT_REPORT_ONLY = true
+const L1_CONTRACT_REPORT_FILE = process.env['L1_CONTRACT_REPORT']
 
 describe('B34 L1 的携带契约（J1 字段枚举 / J2 逐字重述 / J3 定位符重复）', () => {
-  it('报告模式：把三条判据的全部命中打出来（不判红）', async () => {
+  it('全部 fixture 的 L1 都不复述 L2 / L3', async () => {
     const runs = await redlineCorpus()
     const hits = runs.flatMap((run) => judgeL1Contract(run))
 
@@ -6391,20 +6391,20 @@ describe('B34 L1 的携带契约（J1 字段枚举 / J2 逐字重述 / J3 定位
       runs.filter((run) => nextStepWhy(run.text) !== undefined).length,
       '一条 L3 都没有 —— J2 的右半边只覆盖了 L2',
     ).toBeGreaterThan(0)
+    // 语料覆盖下界：里面必须真有**跨实例**那条 —— 它既是 J3 扫描面的唯一否证对象，
+    // 也是 `homeRetryArg` 吐 `dshHome` 的唯一入口。被删掉时这条响亮判红。
+    expect(
+      runs.filter((run) => run.label.includes('跨实例')).length,
+      '语料里没有跨实例那条 —— J3 扫描面的否证对象没了',
+    ).toBeGreaterThan(0)
 
     const report = hits.map((hit) => `${hit.judge}\t${hit.tool}\t${hit.label}\t${hit.detail}`)
-    if (L1_CONTRACT_REPORT_ONLY) {
-      // 报告模式：写一份清单供人工审。**断言恒真**的前提是它真的写了一行都不少的清单。
+    if (L1_CONTRACT_REPORT_FILE !== undefined) {
       writeFileSync(
-        process.env['L1_CONTRACT_REPORT'] ?? join(tmpdir(), 'l1-contract-report.txt'),
+        L1_CONTRACT_REPORT_FILE,
         [`runs=${String(runs.length)} hits=${String(hits.length)}`, ...report].join('\n'),
         'utf8',
       )
-      expect(
-        hits.length,
-        '一条命中都没有 —— 要么工具真的干净了，要么判据写错了（先查判据）',
-      ).toBeGreaterThan(0)
-      return
     }
     expect(hits, `B34 违规：\n${report.join('\n')}`).toEqual([])
   })

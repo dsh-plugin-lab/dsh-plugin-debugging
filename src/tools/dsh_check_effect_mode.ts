@@ -789,7 +789,11 @@ function verdictFor(
       // 而那个可用性本身是按运行时表达式决定的 ⇒ 只印「takes effect live here」是把条件丢掉。
       return hmr === 'present-conditional'
         ? `${label} takes effect live here only if hmr's disabled expression evaluates to enabled: hmr is mounted in this profile and it is what watches the patch files, so the loader re-reads the changed rows — but that row's disabled flag is a runtime expression, so this is not certain; if it still had no effect, check that expression before blaming the config`
-        : `${label} takes effect live here: hmr is mounted in this profile and it is what watches the patch files, so the loader re-reads the changed rows — if it still had no effect, the config is wrong or a later layer replaced the whole row`
+        : // ⚠️ **判定句到「re-reads the changed rows」为止**（B34-J2）：后半句
+          // 「if it still had no effect, the config is wrong or a later layer replaced the whole row」
+          // 曾经在这里和 `nextStepFor('hot').why` 里**逐字各写一遍**。它是「为什么做这一步」
+          // 的理由，属于 L3；L1 只留判定。
+          `${label} takes effect live here: hmr is mounted in this profile and it is what watches the patch files, so the loader re-reads the changed rows`
     case 'hmr':
       return `${label} is swapped in by hmr: refresh the page to pick it up`
     case 'client-rebuild':
