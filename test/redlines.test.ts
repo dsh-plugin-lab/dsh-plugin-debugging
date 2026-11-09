@@ -80,7 +80,7 @@ import {
 import type { LaunchCommand, RestartFsPort, RestartPorts } from '../src/lib/restart.ts'
 import { cookieFilePath, encodeBase64Url, type CookieFilePort } from '../src/lib/cookie-sign.ts'
 import { createToolDeps, type ToolDeps } from '../src/tools/shared.ts'
-import { stripComments, withPlatform } from './tools/helpers.ts'
+import { stripComments, sharedSubstrings, withPlatform } from './tools/helpers.ts'
 
 /**
  * 本仓的**红线**：能落成断言的不变量。
@@ -4272,6 +4272,43 @@ function diagnoseWith(kind: 'loaded' | 'no-profile'): ToolDefinition {
   return createDiagnosePluginLoadTool(redlineDeps(redlineConfig(home)))
 }
 
+/**
+ * **跨实例**的 `dump_config` 形：`--dump-config` 在传输层超时 ⇒ 走
+ * `retryArgs(resolved)` 那条 `nextStep`，而 `homeRetryArg` 在 `dshHomeSource ===
+ * 'tool-argument'` 时会**把 `dshHome` 塞进 `args`**。
+ *
+ * ## 为什么必须单独一条（本夹具存在的全部理由）
+ *
+ * 语料里其余每一条用的都是 `redlineConfig(...)`（来源 `config`）⇒ `homeRetryArg` 恒返回
+ * `{}` ⇒ 这条分支**在 CI 里从来没被走过**。而它是 B17 与 B34-J3′ 的**交叉点**：
+ *
+ * | 判据 | 跨实例真机上的读数 | 若它不在语料里 |
+ * |---|---|---|
+ * | B17 | `args.dshHome` 的叶子（那个绝对路径）必须在 L1/L2/描述里找得到 —— L2 的 `resolved:` 有它 ⇒ 绿 | 看不出这条依赖，删掉 `resolved:` 也不会有人发现 |
+ * | B34 的 J3′ | 同一个路径在 L2 与 L3 各一次。**L3 必须被排除在扫描面外**，否则这里就红 | 边界没人守：下一个人「顺手也查一下 L3」→ 真机红、CI 绿（坑 24 的同族） |
+ *
+ * 所以它同时是「跨实例路径有判据覆盖」的**唯一语料**，与「J3′ 扫描面不含 L3」的
+ * **唯一否证对象**。删掉它，那两条断言都会退化成恒真。
+ *
+ * ⚠️ **第一版写错过**：最初用 `diagnose` + 缺产物，结果它走的是 `loaded` 分支 —— 输出里
+ * 根本没有 `nextStep`，`homeRetryArg` 一次都没被调用，而 B34 照样「通过」。
+ * 教训与坑 40 同形：**替身被调用过没有，必须看输出里有没有那个形状**，不能看测试绿不绿。
+ *
+ * @returns 工具定义 + 要当参数传进去的那个 home。
+ */
+function dumpConfigCrossInstance(): { tool: ToolDefinition; dshHome: string } {
+  const home = makeTempRoot('dsh-redline-dump-cross-')
+  // 传输层超时：`timedOut: true` ⇒ 工具走 timeout 分支，那条分支带 `retryArgs(resolved)`。
+  const spawn: SpawnImpl = async () => ({
+    code: 0,
+    stdout: '',
+    stderr: '',
+    timedOut: true,
+    aborted: false,
+  })
+  return { tool: createDumpConfigTool(redlineDeps(redlineConfig(home), { spawn })), dshHome: home }
+}
+
 /** `dump_config`：成功 = 两次 dump 都干净；失败 = `--dump-config` 退出码非 0。 */
 function dumpConfigWith(kind: 'clean' | 'exit-code'): ToolDefinition {
   const home = makeTempRoot('dsh-redline-dump-')
@@ -4595,6 +4632,17 @@ async function buildRedlineCorpus(): Promise<RedlineRun[]> {
       'restart · 审批档读不出来（fail-closed）',
       { reason: 'the plugin code changed' },
     ),
+    // 跨实例那一条：语料里**唯一**让 `homeRetryArg` 吐出 `dshHome` 的 fixture。
+    // 它同时守着 B17（args 的路径必须在 L2 找到）与 B34-J3′（扫描面不含 L3）。
+    await (async () => {
+      const cross = dumpConfigCrossInstance()
+      return runFixture(
+        cross.tool,
+        DUMP_CONFIG_TOOL,
+        'dump_config · 跨实例（dshHome 参数来自调用方，args 里带 dshHome）',
+        { dshHome: cross.dshHome },
+      )
+    })(),
   ]
 }
 
@@ -6076,6 +6124,359 @@ function nullPrototypeToPlain(value: unknown): unknown {
 }
 
 /**
+ * # B34 —— L1 的**携带契约**（三条判据 + 一个报告模式）
+ *
+ * ## 为什么需要它（2026-11-09 的审计）
+ *
+ * 全仓 8 个工具的模型可见文本里，同一事实被说两遍的地方有 ~29 处，而**没有任何现存红线
+ * 看得见它们**。三条各自差一格：
+ *
+ * | 红线 | 它实际比的对象 | 差在哪 |
+ * |---|---|---|
+ * | B16 | `verdict:` + L2 行，**跨两份 fixture** | 跨 fixture，不是**同一次输出内部** |
+ * | B18b | `why === verdict`（**严格相等**） | 只抓整句相等；「尾部同句」漏 |
+ * | B20b | `sharedSubstrings(描述, 渲染文本, 40)` | 比的是**描述 ↔ 渲染**，不是 L1 ↔ L2/L3 |
+ *
+ * ## 层的携带契约（判据就按这三条写）
+ *
+ * | 层 | 携什么 | 不携什么 |
+ * |---|---|---|
+ * | **L1 判定** | 结论、它排除了什么、判定所需的量（计数 / 分类词） | **定位符**、**L2 字段的 `k=v` 副本**、L3 的补救话术 |
+ * | **L2 事实** | 一行一条 `k=v`；**定位符**的唯一居所 | 判定（那是 L1 的事） |
+ * | **L3 动作** | 为什么这一步 | L1 的复述（B18b 的严格相等只是它的最粗形态） |
+ *
+ * ## 三条判据的**扫描面故意不一致**（这是分工，不是补丁）
+ *
+ * | 判据 | 抓什么 | 扫描面 |
+ * |---|---|---|
+ * | **J1** | L1 里的 `k=v`，其 key 在 L2 里也是一个 key / label | L1 ↔ L2 |
+ * | **J2** | L1 与 L2、L1 与 **L3 的 `<why>` 正文**之间 ≥40 字符的逐字片段 | L1 ↔（L2 ∪ L3.why） |
+ * | **J3′** | 每个**定位符**（file URL / 绝对路径 / `host:port` / ISO 时刻）在 **L1 ∪ L2 里恰好一次** | L1 ∪ L2（**不含 L3**） |
+ *
+ * **J3′ 为什么必须排除 L3**：`nextStep.args` 会**引用** L2 里已有的定位符（`hot_reload` 传
+ * `moduleName`、跨实例的 `diagnose` / `dump_config` 传 `dshHome`）。若把 L3 算进扫描面：
+ *
+ * - L2 留着那个路径 ⇒ J3′ 数出 2 次 ⇒ 红；
+ * - 把路径从 L2 删掉 ⇒ **B17 红**（B17 的取值面明文排除 `nextStep:` 行）。
+ *
+ * 两边互斥、没有间隙。所以原则是：**L2 是定位符的居所，L3 的 args 只能引用它** ——
+ * 而 B17 恰好就是「它必须先在别处出现过」的那条判据，因此 L3 **在结构上不可能**成为
+ * 定位符的第二个家。这条边界由 {@link denyL3Widening} 的否证用例钉着。
+ *
+ * ## 已知限度（如实列出，不静默）
+ *
+ * - **只认逐字**：同义改写（`takes effect live` ↔ `mode: hot`）与**改名复述**
+ *   （`swapped=1` ↔ `cleared=1`）、**派生值**（`cookie name` ↔ 文件名 basename、
+ *   `found 1` ↔ `dsh: 1`、`markerWritten` ↔ `marker:` 路径）都**抓不到** —— 它们值形态
+ *   完全不同，任何字符串判据都拿不住。这类只能靠 review，且**规范里要单列一条**。
+ * - 三条判据只吃**渲染文本**，不吃 `data` 结构 —— 于是「L1 与 L2 说的是同一件事但用词不同」
+ *   一律放行（同 B16 / B20b 的既有取舍：近似匹配引入的假红比漏更贵）。
+ */
+
+/** 一个定位符：判据 J3′ 的取词面（逐字相等才计数，**不做前缀包含**）。 */
+const LOCATOR_PATTERNS: readonly RegExp[] = [
+  // file URL（`hot_reload` 的 moduleName 就是这个形状）
+  /file:\/\/[^\s,;)"']+/g,
+  // Windows 绝对路径
+  /[A-Za-z]:\\[^\s,;)"']+/g,
+  // POSIX 绝对路径（≥2 段，避免把 `/` 与 `/4` 这类误取）
+  /\/(?:[\w.-]+\/)+[\w.-]+/g,
+  // host:port（IPv4 与裸主机名两种；`localhost:3080` 也要抓）
+  /\b\d{1,3}(?:\.\d{1,3}){3}:\d{2,5}\b/g,
+  /\b[a-zA-Z][\w.-]*:\d{2,5}\b/g,
+  // ISO 时刻
+  /\d{4}-\d{2}-\d{2}T[\d:.]+Z/g,
+]
+
+/**
+ * 取一段文本里的定位符（去重）。
+ *
+ * @param text 任意文本（L1 正文 / 单条 L2 行都会喂进来）。
+ */
+function locatorsOf(text: string): string[] {
+  const raw: string[] = []
+  for (const pattern of LOCATOR_PATTERNS) {
+    for (const match of text.matchAll(pattern)) {
+      // 尾部的句号 / 括号是标点，不是路径的一部分。
+      // ⚠️ **反斜杠要归一成单个**：`nextStep.args` 是 JSON，Windows 路径在那里是
+      // `"C:\\Users\\…"`（**双**反斜杠），而 L2 的 `resolved:` 行是单反斜杠。
+      // 不归一时同一个路径在两层里被当成两个不同定位符 —— 而症状是**静默变绿**：
+      // 否证用例实测撞到过（把 L3 加进扫描面仍然不红）。这与本仓那些「取不到就当成没有」
+      // 的坑同族，只是这里更隐蔽：它让判据看起来在跑。
+      const value = (match[0] ?? '').replace(/[.,;:)]+$/u, '').replace(/\\\\/gu, '\\')
+      if (value !== '') raw.push(value)
+    }
+  }
+  // **嵌套只留最长的**：`file:///a/b.js` 里的 `/a/b.js` 也会被 POSIX 那条匹配到，
+  // 留着它会让**同一个定位符报两次**（报告模式第一轮实测到的误报），也会让计数虚高。
+  const longest = [...new Set(raw)].sort((a, b) => b.length - a.length)
+  const kept: string[] = []
+  for (const candidate of longest) {
+    if (!kept.some((keeper) => keeper.includes(candidate))) kept.push(candidate)
+  }
+  return kept
+}
+
+/**
+ * 取一条 L2 行里**能被称作字段名**的那些记号：`k=v` 的 `k`，以及行首的 `k:` 标签。
+ *
+ * 为什么要两种：`hot_reload` 的 L2 两种都用了 —— `entry: … module=…`（标签 + 内联 k=v）、
+ * `reload: cleared=1 oldFiberTouched=true`（标签 + 内联 k=v）。
+ *
+ * @param line 一条 L2 行。
+ */
+function factLabelsOf(line: string): string[] {
+  const labels = new Set<string>()
+  for (const match of line.matchAll(/\b([A-Za-z][\w.]*)=/g)) {
+    const key = match[1]
+    if (key !== undefined) labels.add(key)
+  }
+  const head = /^([A-Za-z][\w.]*):/u.exec(line)
+  if (head?.[1] !== undefined) labels.add(head[1])
+  return [...labels]
+}
+
+/**
+ * J1：**L1 里出现 `k=v`，而其 key 在 L2 里也是一个 key / label** ⇒ L1 在枚举 L2 的字段。
+ *
+ * 为什么不是「L1 里出现任何 `k=v` 就红」：`sign_cookie` 的判定句里有一句
+ * `one 'name=value' line for a Cookie header` —— 那是在**描述文件格式**，`name` 并不是任何
+ * L2 行的字段名。按「任何 k=v」判会把这句话误杀（报告模式审命中时抓到的唯一一处，见下）。
+ *
+ * @param verdict L1 正文。
+ * @param l2 L2 行。
+ */
+function judgeL1FieldPairs(verdict: string, l2: readonly string[]): string[] {
+  const l2Labels = new Set(l2.flatMap((line) => factLabelsOf(line)))
+  if (l2Labels.size === 0) return []
+  const offenders: string[] = []
+  for (const match of verdict.matchAll(/\b([A-Za-z][\w.]*)=/g)) {
+    const key = match[1]
+    if (key !== undefined && l2Labels.has(key)) {
+      offenders.push(`L1 枚举了 L2 的字段 \`${key}=\`（该字段的居所是 L2）`)
+    }
+  }
+  return offenders
+}
+
+/**
+ * J2：L1 与 L2（以及 L3 的 `<why>` 正文）之间不许有 ≥{@link B20B_SHARED_MIN_CHARS} 字符的
+ * 逐字片段。
+ *
+ * **L3 的 `args` JSON 不算**：那一格是「引用标识符」，由 B17 管；把它算进来会与 J3′ 打架
+ * （见本节开头的表）。只比 `<why>` 的**正文** —— 用 `nextStepWhy()` 剥掉 `tool(args) — `。
+ *
+ * @param verdict L1 正文。
+ * @param facts L2 行 + L3 的 why 正文（`undefined` 表示本次没有 L3）。
+ */
+function judgeL1EchoesFacts(verdict: string, facts: readonly string[]): string[] {
+  const left = scrubLocators(verdict)
+  const offenders: string[] = []
+  for (const fact of facts) {
+    if (fact === '') continue
+    const shared = sharedSubstrings(left, scrubLocators(fact), B20B_SHARED_MIN_CHARS)
+    if (shared.length > 0) {
+      offenders.push(
+        `L1 与另一层逐字重复 ${String(shared[0]?.length ?? 0)}+ 字符：\`${shared[0] ?? ''}\``,
+      )
+    }
+  }
+  return offenders
+}
+
+/**
+ * 把文本里的**定位符**换成占位符，供 {@link judgeL1EchoesFacts} 用。
+ *
+ * ## 为什么必须有这一步（报告模式第一轮实测到的双报）
+ *
+ * 定位符重复是 **J3′ 的活**。不隔开的话，同一个路径会被两条判据各报一次 ——
+ * 第一轮实测：`diagnose` / `sign_cookie` 的 9 条 J2 命中里有 7 条的“重复片段”就是
+ * **路径或 cookie 名的一部分**，全部与 J3 的命中重合。两条判据报同一件事，等于清单里有
+ * 冗余，而冗余会被下游当成“两个问题”去改两遍。
+ *
+ * @param text 任意文本。
+ */
+function scrubLocators(text: string): string {
+  let out = text
+  for (const locator of locatorsOf(text)) out = out.split(locator).join('\u0000')
+  return out
+}
+
+/**
+ * J3′：每个定位符在 **L1 ∪ L2** 里**恰好出现一次**。
+ *
+ * **不算 L3**（理由见本节开头）：L3 的 args 是引用，B17 已保证它不是新家。
+ * **只比逐字相等**，不比前缀包含 —— 否则 `resolved: dshHome=C:\a\b` 与
+ * `dir=C:\a\b\profiles\web` 会被误判（那是真的两个不同定位符）。
+ *
+ * @param verdict L1 正文。
+ * @param l2 L2 行。
+ */
+function judgeLocatorRepeated(verdict: string, l2: readonly string[]): string[] {
+  const where = new Map<string, string[]>()
+  for (const locator of locatorsOf(verdict)) {
+    where.set(locator, [...(where.get(locator) ?? []), 'L1'])
+  }
+  l2.forEach((line, index) => {
+    for (const locator of locatorsOf(line)) {
+      where.set(locator, [...(where.get(locator) ?? []), `L2[${String(index)}]`])
+    }
+  })
+  const offenders: string[] = []
+  for (const [locator, homes] of where) {
+    if (homes.length > 1) {
+      offenders.push(
+        `定位符 \`${locator}\` 出现了 ${String(homes.length)} 次（${homes.join(' / ')}）`,
+      )
+    }
+  }
+  return offenders
+}
+
+/** 一份 fixture 的三条判据结论。 */
+interface L1ContractHit {
+  /** 哪个工具。 */
+  tool: string
+  /** 哪条 fixture。 */
+  label: string
+  /** 哪条判据。 */
+  judge: 'J1' | 'J2' | 'J3'
+  /** 具体是哪里重复。 */
+  detail: string
+}
+
+/**
+ * 对一份渲染文本跑三条判据。
+ *
+ * @param run 一条已渲染的 fixture。
+ */
+function judgeL1Contract(run: RedlineRun): L1ContractHit[] {
+  const layers = splitRenderText(run.text)
+  if (layers.verdict === undefined) return []
+  const why = nextStepWhy(run.text)
+  const facts = why === undefined ? layers.l2 : [...layers.l2, why]
+  const hits: L1ContractHit[] = []
+  for (const detail of judgeL1FieldPairs(layers.verdict, layers.l2)) {
+    hits.push({ tool: run.tool, label: run.label, judge: 'J1', detail })
+  }
+  for (const detail of judgeL1EchoesFacts(layers.verdict, facts)) {
+    hits.push({ tool: run.tool, label: run.label, judge: 'J2', detail })
+  }
+  for (const detail of judgeLocatorRepeated(layers.verdict, layers.l2)) {
+    hits.push({ tool: run.tool, label: run.label, judge: 'J3', detail })
+  }
+  return hits
+}
+
+/**
+ * **报告模式的开关**：`true` 时只打印清单、不判红。
+ *
+ * 落地顺序（维护者 2026-11-09 指定）：先出清单 → 审命中时**只许改判据**、说不清就当判据错
+ * → 判据定稿后才接红线、一次一个工具改到全绿。所以这个常量是**流程的一部分**，
+ * 不是临时调试残留；接红线时它变 `false`，并在同一次改动里删掉「报告」那条用例。
+ */
+const L1_CONTRACT_REPORT_ONLY = true
+
+describe('B34 L1 的携带契约（J1 字段枚举 / J2 逐字重述 / J3 定位符重复）', () => {
+  it('报告模式：把三条判据的全部命中打出来（不判红）', async () => {
+    const runs = await redlineCorpus()
+    const hits = runs.flatMap((run) => judgeL1Contract(run))
+
+    // 空转下界（坑 18）：判据必须真的读到 L1 与 L2，否则「零命中」什么都不证明。
+    const scanned = runs.filter((run) => splitRenderText(run.text).verdict !== undefined)
+    expect(scanned.length, '一条 L1 都没扫到 —— 三条判据全在空转').toBe(runs.length)
+    const l2Lines = runs.flatMap((run) => splitRenderText(run.text).l2)
+    expect(l2Lines.length, '一条 L2 都没扫到 —— J1 / J3 的右半边求不出来').toBeGreaterThan(0)
+    expect(
+      runs.filter((run) => nextStepWhy(run.text) !== undefined).length,
+      '一条 L3 都没有 —— J2 的右半边只覆盖了 L2',
+    ).toBeGreaterThan(0)
+
+    const report = hits.map((hit) => `${hit.judge}\t${hit.tool}\t${hit.label}\t${hit.detail}`)
+    if (L1_CONTRACT_REPORT_ONLY) {
+      // 报告模式：写一份清单供人工审。**断言恒真**的前提是它真的写了一行都不少的清单。
+      writeFileSync(
+        process.env['L1_CONTRACT_REPORT'] ?? join(tmpdir(), 'l1-contract-report.txt'),
+        [`runs=${String(runs.length)} hits=${String(hits.length)}`, ...report].join('\n'),
+        'utf8',
+      )
+      expect(
+        hits.length,
+        '一条命中都没有 —— 要么工具真的干净了，要么判据写错了（先查判据）',
+      ).toBeGreaterThan(0)
+      return
+    }
+    expect(hits, `B34 违规：\n${report.join('\n')}`).toEqual([])
+  })
+
+  it('跨实例 fixture 真的走到 `homeRetryArg` 吐 `dshHome` 那条分支', async () => {
+    // ⚠️ 这条不是「顺手加个断言」：**第一版夹具写错过**（用 `diagnose` + 缺产物，结果走的是
+    // `loaded` 分支、输出里根本没有 `nextStep`）。那次 B34 照样「通过」，因为判据只看
+    // 存在的两层。所以这里必须直接断言那个形状真的在 —— 与坑 40 同形：
+    // 「替身/分支被调用过没有」要看输出里有没有那个形状，不能看测试绿不绿。
+    const { tool, dshHome } = dumpConfigCrossInstance()
+    const run = await runFixture(tool, DUMP_CONFIG_TOOL, 'B34 · 跨实例探针', { dshHome })
+    const step = (run.value as { nextStep?: { args?: Record<string, unknown> } }).nextStep
+    expect(step?.args, '这条 fixture 没产出带 args 的 nextStep —— 跨实例分支没被走到').toBeDefined()
+    expect(
+      step?.args?.['dshHome'],
+      `args 里没有 dshHome —— homeRetryArg 没被走到（它只在 dshHomeSource === 'tool-argument' 时吐值）`,
+    ).toBe(dshHome)
+    // B17 那一半：这个路径必须在模型看得到的地方出现过（L2 的 `resolved:` 就是它）。
+    const layers = splitRenderText(run.text)
+    expect(
+      layers.l2.join('\n'),
+      'L2 里没有那个 home —— B17 会红，而且「args 只是引用」这条原则不成立了',
+    ).toContain(dshHome)
+  })
+
+  it('**否证：把 L3 加进 J3′ 的扫描面，同一条 fixture 必红**（这条守着面不扩）', async () => {
+    // 这是本文件里唯一一处「故意把扫描面改坏」的用例。它存在的理由：
+    // J3′ 排除 L3 是**与 B17 的互斥边界**（见本节开头的表），而这条边界一旦被「顺手也查一下
+    // nextStep」改掉，真机上会红、CI 上永远绿（跨实例 fixture 就是唯一的探测点）。
+    const { tool, dshHome } = dumpConfigCrossInstance()
+    const run = await runFixture(tool, DUMP_CONFIG_TOOL, 'B34 · 跨实例探针', { dshHome })
+    const layers = splitRenderText(run.text)
+    const verdict = layers.verdict ?? ''
+    expect(verdict, '这条 fixture 没有 L1 —— 否证用例没法成立').not.toBe('')
+
+    // ① 生产口径（L1 ∪ L2）：路径只在 L2 出现一次 ⇒ 绿。
+    expect(judgeLocatorRepeated(verdict, layers.l2), '正常口径下跨实例被误报了').toEqual([])
+    // ② 把 nextStep 那行当成第三条「L2」喂进去 = 模拟「L3 被加进扫描面」⇒ 必红。
+    const widened = [...layers.l2, `nextStep:${layers.nextStep ?? ''}`]
+    expect(
+      judgeLocatorRepeated(verdict, widened),
+      '把 L3 加进扫描面后仍然绿 —— 这条否证用例没在测边界（面已被悄悄改窄/改宽）',
+    ).not.toEqual([])
+  })
+
+  it('三条判据各自可被否证（否则它们只是装饰）', () => {
+    // J1：L1 写 `k=v`，且该 key 在 L2 也是 key ⇒ 红；key 不在 L2 ⇒ 绿（`sign_cookie` 的
+    // `'name=value'` 就是后者，它是**描述文件格式**，不是枚举字段）。
+    expect(
+      judgeL1FieldPairs('entry=x · rolledBack=false', ['entry: x', 'rolledBack=false']),
+    ).not.toEqual([])
+    expect(
+      judgeL1FieldPairs("one 'name=value' line", ['cookie name: a', 'cookie file: b']),
+    ).toEqual([])
+    // J2：跨层逐字 ≥40 ⇒ 红；不足 40 ⇒ 绿。
+    const long = 'the config is wrong or a later layer replaced the whole row'
+    expect(judgeL1EchoesFacts(`it had no effect: ${long}`, [`why: ${long}`])).not.toEqual([])
+    expect(judgeL1EchoesFacts('the config is wrong', ['why: the config is wrong'])).toEqual([])
+    // J2 还要求**定位符不算**（那是 J3 的活）：同一条长路径不算逐字重句。
+    const path = 'C:\\Users\\speak\\AppData\\Local\\Temp\\dsh-redline-x\\profiles\\web'
+    expect(judgeL1EchoesFacts(`failed at ${path}`, [`resolved: dir=${path}`])).toEqual([])
+    // J3：同一 authority 两处 ⇒ 红；嵌套（file URL 里的 POSIX 段）只算**一条**。
+    expect(judgeLocatorRepeated('up at 127.0.0.1:3080', ['authority: 127.0.0.1:3080'])).not.toEqual(
+      [],
+    )
+    expect(
+      judgeLocatorRepeated('ok', ['entry: m=file:///a/b.js', 'moduleUrl: file:///a/b.js']),
+    ).toHaveLength(1)
+  })
+})
+
+/**
  * # 本文件的已知限度
  *
  * 这一节本身是判据的一部分：它让下一个改实现的人知道**哪些红线会跟着失效**。
@@ -6129,6 +6530,9 @@ function nullPrototypeToPlain(value: unknown): unknown {
  * | 43 | **B10 白名单的首段判定**（`classifyHomeWrite` + `segmentAfter`）：`$DSH_HOME/<包名>/` 逐字相等才放过 | 靠**文本**认写法：`join(home, 'seg')` / `` `${home}/seg` `` / `home + '/seg'` / `join(env.DSH_HOME ?? '', 'seg')` 四种桥各有一条正则式；段名靠「不以分隔符/引号/空白/逗号/冒号结尾的连续字符」切 | ① **首段是变量取不出**（`join(dshHome, name, …)`）⇒ 判**unknown** ⇒ **保守判红**（要放过就得写字符串字面量，或把判据扩成能解析 const）；② **写法认不出**（多层拼接、先算好路径再传）同样落进 unknown ⇒ 红（响亮，不是漏）；③ 同一行里 `dshHome` 出现多次时**逐次取段、安全优先**（出现任一「不等于包名的确定段」⇒ 红），所以 `function f(dshHome: string) { … join(dshHome, 'pkg', …) }` 不会因类型标注被误判；④ 包名从 `package.json` 读（**没有手抄副本**），`name` 缺失/形状不对由用例自证判红【已探明】 |
  * | 44 | **A4 的地址扫描**（正则扫 `pnpm-lock.yaml` 原文里出现的每一个 http(s)） | 判据是**文本**扫描（不解析 YAML）；且 pnpm 只在来源**不是默认 registry** 时才写 `tarball: <url>` | ① 镜像被配成**默认 registry** 时 pnpm 不写地址 ⇒ 零地址看着干净（**漏**；要抓得读生效的 registry 配置，那在锁文件之外）；② 地址跨行 / 转义 / 运行时拼出来 ⇒ 漏；③ 主机名按**逐字相等**判（比姊妹仓的 `startsWith` 严）⇒ 官方源带子域会**误红**（响亮）；④ 反空转改挂「有 `lockfileVersion` + 有 `resolution` 条目」⇒ 一份**结构合法但包段被换掉**的锁文件照样绿（那是别的判据的事）。【已探明：真实锁文件 0 地址 / 188 条 resolution】 |
  * | 45 | **B27 的禁词表** `UNREACHABLE_POINTERS` | 手写的**闭集**（`session log` 一族），且只扫**截断行**那一行（靠 `RENDER_TRUNCATED_RE` 前缀取行） | ① 换个说法指向同一个不可达位置（如「ask the session」）→ **漏**；② 将来新增别的不可达位置（例如把 `data` 说成「在进程内」）→ 需人补表；③ L2 / L3 里别的不可兑现指引**不归它管**（那是评审的活）。**下界**：取不到截断行 → 判红，不 skip（坑 18）。**已实测**：把旧半句逐字加回来 → 红；换说法（`the rest is in the session-log`）→ 也红 |
+ * | 46 | **B34-J3′ 的扫描面只到 L2**（L3 被明文排除） | 靠 `splitRenderText` 切三层；`nextStep.args` 的 JSON **故意不喂进来** | 把 L3 加进扫描面 → 与 B17 互斥（L2 留着红、L2 删掉也红）；这条由一条**否证用例**钉着（`跨实例 fixture` 加宽后必红）。**但反过来**：真有人扩了面、而语料里没有跨实例那条 → **CI 全绿**（那是本仓「判据在哪个上下文跑」的坑 24 同族）。所以那条 fixture 与这条否证用例**必须同批存在**，删任何一个都会让边界失守 |
+ * | 47 | **B34 的定位符取词面** `LOCATOR_PATTERNS`（file URL / Windows 绝对路径 / POSIX 绝对路径 / `host:port` / ISO 时刻） | 手写的 6 条正则；嵌套只留最长；Windows 的双反斜杠**归一成单个** | ① 表外的定位符形态（例如 UNC 路径 `\\\\server\\share`、IPv6 `[::1]:3080`）→ **漏**；② 「同一个值但两种写法」（`/a/b` vs `/a/./b`）→ **漏**（刻意不做规范化，那会引入假红）；③ 反斜杠归一是**实测逼出来的**：不归一的话 JSON 里的 `"C:\\\\…"` 与 L2 的 `C:\\…` 不相等 ⇒ 同一路径被当成两个 ⇒ 否证用例静默不红（判据看着在跑） |
+ * | 48 | **B34 只认逐字**，且只吃渲染文本、不看 `data` 结构 | `sharedSubstrings` 与正则都是字面匹配 | 同义改写（`takes effect live` ↔ `mode: hot`）、改名复述（`swapped=` ↔ `cleared=`）、派生值（`cookie name` ↔ 文件名 basename、`found 1` ↔ `dsh: 1`、`markerWritten` ↔ `marker:` 路径）一律**抓不到** —— 报告模式实测：13 条命中里这四类**一条都没进**，而人工清单里它们占 ~15 条。**这不是可修的缺陷，是要在规范里单列的一类**（「不要发布能算出来的值」），靠 review |
  *
  * **B10 已知未覆盖的写入通道**（明确列出，不静默排除）：
  * `process.binding`、原生 addon、`require()`（本仓纯 ESM）、把 fs 方法先赋给别的变量再调用
