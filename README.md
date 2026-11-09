@@ -62,7 +62,7 @@ After installation, the agent gains a set of tools and a skill document. The ski
 | `dsh_diagnose_plugin_load` | `package`, `port`, `dshHome` | Check whether a plugin actually loaded: `bundle` membership, mount form, `loader` tree, with observed evidence kept separate from inferred evidence. | ✓ | ✓ |
 | `dsh_check_effect_mode` | **`change`**: `config` / `bundle-added` / `host-code` / `client-code`, `alreadyInDependencies`, `dshHome` | Tell whether a change takes effect live, needs a restart, or needs a hot reload. It probes the running `profile` instead of guessing. | ✓ | ✗ |
 | `dsh_dump_config` | `profile`, `dshHome` | Show what a `profile` resolved to: the composed tree, plus the diagnostics that explain it. | ✓ | ✗ |
-| `dsh_sign_cookie` | `host`, `port`, `maxAgeDays`, `dshHome` | Sign a browser-session `cookie` so a script or CLI client can reach your own DSH instance. | ✓ | ✓ |
+| `dsh_sign_cookie` | `host`, `port`, `maxAgeDays`, `dshHome` | Sign a browser-session `cookie` into a file, so a script or browser automation can reach your own DSH instance. | ✓ | ✓ |
 
 **Changes state** — the first two swap code or end the host you are debugging.
 
@@ -131,7 +131,7 @@ Except for `dsh_restart`, these tools **never restart a process, never rewrite a
 - **Read-only, no requests**: `dsh_check_effect_mode`, `dsh_diagnose_plugin_load`, `dsh_dump_config`. They only read files the instance already has, and they produce no credentials.
 - **Read-only, sends HTTP**: `dsh_check_auth` connects to the `host:port` you name; `dsh_list_instances` probes loopback ports only. Neither sends credentials.
 - **Touches the running module tree only**: `dsh_hot_reload`, and kills no process.
-- **Reads the local signing key**: `dsh_sign_cookie`, to sign a `cookie` for your own instance. It sends no request, and the `cookie` value is deliberately not returned.
+- **Reads the local signing key and writes one file**: `dsh_sign_cookie`, to sign a `cookie` for your own instance into this plugin's own directory and return the path. It sends no request, and the `cookie` value never enters its output.
 - **Ends the host**: `dsh_restart`, the only irreversible action here.
 
 ### `dsh_restart`

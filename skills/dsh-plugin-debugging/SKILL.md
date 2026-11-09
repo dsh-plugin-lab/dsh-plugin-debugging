@@ -79,15 +79,15 @@ Ask in order, and stop at the first hit:
 
 ### Credentials
 
-**First choice**: read the browser-session secret out of `$DSH_HOME/.credentials.yaml` — the `client-connection/browser-session` record — and sign the cookie yourself. No logs, no terminal. **Fall back** to having the user copy a value out of the terminal or the address bar.
+**First choice**: `dsh_sign_cookie`. It reads the instance's own signing key, writes the `cookie` into this plugin's own directory, and reports the path. The file holds exactly one `name=value` line, ready for a `Cookie:` header, and **the value itself never enters its output** — so you hand the path to whatever needs the header, not the value to yourself. **Fall back** to having the user copy a value out of the terminal or the address bar.
 
-The cookie is `dsh-auth-<base64url(sha256("<host>:<port>"))>` whose value is `v1.<base64url(body)>.<base64url(HMAC-SHA256(secret, body))>`, with `body` the JSON `{"version":1,"authority":"<host>:<port>","issuedAt":ms,"expiresAt":ms}`. Sign the **body string itself**, not a re-serialized JSON, and keep the authority byte-identical to the real `Host` header — `localhost` and `127.0.0.1` are not interchangeable. Anything that signs for you will not hand the value back, so this is what you give a human or a local script.
+Keep `host` byte-identical to the address you will actually connect to — `localhost` and `127.0.0.1` are not interchangeable, and the `cookie` is bound to that one `host:port`.
 
 **Do not scan process memory.** For **the main instance it is essentially useless**: the main process holds the current session record, historical tokens included, which pollutes the verdict. It is clean only for an isolated instance.
 
 **Two dead ends — do not retry them.** Reading process environment variables: the token is an in-process object, and the environment holds only a URL that does **not** contain it. Reading the launching terminal: a pseudoconsole has no traditional console buffer, and UI automation sees only the visible region.
 
-**Why the first choice works**: cookie verification depends only on the signing key and the authority, never on the launch token. The token is the way in the first time, not a long-lived credential. **Boundary**: a separate home means separate credentials, and therefore a separate cookie secret.
+**Why the first choice works**: cookie verification depends only on the signing key and the authority, never on the launch token. The token is the way in the first time, not a long-lived credential. **Boundary**: a separate home means separate credentials, and therefore a separate `cookie` secret — pass `dshHome` to sign for another instance.
 
 ### Process and port
 
@@ -126,11 +126,11 @@ To actually settle it:
 - **A failed swap is rolled back**, and it reports whether the running tree was touched at all.
 - **What it cannot manage**: anything the framework does not track — the tool's own boundary paragraph names the kinds — leaks silently when the entry is swapped, so a swapped entry can leave a live timer or socket behind.
 
-**`dsh_sign_cookie` — give a script or CLI client credentials.**
+**`dsh_sign_cookie` — give a script or browser automation credentials.**
 
-- **When**: an auth probe returned 401, and the next step is not a browser tab.
-- It is the only tool here that reads the signing key, and **the cookie value deliberately never enters its return value**. It reports that signing succeeded, which authority the cookie is bound to, and the cookie's name.
-- **The cookie name is not a secret** and can be used as it is. The authority and lifetime mechanics are in *Authentication*.
+- **When**: a local script or browser automation must reach your own instance.
+- It reads the signing key, writes the `cookie` into the plugin's own directory, and reports the path. The file holds one `name=value` line for a `Cookie:` header; **the value never appears in its output**.
+- Hand that path to whatever consumes it. The `cookie` is bound to one exact `host:port`, and its lifetime is fixed (see *Authentication*).
 
 **`dsh_restart` — restart the host and bring the previous sessions back.**
 

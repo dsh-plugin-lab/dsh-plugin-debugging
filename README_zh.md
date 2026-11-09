@@ -62,7 +62,7 @@
 | `dsh_diagnose_plugin_load` | `package`、`port`、`dshHome` | 查一个插件到底加载没有：`bundle` 归属、挂载形态、`loader` 树，并区分实测证据和推断证据。 | ✓ | ✓ |
 | `dsh_check_effect_mode` | **`change`**：`config` / `bundle-added` / `host-code` / `client-code`，`alreadyInDependencies`、`dshHome` | 判断一个改动是实时生效、需要重启，还是热重载。在正在运行的 `profile` 上实际探测。 | ✓ | ✗ |
 | `dsh_dump_config` | `profile`、`dshHome` | 展示一个 `profile` 最终解析成什么：组合树，以及解释它的诊断信息。 | ✓ | ✗ |
-| `dsh_sign_cookie` | `host`、`port`、`maxAgeDays`、`dshHome` | 签一个浏览器会话 `cookie`，让脚本或命令行客户端访问你自己的 DSH 实例。 | ✓ | ✓ |
+| `dsh_sign_cookie` | `host`、`port`、`maxAgeDays`、`dshHome` | 签一个浏览器会话 `cookie` 写进文件，让脚本或浏览器自动化访问你自己的 DSH 实例。 | ✓ | ✓ |
 
 **会改变状态** —— 前两个会替换代码，或者结束你正在排障的那个宿主。
 
@@ -131,7 +131,7 @@ Node `>= 20`，以及 DSH 版本满足 [package.json](package.json) 中的范围
 - **只读，不发请求**：`dsh_check_effect_mode`、`dsh_diagnose_plugin_load`、`dsh_dump_config`。只读实例已有的文件，不产生凭据。
 - **只读，会发 HTTP**：`dsh_check_auth` 连接你指定的 `host:port`；`dsh_list_instances` 只探测 loopback 端口。两者都不发凭据。
 - **只动运行中的模块树**：`dsh_hot_reload`，不杀进程。
-- **读本地签名密钥**：`dsh_sign_cookie`，为你自己的实例签一个 `cookie`。不发请求，`cookie` 的值刻意不返回。
+- **读本地签名密钥并写一个文件**：`dsh_sign_cookie`，为你自己的实例签一个 `cookie`，写进本插件自己的命名空间，只返回路径。不发请求，`cookie` 的值从不进入输出。
 - **结束宿主**：`dsh_restart`，这里唯一不可逆的动作。
 
 ### `dsh_restart`
