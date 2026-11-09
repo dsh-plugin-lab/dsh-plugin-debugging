@@ -309,9 +309,12 @@ describe(SIGN_COOKIE_TOOL, () => {
       expect(data.verdict).not.toContain('read it from the cookie the host already set')
       // 病句二「用同一把密钥自己签」：密钥刻意不进任何返回值 ⇒ 模型签不了。
       expect(data.verdict).not.toContain('sign it yourself')
-      // 说清「值不回到这个通道」，并给出**能用的那个定位符**。
+      // 说清「值不回到这个通道」。
       expect(data.verdict).toContain('never enters this conversation')
-      expect(data.verdict).toContain(String(data.key['cookieFile']))
+      // ⚠️ **L1 不带落点**（B34-J3）：路径、authority、到期时刻各在 L2 一行，复述就是让
+      // 模型把同一件事读两遍。定位符依旧可用 —— 它在 `key.cookieFile` 与 `cookie file:` 行上。
+      expect(data.verdict).not.toContain(String(data.key['cookieFile']))
+      expect(data.verdict).not.toContain(String(data.key['authority']))
     })
 
     it('成功路径**不伪造下一步**：动作已经做完了，`nextStep` 不出现', async () => {
