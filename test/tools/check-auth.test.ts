@@ -309,7 +309,7 @@ describe('dsh_check_auth', () => {
       const result = await run(tool, { port: 3080 })
       const failure = expectFail(result)
       expect(failure.kind).toBe('not-running')
-      expect(failure.data.verdict).toContain('nothing is listening on 127.0.0.1:3080')
+      expect(failure.data.verdict).toContain('nothing is listening')
       // 与 401 相反的那一步：去查宿主到底起没起（而不是换凭证）。
       const step = result.nextStep as { tool?: string; args?: Record<string, unknown> } | undefined
       expect(step?.tool).toBe('dsh_diagnose_plugin_load')

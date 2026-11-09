@@ -336,7 +336,9 @@ async function issueCookie(
           message: `no credential file at ${file}`,
         },
         {
-          verdict: `no cookie was signed: there is no credential file at ${file}, so this DSH_HOME has never stored a browser-session key — run the host and sign in once in the browser at this exact authority`,
+          // 判定句不带路径（它在 udit.file 里给人复核）也不带补救动作（那是 L3 的活）—— B34。
+          verdict:
+            'no cookie was signed: this DSH_HOME has never stored a browser-session key, so there is nothing to sign with',
           key: unsignedKey(resolved),
           audit: { file },
         },
@@ -363,8 +365,8 @@ async function issueCookie(
         {
           verdict:
             extracted.problem === 'missing'
-              ? `no cookie was signed: ${file} exists but holds no client-connection/browser-session grant, so there is no signing key for this DSH_HOME — sign in once in the browser at this exact authority to create one`
-              : `no cookie was signed: ${file} holds a client-connection/browser-session grant whose secret is not 32 base64url bytes, so it cannot sign anything — treat this credential file as damaged rather than retrying`,
+              ? 'no cookie was signed: the credential file exists but holds no client-connection/browser-session grant, so there is no signing key for this DSH_HOME'
+              : 'no cookie was signed: the stored browser-session secret is not 32 base64url bytes, so it cannot sign anything — treat that credential file as damaged rather than retrying',
           key: unsignedKey(resolved),
           audit: { file },
         },
@@ -389,6 +391,7 @@ async function issueCookie(
     await deps.cookieFile.write(cookieFile, cookieHeader(signed.name, signed.value))
   } catch (error) {
     // ⚠️ **绝不退回「把值给模型」**：写不出去就是没签成。降级路径必须是失败，不是泄密。
+    // L1 不重复 L2 / `audit` 已有的路径与 authority（B34）：那一句只写「所以呢」。
     return toOutput(
       fail(
         {
@@ -396,7 +399,8 @@ async function issueCookie(
           message: `computed a cookie for ${authority} but could not write ${cookieFile}: ${messageOf(error)}`,
         },
         {
-          verdict: `nothing usable was produced: the cookie for ${authority} was computed but could not be written to ${cookieFile}, so no caller can use it — this is a write failure in this plugin, not a credential problem`,
+          verdict:
+            'nothing usable was produced: the cookie was computed but could not be written, so no caller can use it — this is a write failure in this plugin, not a credential problem',
           key: unsignedKey(resolved),
           audit: { file, maxAgeDays },
         },
@@ -415,7 +419,10 @@ async function issueCookie(
 
   return toOutput(
     ok({
-      verdict: `a cookie bound to ${authority} is at ${cookieFile} — one 'name=value' line for a Cookie header, valid until ${new Date(signed.payload.expiresAt).toISOString()}; the value never enters this conversation`,
+      // 判定句**不带定位符**：authority / 路径 / 到期时刻各在 L2 各有一行（B34-J3），
+      // 复述它们等于让模型把同一件事读两遍。
+      verdict:
+        'a usable cookie is ready to hand to a script, and its value never enters this conversation',
       key,
       // ⚠️ 这里**必须**没有凭证：`audit` 会被 spill 写到磁盘，凭证进去 = 凭证落盘。
       audit: { file, maxAgeDays },
@@ -463,7 +470,9 @@ function keyText(key: SignCookieKey): string[] {
   const lines: string[] = [resolvedLine(key.resolved)]
   const authority = authorityLine(key.authority)
   if (authority !== undefined) lines.push(authority)
-  if (key.cookieName !== undefined) lines.push(`cookie name: ${key.cookieName}`)
+  // ⚠️ **不印 `cookie name:`**：它是 `cookie file:` 的 basename（`<name>.cookie`），
+  // 一行能推出另一行 —— 印两遍属于「发布可算出来的值」（B34 的单列情况，判据抓不到）。
+  // 需要名字时从路径取 basename，模型与脚本都是一行的事。
   // 定位符：模型要拿它去喂脚本，所以它在 L2 上（`audit` 进不了模型文本）。
   if (key.cookieFile !== undefined) lines.push(`cookie file: ${key.cookieFile}`)
   // 到期时刻**只在真签出来时印**。没签出来就不印这一行 —— 印「valid until: not signed」

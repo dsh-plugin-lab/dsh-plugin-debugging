@@ -583,10 +583,12 @@ function verdictFor(key: ListInstancesKey, dsh: readonly InstanceKey[]): string 
     const more = key.scan.truncated
       ? ' (the candidate list was truncated, so there may be more)'
       : ''
+    // ⚠️ **不复述 authority，也不数条数时特指哪一个**（B34）：
+    // `instance:` 行已经逐条给出 authority，末尾的 `dsh: N` 给出条数。
+    // 判定句只说「所以呢」与那条**不可推导**的边界（discovery 给不出 DSH_HOME）。
     return (
-      `found ${String(dsh.length)} DSH host(s) on this machine: ` +
-      `${dsh.map((item) => item.authority).join(', ')} — pass one to dsh_check_auth as host:port; ` +
-      `discovery gives an authority only, never a DSH_HOME${more}`
+      'at least one DSH host answered on this machine — pass one of the authorities below to ' +
+      `dsh_check_auth as host:port; discovery gives an authority only, never a DSH_HOME${more}`
     )
   }
   const probed = key.instances.filter((item) => item.verdict !== 'unknown').length
@@ -673,7 +675,8 @@ function keyText(key: ListInstancesKey): string[] {
     return lines
   }
   for (const item of key.instances) lines.push(instanceLine(item))
-  lines.push(`dsh: ${String(key.instances.filter((item) => item.verdict === 'dsh').length)}`)
+  // ⚠️ **不印 `dsh: N` 合计行**：它是「上面几行的 `verdict === 'dsh'` 有几条」——
+  // 一行能算出来的值，印出来属于「发布派生值」（B34 单列的那一类，判据抓不到）。
   return lines
 }
 
