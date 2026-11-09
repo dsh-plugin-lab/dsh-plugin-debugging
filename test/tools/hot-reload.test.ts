@@ -3,7 +3,7 @@
  *
  * 这一份的重点不是「跑通了」，而是把 §6.6 真机实验A 坐实的那几条**承诺**变成可回归的判据：
  *
- * - **import 期失败时旧 fiber 从未被碰** —— 断言 `disposeOld` / `mountFresh` **一次都没被调用**。
+ * - **import 期失败时旧 fiber 从未被碰** —— 断言 `disposeRuntime` / `mountFresh` **一次都没被调用**。
  *   这是整个算法最要紧的一条：真机实验A 的步骤序列里那条路径**根本没有 dispose-old**。
  * - **apply 期失败要回滚** —— 断言 `removeFresh` + `remountOld` 被调用（旧版本**真的**被重新实例化）。
  * - **dryRun 不动树** —— 断言缓存一次没删、fiber 一次没碰。
@@ -87,8 +87,8 @@ function makeEntry(overrides: Partial<ReloadEntryPort> = {}): {
     oldFiberCount: 1,
     fiberState: 2,
     reloadable: true,
-    disposeOld: async () => {
-      calls.push('disposeOld')
+    disposeRuntime: async () => {
+      calls.push('disposeRuntime')
     },
     mountFresh: async () => {
       calls.push('mountFresh')
@@ -102,6 +102,10 @@ function makeEntry(overrides: Partial<ReloadEntryPort> = {}): {
     refresh: async () => {
       calls.push('refresh')
     },
+    // 换完之后**现读**的相位：默认「到 active 了」—— 只有专门测那条护栏的用例会改成别的。
+    liveFiberState: () => 2,
+    entryDisabled: () => false,
+    undoSpuriousDisable: async () => 'not-needed',
     ...overrides,
   }
   return { entry, calls }
@@ -408,10 +412,10 @@ describe('lib/hot-reload · 8 步算法', () => {
         return { plugin: 'v2' }
       },
     })
-    // 把「碰树」的顺序也记下来，才能断言 import 在 dispose 之前。
-    entry.disposeOld = async () => {
-      order.push('disposeOld')
-      calls.push('disposeOld')
+    // 把「碰树」的顺序也记下来，才能断言 import 在撤旧 runtime 之前。
+    entry.disposeRuntime = async () => {
+      order.push('disposeRuntime')
+      calls.push('disposeRuntime')
     }
     entry.mountFresh = async (plugin) => {
       order.push(`mountFresh:${String((plugin as { plugin?: string }).plugin)}`)
@@ -423,7 +427,7 @@ describe('lib/hot-reload · 8 步算法', () => {
     expect(outcome.ok).toBe(true)
     // 第 5 步（import）在第 6 步（dispose 旧）**之前** —— 这是「import 期失败时旧 fiber
     // 从未被碰」的机制本身，不只是结果。
-    expect(order).toEqual(['import', 'disposeOld', 'mountFresh:v2'])
+    expect(order).toEqual(['import', 'disposeRuntime', 'mountFresh:v2'])
     if (outcome.ok) {
       expect(outcome.data.modulesCleared).toBe(2)
       expect(outcome.data.rolledBack).toBe(false)
@@ -510,7 +514,7 @@ describe('lib/hot-reload · 8 步算法', () => {
       expect(outcome.failure.verdict).toContain('put back')
     }
     // 顺序也要对：摘新 → 重挂旧。
-    expect(calls).toEqual(['disposeOld', 'mountFresh', 'removeFresh', 'remountOld'])
+    expect(calls).toEqual(['disposeRuntime', 'mountFresh', 'removeFresh', 'remountOld'])
     expect(cache.has(ENTRY_URL)).toBe(true)
   })
 
@@ -532,7 +536,7 @@ describe('lib/hot-reload · 8 步算法', () => {
       expect(outcome.data?.rolledBack).toBe(true)
       expect(outcome.failure.verdict).toContain('put back')
     }
-    expect(calls).toEqual(['disposeOld', 'mountFresh', 'removeFresh', 'remountOld'])
+    expect(calls).toEqual(['disposeRuntime', 'mountFresh', 'removeFresh', 'remountOld'])
     expect(cache.has(ENTRY_URL)).toBe(true)
   })
 
@@ -570,6 +574,88 @@ describe('lib/hot-reload · 8 步算法', () => {
 
     expect(outcome.ok).toBe(true)
     expect(calls).toEqual(['refresh'])
+  })
+
+  /**
+   * **`newFiberState` 必须是换完之后的观测。**
+   *
+   * 这条是为真机那次假绿立的：旧实现在成功分支里读 `entry.fiberState`，那是 `bindEntry`
+   * **换之前**拍的快照，于是换完之后 `newFiberState=2` 恒等于旧 fiber 的相位 ——
+   * 工具说「新 fiber 到 active 了」，其实它根本没看过新 fiber。
+   *
+   * 判据：把快照（`fiberState`）设成一个明显的值、把现读（`liveFiberState`）设成另一个，
+   * 成功报告必须取**现读**那个。
+   */
+  it('成功报告的 newFiberState 取现读值，不取绑定时的快照（假绿的回归位）', async () => {
+    const { entry } = makeEntry({ fiberState: 2, liveFiberState: () => 1 })
+    const host = makeHost({ entries: [entry], cache: makeCache().port })
+
+    const outcome = await runReload(host)
+
+    expect(outcome.ok).toBe(true)
+    if (outcome.ok) {
+      expect(outcome.data.oldFiberState).toBe(2)
+      expect(outcome.data.newFiberState).toBe(1)
+    }
+  })
+
+  /**
+   * **entry 在换的过程中被判 disabled 时不许报成功。**
+   *
+   * 这是真机缺陷的护栏（复现台与根因见
+   * `.agents/notes/2026-11-09-self-swap-disables-the-entry.md`）：
+   * 撤旧 fiber 的顺序一旦退回「逐个 dispose、runtime 记录还在」，loader 的
+   * `internal/plugin` 处理器就会把这个 entry 判成 disabled —— 下个 reconcile 撤掉它，
+   * 它提供的工具当场消失，而工具当时还在说 `newFiberState=2`。
+   */
+  describe('护栏：entry 被判 disabled', () => {
+    it('救得回来：成功 + audit 记一笔，不静默', async () => {
+      const { entry } = makeEntry({
+        entryDisabled: () => true,
+        undoSpuriousDisable: async () => 'undone',
+      })
+      const host = makeHost({ entries: [entry], cache: makeCache().port })
+
+      const outcome = await runReload(host)
+
+      expect(outcome.ok).toBe(true)
+      if (outcome.ok) expect(outcome.data.spuriousDisableUndone).toBe(true)
+    })
+
+    it('救不回来：结构化失败，verdict 点明「当它已经关了」+ 重启', async () => {
+      const { entry } = makeEntry({
+        entryDisabled: () => true,
+        undoSpuriousDisable: async () => 'failed',
+      })
+      const host = makeHost({ entries: [entry], cache: makeCache().port })
+
+      const outcome = await runReload(host)
+
+      expect(outcome.ok).toBe(false)
+      if (!outcome.ok) {
+        expect(outcome.failure.reason).toBe('entry-disabled')
+        expect(kindForReason(outcome.failure.reason)).toBe('reload-failed')
+        expect(outcome.failure.verdict).toContain('restart')
+        // 不许谎报「换成功了」。
+        expect(outcome.failure.verdict).not.toContain('the swap completed')
+      }
+    })
+
+    it('本来就没关：不调用撤销（不许去动用户自己关掉的 entry）', async () => {
+      const calls: string[] = []
+      const { entry } = makeEntry({
+        entryDisabled: () => false,
+        undoSpuriousDisable: async () => {
+          calls.push('undo')
+          return 'not-needed'
+        },
+      })
+      const host = makeHost({ entries: [entry], cache: makeCache().port })
+
+      await runReload(host)
+
+      expect(calls).toEqual([])
+    })
   })
 
   it('dryRun：闭包照收，但**缓存一格没删、fiber 一次没碰**', async () => {
@@ -1210,6 +1296,132 @@ describe('lib/hot-reload · 纯助手', () => {
  *
  * 变异自证（把 `set(url, type, job)` 改回 `set(url, job)`）会让这两条**同时红**。
  */
+describe('lib/hot-reload · 撤旧的顺序（真机缺陷的根因判据）', () => {
+  /**
+   * 造一棵**假但守规矩**的古树：`registry` 复刻宿主的
+   * `RegistryService.has/delete` 语义，fiber 的 `dispose` 复刻 loader 的
+   * `internal/plugin` 判定 ——
+   *
+   * > fiber 被撤时如果 runtime 记录**还在**，loader 会把那个 entry 判成 disabled
+   * > （`cordis-plugin-loader` 的 `internal/plugin` 监听器：`entry.options.disabled = true`）。
+   *
+   * 判据因此是：**撤旧的这一路，不许在任何 fiber 被 dispose 的那一刻还有 runtime 记录。**
+   * 宿主自己的 hmr 就是先 `registry.delete(callback)` 再收 fiber
+   * （`dsh-hmr` 的 `partialReload`），所以这条判据不是本仓发明的规矩。
+   *
+   * 变异自证：把 `disposeRuntime` 退回「逐个 `fiber.dispose()`」→ `violations` 非空 → 红。
+   */
+  function makeGuardedTree(options: { withRegistryDelete?: boolean } = {}) {
+    const violations: string[] = []
+    const callback = () => undefined
+    const runtimes = new Map<unknown, { fibers: unknown[] }>()
+    const fibers: {
+      state: number
+      uid: number | null
+      inject: Record<string, unknown>
+      ctx: Record<string, unknown>
+      runtime: { callback: unknown; fibers: unknown[] }
+      parent: Record<string, unknown>
+      config: Record<string, unknown>
+      rawConfig: Record<string, unknown>
+      dispose: () => Promise<void>
+      await: () => Promise<void>
+      entry?: unknown
+    }[] = []
+
+    const registry: Record<string, unknown> = {
+      has: (target: unknown) => runtimes.has(target),
+      resolve: (target: unknown) =>
+        typeof target === 'function' ? target : (target as { apply?: unknown })?.apply,
+      plugin: () => {
+        throw new Error('not used in this judge')
+      },
+    }
+    if (options.withRegistryDelete !== false) {
+      registry['delete'] = (target: unknown) => {
+        const runtime = runtimes.get(target)
+        if (runtime === undefined) return undefined
+        // 顺序就是被判断的东西：**先抹记录**，再让 fiber 的 disposer 跑。
+        runtimes.delete(target)
+        for (const fiber of runtime.fibers) void (fiber as { dispose: () => void }).dispose()
+        return runtime
+      }
+    }
+
+    const parent = { registry }
+    const runtime = { callback, fibers: [] as unknown[] }
+    runtimes.set(callback, runtime)
+
+    const oldFiber = {
+      state: 2,
+      uid: 1 as number | null,
+      inject: {},
+      ctx: { get: () => undefined },
+      runtime,
+      parent,
+      config: {},
+      rawConfig: {},
+      entry: undefined as unknown,
+      dispose: async () => {
+        // loader 的判定原样搬过来：这一刻 runtime 记录还在 ⇒ 这个 entry 会被关掉。
+        if (runtimes.has(callback)) violations.push('disposed-while-runtime-registered')
+        oldFiber.uid = null
+      },
+      await: async () => undefined,
+    }
+    runtime.fibers.push(oldFiber)
+    fibers.push(oldFiber)
+
+    const entry = {
+      options: { id: 'guarded', name: ENTRY_URL },
+      disabled: false,
+      fiber: oldFiber,
+      parent: { tree: { commit: () => undefined } },
+    }
+    return { entry, oldFiber, violations, registry, runtimes, callback }
+  }
+
+  /** 用真适配层（`bindEntry`）取到那条 entry 的端口。 */
+  function portFor(tree: ReturnType<typeof makeGuardedTree>): ReloadEntryPort {
+    const host = reloadHostFrom({
+      get: (name: string) =>
+        name === 'loader'
+          ? {
+              internal: { import: () => undefined },
+              entries: () => [tree.entry],
+              async import() {
+                return { plugin: 'fresh' }
+              },
+              unwrapExports: (value: unknown) => value,
+            }
+          : undefined,
+    })
+    const [port] = host.candidates()
+    if (port === undefined) throw new Error('夹具没造出 entry 端口')
+    return port
+  }
+
+  it('走 `registry.delete`：撤旧的那一刻**没有** runtime 记录 ⇒ 不会踩 loader 的 disabled 判定', async () => {
+    const tree = makeGuardedTree()
+    const port = portFor(tree)
+
+    await port.disposeRuntime()
+
+    expect(tree.violations).toEqual([])
+    expect(tree.runtimes.has(tree.callback)).toBe(false)
+    expect(tree.oldFiber.uid).toBe(null)
+  })
+
+  it('否证：拿掉 `registry.delete` ⇒ 逐个 dispose，那一刻 runtime 还在 ⇒ 判据当场抓到', async () => {
+    const tree = makeGuardedTree({ withRegistryDelete: false })
+    const port = portFor(tree)
+
+    await port.disposeRuntime()
+
+    expect(tree.violations).toEqual(['disposed-while-runtime-registered'])
+  })
+})
+
 describe('lib/hot-reload · 真机 LoadCache 形状（回归 + 变异自证位）', () => {
   /** 造一个最小的宿主 ctx：loader 服务 + 一条 entry。 */
   function makeCtx(

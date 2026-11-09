@@ -4429,11 +4429,14 @@ function reloadEntryFixture(): ReloadEntryPort {
     oldFiberCount: 1,
     fiberState: 2,
     reloadable: true,
-    disposeOld: async () => undefined,
+    disposeRuntime: async () => undefined,
     mountFresh: async () => undefined,
     removeFresh: async () => undefined,
     remountOld: async () => undefined,
     refresh: async () => undefined,
+    liveFiberState: () => 2,
+    entryDisabled: () => false,
+    undoSpuriousDisable: async () => 'not-needed',
   }
 }
 
