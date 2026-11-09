@@ -196,13 +196,16 @@ describe(`${LIST_INSTANCES_TOOL} · 专有签名：三值互不重叠`, () => {
     expect(data.verdict).not.toContain('every probe failed')
   })
 
-  it('认领成功时 L1 给出 authority，并说清**只给 authority、不给 home**', async () => {
+  it('认领成功时 L1 只说「有宿主」，说清**只给 authority、不给 home**；authority 在 L2', async () => {
     const tool = toolWith({
       table: '3080|111|node|',
       probe: probeStub(() => ({ status: 401, body: DSH_UNAUTHORIZED_BODY })).fetch,
     })
     const data = expectOk(await run(tool, {}))
-    expect(data.verdict).toContain('127.0.0.1:3080')
+    // B34-J3：authority 是**定位符**，它的居所是 L2 的 `instance:` 行，判定句不复述。
+    expect(data.verdict).not.toContain('127.0.0.1:3080')
+    const l2 = renderText(tool, {}, { ok: true, data })
+    expect(l2).toContain('instance: 127.0.0.1:3080')
     expect(data.verdict).toContain('never a DSH_HOME')
     expect(data.verdict).toContain('dsh_check_auth')
   })
@@ -384,7 +387,7 @@ describe(`${LIST_INSTANCES_TOOL} · scan 的三态（scanned / skipped / unavail
     expect(spawn.calls).toHaveLength(0)
     expect(stub.urls).toEqual(['http://127.0.0.1:9999/'])
     // `skipped` **不是** `unavailable`：它是成功路径（我们主动不扫）。
-    expect(data.verdict).toContain('found 1 DSH host(s)')
+    expect(data.verdict).toContain('at least one DSH host answered')
   })
 
   it('给了 port 但那个端口不是 DSH ⇒ other（逃生口也有反例）', async () => {
@@ -415,7 +418,7 @@ describe(`${LIST_INSTANCES_TOOL} · scan 的三态（scanned / skipped / unavail
       probe: probeStub(() => ({ status: 401, body: DSH_UNAUTHORIZED_BODY })).fetch,
     })
     const data = expectOk(await run(tool, { port: 3080 }))
-    expect(data.verdict).toContain('found 1 DSH host(s)')
+    expect(data.verdict).toContain('at least one DSH host answered')
     expect((data.key['scan'] as Record<string, unknown>)['status']).toBe('skipped')
   })
 })
@@ -739,7 +742,7 @@ describe(`${LIST_INSTANCES_TOOL} · win32 兜底：Get-NetTCPConnection 不可�
         '127.0.0.1:4000',
       ])
       expect(instances.map((item) => item['verdict'])).toEqual(['dsh', 'other'])
-      expect(data.verdict).toContain('found 1 DSH host')
+      expect(data.verdict).toContain('at least one DSH host answered')
       expect(data.verdict).not.toContain('no DSH host was found')
     })
   })
@@ -815,7 +818,7 @@ describe(`${LIST_INSTANCES_TOOL} · 有界与取消`, () => {
       ])
       // ③ 于是它真的被认领到（这正是这个工具存在的理由）。
       expect(instances.map((item) => item['verdict'])).toEqual(['dsh', 'other', 'other'])
-      expect(String(data.verdict)).toContain('found 1 DSH host')
+      expect(String(data.verdict)).toContain('at least one DSH host answered')
     })
   })
 
