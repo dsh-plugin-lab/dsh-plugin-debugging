@@ -34,6 +34,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { PluginState } from '../contracts.js'
 import { readLoaderEntries, loaderFrom } from '../lib/loader.js'
 import { reloadHostFrom } from '../lib/hot-reload.js'
+import { HOST_DATA_SANDBOX_MODE } from '../lib/restart-recovery.js'
+import { createRestartFsPort, type ContextLike as HostContextLike } from '../lib/restart-fs.js'
 import { listeningPortOf, type StopUrlContextLike } from '../lib/stop-url.js'
 import { createCheckAuthTool } from './dsh_check_auth.js'
 import { createDiagnosePluginLoadTool } from './dsh_diagnose_plugin_load.js'
@@ -94,11 +96,22 @@ export function registerTools(ctx: Context, state: PluginState): void {
 
   // 派生类工具（`dsh_sign_cookie`）：**唯一**一个会经手秘密的工具。
   //
-  // 它仍然**不写**任何东西（只读一份文件 + 内存里算 HMAC），所以共用 `deps` 那份冻结形状；
-  // 它与「派生」的区分不是「会不会改状态」，而是「返回值里有没有秘密」—— 见
-  // `dsh_sign_cookie.ts` 文件头第 2 条：cookie 本体刻意不进 `data` 也不进 `audit`
-  // （`audit` 会被 spill 落盘）。
-  ctx.tools.register(createSignCookieTool(deps))
+  // 它比只读工具多一个**写**端口：cookie 的 `name=value` 落在
+  // `$DSH_HOME/<包名>/cookies/`（B10 的精确命名空间例外），返回值里只有路径 —— 值本身
+  // 不进 `data` 也不进 `audit`（`audit` 会被 spill 落盘），见 `dsh_sign_cookie.ts` 文件头。
+  //
+  // ⚠️ 写必须走宿主 `fs` 服务（`createRestartFsPort` 内部每次现取 `ctx.get('fs')`）：
+  // B10 的来源判据与路径无关，`node:fs` 的写 API 一律判红。
+  // ⚠️ 沙箱档**显式给** `danger-full-access`：默认档写 `$DSH_HOME` 必被拒（真机实测见
+  // `lib/restart-fs.ts` 文件头）。它与 `dsh_restart` 共用同一个字面量来源。
+  ctx.tools.register(
+    createSignCookieTool({
+      ...deps,
+      cookieFile: createRestartFsPort(ctx as unknown as HostContextLike, {
+        sandboxPolicy: { mode: HOST_DATA_SANDBOX_MODE, workspaceRoot: process.cwd() },
+      }),
+    }),
+  )
 
   // 行动类工具（`dsh_restart`）：**唯一会退出宿主**的那一个，也是本仓唯一的不可逆动作。
   //

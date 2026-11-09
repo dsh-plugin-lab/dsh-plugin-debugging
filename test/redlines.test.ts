@@ -78,7 +78,7 @@ import {
   type RestartHost,
 } from '../src/tools/dsh_restart.ts'
 import type { LaunchCommand, RestartFsPort, RestartPorts } from '../src/lib/restart.ts'
-import { encodeBase64Url } from '../src/lib/cookie-sign.ts'
+import { cookieFilePath, encodeBase64Url, type CookieFilePort } from '../src/lib/cookie-sign.ts'
 import { createToolDeps, type ToolDeps } from '../src/tools/shared.ts'
 import { stripComments, withPlatform } from './tools/helpers.ts'
 
@@ -4292,6 +4292,22 @@ function dumpConfigWith(kind: 'clean' | 'exit-code'): ToolDefinition {
 }
 
 /**
+ * 红线语料里 `dsh_sign_cookie` 的写端口：**只记账，不落盘**。
+ *
+ * 语料要的是渲染文本（B16 / B20b / B22 那几条），不是盘上的文件；走真 fs 端口会让
+ * 这个测试依赖沙箱档位，而沙箱档位的判据在 `test/tools/restart-fs.test.ts` 里。
+ *
+ * @param sink 收「写了什么」的数组（不传就丢弃）。
+ */
+function redlineCookiePort(sink?: { path: string; text: string }[]): CookieFilePort {
+  return {
+    write: async (path, text) => {
+      sink?.push({ path, text })
+    },
+  }
+}
+
+/**
  * `sign_cookie`：成功 = 真有一份带 browser-session 密钥的凭证文件；
  * 失败 = 文件在但没有那一条 grant。
  *
@@ -4322,7 +4338,10 @@ function signCookieWith(kind: 'granted' | 'no-grant'): ToolDefinition {
         )
   writeTextFile(join(home, '.credentials.yaml'), body)
   // 端口用配置里的（`env: {}` 保证不走 `DSH_WEB_URL`），这样夹具与平台无关。
-  return createSignCookieTool(redlineDeps(redlineConfig(home, { port: 3080 }), { env: {} }))
+  return createSignCookieTool({
+    ...redlineDeps(redlineConfig(home, { port: 3080 }), { env: {} }),
+    cookieFile: redlineCookiePort(),
+  })
 }
 
 /**
@@ -4625,7 +4644,14 @@ function toolShapes(): RedlineToolShape[] {
     ),
     shapeOf(DUMP_CONFIG_TOOL, DUMP_CONFIG_DESCRIPTION, createDumpConfigTool(deps)),
     shapeOf(HOT_RELOAD_TOOL, HOT_RELOAD_DESCRIPTION, createHotReloadTool({ ...deps, reload })),
-    shapeOf(SIGN_COOKIE_TOOL, SIGN_COOKIE_DESCRIPTION, createSignCookieTool(deps)),
+    shapeOf(
+      SIGN_COOKIE_TOOL,
+      SIGN_COOKIE_DESCRIPTION,
+      createSignCookieTool({
+        ...deps,
+        cookieFile: redlineCookiePort(),
+      }),
+    ),
     // 发现工具：它的 HTTP 依赖多一个 body 读取，但构造它同样不需要真 IO
     // （默认 `signatureFetch` 只在这一行被引用，不在这里被调用）。
     shapeOf(LIST_INSTANCES_TOOL, LIST_INSTANCES_DESCRIPTION, createListInstancesTool(deps)),
@@ -5849,6 +5875,90 @@ describe('B32 四个死代码开关都读到 true（判据：四个死代码开�
     for (const flag of FLAGS) {
       expect(tsconfig.compilerOptions?.[flag], `tsconfig.json 的 ${flag}`).toBe(true)
     }
+  })
+})
+
+/**
+ * B33：**拒绝交付时，必须同时给出许可路径**。
+ *
+ * ## 为什么值得一条红线（2026-11-09，来自一次真机会话）
+ *
+ * `dsh_sign_cookie` 曾经**只报「签成了」而不给任何可用产物**（值刻意不进返回值），
+ * 交付面写的是「人或有本地脚本直接调签名器」。真机上的实际走向是：模型拿到那句之后，
+ * **自己去读 `.credentials.yaml`、自己实现 HMAC、自己写个脚本**，然后真的拿着 cookie
+ * 去开页面 —— 于是进上下文的是**根密钥**，比它本想避免的派生 cookie 重一个量级。
+ *
+ * 护栏守住了「工具自己的输出里没有秘密」，却因此**逼出了更坏的那条路**。这是本仓
+ * 「假绿三兄弟」的同一族：判据全绿，真实行为是泄密。
+ *
+ * ## 这条钉三件事（形状，不钉措辞）
+ *
+ * 1. **成功分支必须给定位符**，且那个定位符真的被写端口收到过（不是只印了一行）；
+ * 2. **技能正文不得再给出足以重算它的完整配方** —— 正文曾经带着 cookie 名怎么算、
+ *    值的三段形状、payload 四个字段。工具不再交值、正文却教怎么造 ⇒ 正文就是第二个交付面；
+ * 3. **路径的首段逐字等于包名** —— 落点必须在本包命名空间内（B10 白名单只认字面量）。
+ */
+describe('B33 派生工具拒绝交付值时，必须给出许可路径（否则模型会自己造）', () => {
+  /** 配方记号：正文里出现任何一条，就等于把「怎么自己签」印给了模型。 */
+  const RECIPE_MARKERS = ['HMAC', 'base64url', 'v1.<', 'dsh-auth-<'] as const
+
+  it('技能正文里没有重算凭证的配方', () => {
+    const body = readRepo('skills/dsh-plugin-debugging/SKILL.md')
+    // 自证读到的是真文件：读错路径会得到空串，于是下面一条命中都没有 —— 看起来像通过（坑 18）。
+    expect(body.length, 'SKILL.md 短得不像真文件').toBeGreaterThan(2000)
+    const offenders = RECIPE_MARKERS.filter((marker) => body.includes(marker))
+    expect(offenders, `SKILL.md 又把配方写回去了：${offenders.join(', ')}`).toEqual([])
+  })
+
+  it('cookie 文件路径的首段逐字等于本包名（B10 白名单只认字面量）', () => {
+    // 包名从 `package.json` 读（不手抄 —— 抄一份就会出现「包名改了、判据还按旧名」）。
+    const packageName = (JSON.parse(readRepo('package.json')) as { name?: unknown }).name
+    expect(typeof packageName, 'package.json 没有 name —— 这条判据会永远无法成立').toBe('string')
+    const home = 'H:/fake-home'
+    const path = cookieFilePath(home, 'dsh-auth-x')
+    expect(path).toBe(join(home, String(packageName), 'cookies', 'dsh-auth-x.cookie'))
+  })
+
+  it('成功分支真的把 `name=value` 交给了写端口，并只回一个定位符', async () => {
+    const home = makeTempRoot('dsh-redline-cookie-locator-')
+    const secret = encodeBase64Url(randomBytes(32))
+    writeTextFile(
+      join(home, '.credentials.yaml'),
+      [
+        'version: 1',
+        'refs:',
+        'records:',
+        '  client-connection/browser-session:',
+        '    kind: grant',
+        '    payload:',
+        '      version: 1',
+        `      secret: ${secret}`,
+        '',
+      ].join('\n'),
+    )
+    const writes: { path: string; text: string }[] = []
+    const tool = createSignCookieTool({
+      ...redlineDeps(redlineConfig(home, { port: 3080 }), { env: {} }),
+      cookieFile: redlineCookiePort(writes),
+    })
+
+    const run = await runFixture(tool, SIGN_COOKIE_TOOL, 'B33 · sign_cookie 成功', { port: 3080 })
+    const result = run.value as { ok?: unknown; data?: { key?: unknown } }
+    expect(result.ok, `约定要成功的 fixture 失败了：${JSON.stringify(run.value)}`).toBe(true)
+
+    // ① 写端口**真的被调用过**（坑 40：替身被静默丢弃时，绿的样子和生效一样）。
+    expect(writes, '写端口一次都没被调用 —— 那么「只回一个定位符」是空话').toHaveLength(1)
+    const written = writes[0]!
+    // ② 内容是**恰好一行** `name=value`：不是 JSON、不带 `Cookie:` 前缀、不带 Set-Cookie 属性。
+    expect(written.text.split('\n')).toHaveLength(1)
+    expect(written.text).not.toContain('Cookie:')
+    expect(written.text).not.toContain('Path=')
+    expect(written.text).not.toContain('HttpOnly')
+    // ③ 定位符就在 `key` 里，且指向刚刚写的那一条路径。
+    const key = (result.data?.key ?? {}) as Record<string, unknown>
+    expect(key['cookieFile']).toBe(written.path)
+    // ④ 值本身仍然不在返回值里（这条与 B26 / 既有断言互补：它们管形状，这条管「拒绝之后有许可路径」）。
+    expect(JSON.stringify(run.value)).not.toContain('v1.')
   })
 })
 

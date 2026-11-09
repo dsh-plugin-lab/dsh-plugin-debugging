@@ -14,8 +14,10 @@ import { afterEach, expect } from 'vitest'
 import type { ResolvedConfig } from '../../src/contracts.ts'
 import { WORKLOAD_DEFAULT_BUDGET_MS } from '../../src/lib/timeouts.ts'
 import { observeCarrier, type CarrierKind, type CarrierObservation } from '../../src/lib/carrier.ts'
+import type { CookieFilePort } from '../../src/lib/cookie-sign.ts'
 import type { CommandResult, RunCommandOptions, SpawnImpl } from '../../src/lib/exec.ts'
 import type { FetchImpl } from '../../src/lib/http.ts'
+import type { SignCookieToolDeps } from '../../src/tools/dsh_sign_cookie.ts'
 import { createToolDeps, type ToolDeps } from '../../src/tools/shared.ts'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { JsonValue, NextStep, ToolData, ToolResult } from '../../src/lib/errors.ts'
@@ -135,25 +137,25 @@ export function configFor(
   }
 }
 
+/** `depsFor` 能替换的那些注入点。 */
+export interface DepsOverrides {
+  spawn?: SpawnImpl
+  fetch?: FetchImpl
+  env?: NodeJS.ProcessEnv
+  now?: () => number
+  loader?: () => LoaderReadResult
+  carrier?: CarrierObservation
+  /**
+   * 宿主实际监听端口（ctx.webServer.port 的替身）。
+   *
+   * ⚠️ **不给就是 `undefined`**（等价于「服务不在场」）。要断言「端口来自宿主」的用例
+   * 必须显式给 —— 否则它会悄悄走 environment 那条，判据看起来绿、其实测的是别的东西。
+   */
+  hostPort?: () => number | undefined
+}
+
 /** 造 deps（IO 用假实现，其余默认）。 */
-export function depsFor(
-  config: ResolvedConfig,
-  overrides: {
-    spawn?: SpawnImpl
-    fetch?: FetchImpl
-    env?: NodeJS.ProcessEnv
-    now?: () => number
-    loader?: () => LoaderReadResult
-    carrier?: CarrierObservation
-    /**
-     * 宿主实际监听端口（ctx.webServer.port 的替身）。
-     *
-     * ⚠️ **不给就是 `undefined`**（等价于「服务不在场」）。要断言「端口来自宿主」的用例
-     * 必须显式给 —— 否则它会悄悄走 environment 那条，判据看起来绿、其实测的是别的东西。
-     */
-    hostPort?: () => number | undefined
-  } = {},
-): ToolDeps {
+export function depsFor(config: ResolvedConfig, overrides: DepsOverrides = {}): ToolDeps {
   return createToolDeps(config, {
     spawn: overrides.spawn ?? neverSpawn(),
     fetch: overrides.fetch ?? neverFetch,
@@ -167,6 +169,45 @@ export function depsFor(
     // **必须**显式给 `carrierOf('cli')`。
     ...(overrides.carrier === undefined ? {} : { carrier: overrides.carrier }),
   })
+}
+
+/**
+ * `dsh_sign_cookie` 的 deps：在只读那套之上补**写端口**。
+ *
+ * 单独一支而不是给 `depsFor` 加必填参数：写端口只属于这一个工具，其余七个共用
+ * `ToolDeps` 的冻结形状（`src/tools/index.ts` 的装配注释写着同一件事）。
+ *
+ * ## 默认端口**记账**
+ *
+ * 不给 `cookieFile` 时用一支把每次写调用收进 {@link SignCookieFixtureDeps.cookieWrites}
+ * 的替身，而不是「什么都不做」：至少「写了几次、写到哪、写了什么」都可断言，
+ * 于是「工具压根没调写端口」这类缺口不会因为默认替身而看不见。
+ * 要断言**真实失败路径**的用例必须显式给一个会抛的端口。
+ *
+ * @param config 配置。
+ * @param overrides 注入点（`cookieFile` 之外与 {@link depsFor} 同形）。
+ */
+export function signCookieDepsFor(
+  config: ResolvedConfig,
+  overrides: DepsOverrides & { cookieFile?: CookieFilePort } = {},
+): SignCookieFixtureDeps {
+  const { cookieFile, ...rest } = overrides
+  const cookieWrites: { path: string; text: string }[] = []
+  return {
+    ...depsFor(config, rest),
+    cookieWrites,
+    cookieFile: cookieFile ?? {
+      write: async (path, text) => {
+        cookieWrites.push({ path, text })
+      },
+    },
+  }
+}
+
+/** `signCookieDepsFor` 的产物：本工具的 deps + 默认替身**记下的那几次写**。 */
+export interface SignCookieFixtureDeps extends SignCookieToolDeps {
+  /** 每次 `cookieFile.write` 的实参（默认端口按序记账；显式注入的端口不记）。 */
+  readonly cookieWrites: { path: string; text: string }[]
 }
 
 /**

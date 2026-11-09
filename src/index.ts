@@ -18,7 +18,7 @@ import type { PluginState } from './contracts.js'
 import { observeCarrier } from './lib/carrier.js'
 import { RECOVERY_STARTUP_DELAY_MS, runStartupRecovery } from './lib/restart-recovery.js'
 import type { ContextLike as RecoveryContextLike } from './lib/restart-fs.js'
-import { RESTART_SANDBOX_MODE } from './lib/restart-recovery.js'
+import { HOST_DATA_SANDBOX_MODE } from './lib/restart-recovery.js'
 import { createRestartFsPort } from './lib/restart-fs.js'
 import { restartStopWindowUrlPath } from './lib/restart.js'
 import {
@@ -113,7 +113,7 @@ function scheduleStopWindowUrl(ctx: Context, dshHome: string): void {
     ctx,
     () => {
       const fs = createRestartFsPort(ctx as unknown as RecoveryContextLike, {
-        sandboxPolicy: { mode: RESTART_SANDBOX_MODE, workspaceRoot: process.cwd() },
+        sandboxPolicy: { mode: HOST_DATA_SANDBOX_MODE, workspaceRoot: process.cwd() },
       })
       const service = ctx as unknown as StopUrlContextLike
       let attempt = 0

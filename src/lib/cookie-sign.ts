@@ -30,10 +30,11 @@
  * ## 为什么密钥绝不进返回值
  *
  * 这个函数产出的是**凭证**。工具层只把「有没有签出来」「绑在哪个 authority」放进
- * `key`，cookie 本体走 `presentationMeta` 那条人通道 —— 但**本仓今天还没接那条**，
- * 所以工具**只报签发成功与否**，cookie 由调用方自己持有。见 `dsh_sign_cookie.ts`。
+ * `key`，cookie 本体由工具写进本仓自己的命名空间（{@link cookieFilePath}）而**只有路径
+ * 回头**。于是「值不进通道」与「调用方真的能用」同时成立，见 `dsh_sign_cookie.ts`。
  */
 import { createHash, createHmac } from 'node:crypto'
+import { join } from 'node:path'
 
 /** 记录所在的顶层段名。 */
 const RECORDS_KEY = 'records'
@@ -200,6 +201,35 @@ export function signCookie(
  */
 export function cookieHeader(name: string, value: string): string {
   return `${name}=${value}`
+}
+
+/**
+ * 把 cookie 落到磁盘的**唯一端口**。
+ *
+ * 实现走宿主的 `fs` 服务（`lib/restart-fs.ts` 的 `createRestartFsPort`），**本仓不碰
+ * `node:fs` 的写 API** —— B10 的来源判据与路径无关，`$DSH_HOME/<包名>/` 的白名单
+ * 只放宽了路径那一半（见 `restart-fs.ts` 文件头）。
+ */
+export interface CookieFilePort {
+  /** 无条件覆盖写（宿主 `writeText` 省略 `expected` 的语义）；**失败必须抛**。 */
+  write(path: string, text: string): Promise<void>
+}
+
+/**
+ * cookie 文件的绝对路径：`$DSH_HOME/<包名>/cookies/<cookieName>.cookie`。
+ *
+ * ⚠️ 紧跟 `dshHome` 的第一段**必须是字符串字面量**：B10 的白名单只认字面量，写成
+ * `join(dshHome, OWN_NAMESPACE, …)` 会被保守判红（同 `restartMarkerPath` 那条纪律）。
+ *
+ * 文件名是 authority 的函数（`cookieName` 就是 `base64url(sha256(authority))`）⇒ 端口一变
+ * 就是另一个文件，旧文件自然失效，**不需要任何迁移或清理逻辑**；同一 authority 永远覆盖
+ * 同一个路径（产物可被等价替换，因此并发不需要协议）。
+ *
+ * @param dshHome 宿主数据目录（`$DSH_HOME`）。
+ * @param name cookie 名（{@link cookieName} 的返回值）。
+ */
+export function cookieFilePath(dshHome: string, name: string): string {
+  return join(dshHome, 'dsh-plugin-debugging', 'cookies', `${name}.cookie`)
 }
 
 /**

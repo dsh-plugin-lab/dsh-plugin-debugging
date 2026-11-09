@@ -34,7 +34,7 @@
  *   两道门互不替代：审批放行不等于写文件不会被沙箱拒。
  *
  * ⚠️ 这一档的**字面量只有一处**：`src/lib/restart-recovery.ts` 的
- * {@link RESTART_SANDBOX_MODE} —— 恢复半也要显式传它，两份字面量迟早会分叉。
+ * {@link HOST_DATA_SANDBOX_MODE} —— 恢复半也要显式传它，两份字面量迟早会分叉。
  *
  * ## 为什么没有 `process.exit`
  *
@@ -79,7 +79,7 @@ import { resolveDshLaunch } from '../lib/dump.js'
 import type { SpawnImpl } from '../lib/exec.js'
 import { profileDir, readProfileManifest } from '../lib/profile.js'
 import { createRestartFsPort } from '../lib/restart-fs.js'
-import { RESTART_SANDBOX_MODE } from '../lib/restart-recovery.js'
+import { HOST_DATA_SANDBOX_MODE } from '../lib/restart-recovery.js'
 import {
   decideRecovery,
   hiddenLauncherAvailable,
@@ -167,7 +167,7 @@ const DEFAULT_DELAY_MS = 3_000
  * ⚠️ 它**不是**本文件定义的：字面量住在 `src/lib/restart-recovery.ts`，因为恢复半也要
  * 显式传同一个档位（两份字面量会分叉）。这里只是给本层一个短名字。
  */
-const SANDBOX_MODE = RESTART_SANDBOX_MODE
+const SANDBOX_MODE = HOST_DATA_SANDBOX_MODE
 
 /** 计划任务的固定名字（`/f` 覆盖同名任务，所以它可重入）。 */
 const TASK_NAME = 'dsh-plugin-debugging-restart'
