@@ -1895,7 +1895,10 @@ describe('dsh_diagnose_plugin_load', () => {
       expect(l2).toContain('scope: disk evidence is from the DSH_HOME you passed')
       expect(l2).toContain('the Loader tree is this process only')
       // L1 也要说清：磁盘是目标实例的、树不是。
-      expect(data.verdict).toContain(other)
+      // 但**不再抄那个路径**（B34-J3）：`dshHome=` 在 L2 的 `resolved:` 行上，
+      // `scope:` 行还专门说了一遍 —— 判定句只需要说「那半属于你传的 home、不属于本进程」。
+      expect(data.verdict).not.toContain(other)
+      expect(data.verdict).toContain('the DSH_HOME you passed, not from this process')
       expect(data.verdict).toContain('the Loader-tree half is this process only')
     })
 

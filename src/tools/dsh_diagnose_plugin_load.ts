@@ -499,7 +499,9 @@ export function createDiagnosePluginLoadTool(deps: ToolDeps): ToolDefinition {
                 message: `cannot read the profile package.json at ${dir}`,
               },
               {
-                verdict: `nothing could be checked: there is no readable profile package.json at ${dir}, so either the directory or the profile name is wrong`,
+                // 判定句**不带目录**：它是定位符，`dir=` 就在 L2 的 `resolved:` 行上（B34-J3）。
+                verdict:
+                  'nothing could be checked: this profile has no readable package.json, so either the directory or the profile name is wrong',
                 // 这条路径上目录就是唯一可判的标识符 —— L2 必须把它印出来。
                 key: {
                   resolved: { ...keyResolved, profileDir: dir },
@@ -922,8 +924,12 @@ function buildVerdict(input: {
  */
 function crossInstanceScope(crossHome: string | undefined): string | undefined {
   if (crossHome === undefined) return undefined
+  // ⚠️ **不把 home 路径写进这一句**（B34-J3）：L2 的 `resolved:` 已经印了 `dshHome=…`，
+  // 紧邻的 `scope:` 行也已经说清「磁盘证据来自你传的那个 home」。判定句再抄一遍路径
+  // 就是同一个定位符的第二个副本 —— 而这里不需要它来区分任何东西。
+  // B16 也不受影响：它只在**同一个工具的两份 fixture 之间**比，这条属另一条 fixture。
   return (
-    `Disk evidence above is from ${crossHome} (the DSH_HOME you passed); ` +
+    'The disk evidence above is from the DSH_HOME you passed, not from this process; ' +
     'the Loader-tree half is this process only, so it says nothing about that instance'
   )
 }
