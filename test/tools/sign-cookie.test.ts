@@ -34,12 +34,12 @@ import {
 import { composeDescription } from '../../src/tools/describe.ts'
 import {
   configFor,
-  depsFor,
   expectFail,
   expectOk,
   expectParameterDescriptionsNotBlank,
   renderText,
   run,
+  signCookieDepsFor,
   tempDshHome,
   writeText,
 } from './helpers.ts'
@@ -197,24 +197,9 @@ describe(SIGN_COOKIE_TOOL, () => {
   })
 
   describe('成功路径', () => {
-    it('签出来了：authority / cookie 名 / 到期时刻都在 `key` 里', async () => {
-      const secret = randomBytes(32)
-      const home = await homeWithCredentials(credentialsWithGrant(encodeBase64Url(secret)))
-      const tool = createSignCookieTool(
-        depsFor(configFor(home, { port: 3080 }), { now: () => 1_000_000 }),
-      )
-
-      const data = expectOk(await run(tool, { port: 3080, host: '127.0.0.1' }))
-
-      expect(data.key['authority']).toBe('127.0.0.1:3080')
-      expect(data.key['cookieName']).toBe(cookieName('127.0.0.1:3080'))
-      expect(data.key['issuedAt']).toBe(1_000_000)
-      expect(Number(data.key['expiresAt'])).toBe(1_000_000 + 30 * 24 * 60 * 60 * 1e3)
-    })
-
     it('`host` 逐字进 authority（默认值 127.0.0.1）', async () => {
       const home = await homeWithCredentials(credentialsWithGrant())
-      const tool = createSignCookieTool(depsFor(configFor(home, { port: 3080 })))
+      const tool = createSignCookieTool(signCookieDepsFor(configFor(home, { port: 3080 })))
 
       expect(expectOk(await run(tool, { port: 3080 })).key['authority']).toBe('127.0.0.1:3080')
       expect(expectOk(await run(tool, { port: 3080, host: 'localhost' })).key['authority']).toBe(
@@ -224,7 +209,9 @@ describe(SIGN_COOKIE_TOOL, () => {
 
     it('`maxAgeDays` 能改寿命，省略时用宿主默认 30', async () => {
       const home = await homeWithCredentials(credentialsWithGrant())
-      const tool = createSignCookieTool(depsFor(configFor(home, { port: 3080 }), { now: () => 0 }))
+      const tool = createSignCookieTool(
+        signCookieDepsFor(configFor(home, { port: 3080 }), { now: () => 0 }),
+      )
 
       const seven = expectOk(await run(tool, { port: 3080, maxAgeDays: 7 }))
       expect(Number(seven.key['expiresAt']) - Number(seven.key['issuedAt'])).toBe(
@@ -236,9 +223,85 @@ describe(SIGN_COOKIE_TOOL, () => {
       )
     })
 
-    it('成功路径的 L1 是**陈述**：不许指路去拿一个拿不到的值（A4）', async () => {
+    it('签出来了：authority / cookie 名 / 到期时刻 / 落点都在 `key` 里', async () => {
+      const secret = randomBytes(32)
+      const home = await homeWithCredentials(credentialsWithGrant(encodeBase64Url(secret)))
+      const tool = createSignCookieTool(
+        signCookieDepsFor(configFor(home, { port: 3080 }), { now: () => 1_000_000 }),
+      )
+
+      const data = expectOk(await run(tool, { port: 3080, host: '127.0.0.1' }))
+
+      expect(data.key['authority']).toBe('127.0.0.1:3080')
+      expect(data.key['cookieName']).toBe(cookieName('127.0.0.1:3080'))
+      expect(data.key['issuedAt']).toBe(1_000_000)
+      expect(Number(data.key['expiresAt'])).toBe(1_000_000 + 30 * 24 * 60 * 60 * 1e3)
+      // 落点是**决策要素**（调用方要拿它去喂脚本）⇒ 它必须在 `key`，不在 `audit`。
+      expect(data.key['cookieFile']).toBe(
+        join(home, 'dsh-plugin-debugging', 'cookies', `${cookieName('127.0.0.1:3080')}.cookie`),
+      )
+    })
+
+    it('**文件真的写了**：路径在本包命名空间下、内容恰好是一行 `name=value`', async () => {
+      const secret = randomBytes(32)
+      const home = await homeWithCredentials(credentialsWithGrant(encodeBase64Url(secret)))
+      // 替身**记下每次调用**（坑 40：不记就分不清「没被调用」与「调用了但结果一样」）。
+      const writes: { path: string; text: string }[] = []
+      const tool = createSignCookieTool(
+        signCookieDepsFor(configFor(home, { port: 3080 }), {
+          now: () => 1_000_000,
+          cookieFile: {
+            write: async (path, text) => {
+              writes.push({ path, text })
+            },
+          },
+        }),
+      )
+
+      const data = expectOk(await run(tool, { port: 3080 }))
+      expect(writes).toHaveLength(1)
+      const written = writes[0]!
+      // ① 落点：紧跟 home 的第一段逐字等于**包名**（B10 白名单的形状，不是「路径里有包名」）。
+      expect(written.path.startsWith(join(home, 'dsh-plugin-debugging', 'cookies'))).toBe(true)
+      expect(written.path).toBe(data.key['cookieFile'])
+      // ② 内容：用**独立重算**的那份值比对，而不是读回自己刚写的东西。
+      const expected = cookieHeader(
+        cookieName('127.0.0.1:3080'),
+        signCookie(secret, '127.0.0.1:3080', 1_000_000).value,
+      )
+      expect(written.text).toBe(expected)
+      // ③ 形状：恰好一行，没有 `Cookie:` 前缀，也没有 `Set-Cookie` 属性。
+      expect(written.text.split('\n')).toHaveLength(1)
+      expect(written.text).not.toContain('Cookie:')
+      expect(written.text).not.toContain('Path=')
+      expect(written.text).not.toContain('HttpOnly')
+    })
+
+    it('同一 authority 覆盖同一个路径（幂等）；换端口就是另一个文件', async () => {
       const home = await homeWithCredentials(credentialsWithGrant())
-      const tool = createSignCookieTool(depsFor(configFor(home, { port: 3080 })))
+      const writes: { path: string; text: string }[] = []
+      const tool = createSignCookieTool(
+        signCookieDepsFor(configFor(home, { port: 3080 }), {
+          cookieFile: {
+            write: async (path, text) => {
+              writes.push({ path, text })
+            },
+          },
+        }),
+      )
+
+      expectOk(await run(tool, { port: 3080 }))
+      expectOk(await run(tool, { port: 3080 }))
+      expectOk(await run(tool, { port: 3081 }))
+      expect(writes).toHaveLength(3)
+      // 前两次同路径（覆盖写，不需要任何清理或迁移逻辑）；第三次换端口 ⇒ 换文件。
+      expect(writes[0]!.path).toBe(writes[1]!.path)
+      expect(writes[2]!.path).not.toBe(writes[0]!.path)
+    })
+
+    it('成功路径的 L1 说的是「值不在这个通道、落点在这里」', async () => {
+      const home = await homeWithCredentials(credentialsWithGrant())
+      const tool = createSignCookieTool(signCookieDepsFor(configFor(home, { port: 3080 })))
 
       const data = expectOk(await run(tool, { port: 3080 }))
       // 病句一「去读宿主已经设好的那个 cookie」：模型没有读浏览器 cookie 的途径，
@@ -246,23 +309,21 @@ describe(SIGN_COOKIE_TOOL, () => {
       expect(data.verdict).not.toContain('read it from the cookie the host already set')
       // 病句二「用同一把密钥自己签」：密钥刻意不进任何返回值 ⇒ 模型签不了。
       expect(data.verdict).not.toContain('sign it yourself')
-      // 说清「值不回到这个通道」，并点明谁才拿得到。
-      expect(data.verdict).toContain('not returned to this channel')
-      expect(data.verdict).toContain('call the signer directly')
+      // 说清「值不回到这个通道」，并给出**能用的那个定位符**。
+      expect(data.verdict).toContain('never enters this conversation')
+      expect(data.verdict).toContain(String(data.key['cookieFile']))
     })
 
-    it('成功路径的下一步不许指向 `dsh_check_auth` 去「确认 cookie 被接受」（A4）', async () => {
+    it('成功路径**不伪造下一步**：动作已经做完了，`nextStep` 不出现', async () => {
       const home = await homeWithCredentials(credentialsWithGrant())
-      const tool = createSignCookieTool(depsFor(configFor(home, { port: 3080 })))
+      const tool = createSignCookieTool(signCookieDepsFor(configFor(home, { port: 3080 })))
 
       const result = await run(tool, { port: 3080 })
-      // `dsh_check_auth` 的参数只有 port / host，它的探测**不发任何凭据** ⇒
-      // 「confirm the signed cookie is accepted」能力上不可能；而 cookie 值压根没返回，
-      // 「把 authority 当 Cookie 头值发出去」本身也不成立（cookie 头是 `name=value`）。
-      expect(Object.hasOwn(result.nextStep ?? {}, 'tool')).toBe(false)
-      expect(result.nextStep).toHaveProperty('manual', true)
-      expect(result.nextStep?.why).toContain('never leaves the signing side')
-      expect(result.nextStep?.why).not.toContain('Cookie header value')
+      // `dsh_check_auth` 的探测**不发任何凭据**，它没有能力确认 cookie 被接受；
+      // 而「把 authority 当 Cookie 头值发出去」也不成立（cookie 头是 `name=value`）。
+      // 真动作只有「把那个文件交给你的脚本」—— 那不是一次可派发的工具调用，
+      // 所以硬编一步只会是「裸结论伪装成下一步」（契约 §13 明令）。
+      expect(result.nextStep).toBeUndefined()
     })
   })
 
@@ -271,7 +332,7 @@ describe(SIGN_COOKIE_TOOL, () => {
       const secret = randomBytes(32)
       const secretText = encodeBase64Url(secret)
       const home = await homeWithCredentials(credentialsWithGrant(secretText))
-      const tool = createSignCookieTool(depsFor(configFor(home, { port: 3080 })))
+      const tool = createSignCookieTool(signCookieDepsFor(configFor(home, { port: 3080 })))
 
       const result = await run(tool, { port: 3080 })
       const serialized = JSON.stringify(result)
@@ -289,7 +350,7 @@ describe(SIGN_COOKIE_TOOL, () => {
     it('`audit` 里没有 cookie 也没有密钥（它会被 spill 写到磁盘）', async () => {
       const secretText = encodeBase64Url(randomBytes(32))
       const home = await homeWithCredentials(credentialsWithGrant(secretText))
-      const tool = createSignCookieTool(depsFor(configFor(home, { port: 3080 })))
+      const tool = createSignCookieTool(signCookieDepsFor(configFor(home, { port: 3080 })))
 
       const data = expectOk(await run(tool, { port: 3080 }))
       const audit = JSON.stringify(data.audit)
@@ -301,7 +362,7 @@ describe(SIGN_COOKIE_TOOL, () => {
 
     it('模型可见文本里没有 cookie 值', async () => {
       const home = await homeWithCredentials(credentialsWithGrant())
-      const tool = createSignCookieTool(depsFor(configFor(home, { port: 3080 })))
+      const tool = createSignCookieTool(signCookieDepsFor(configFor(home, { port: 3080 })))
 
       const result = await run(tool, { port: 3080 })
       const rendered = (tool.output.render as (a: unknown, v: unknown) => unknown[])({}, result)
@@ -315,7 +376,7 @@ describe(SIGN_COOKIE_TOOL, () => {
   describe('失败路径：每条都带 verdict，且不谎称签过', () => {
     it('凭证文件不存在 → `not-found`，下一步指向浏览器登录一次', async () => {
       const home = await homeWithCredentials(undefined)
-      const tool = createSignCookieTool(depsFor(configFor(home, { port: 3080 })))
+      const tool = createSignCookieTool(signCookieDepsFor(configFor(home, { port: 3080 })))
 
       const failed = expectFail(await run(tool, { port: 3080 }))
       expect(failed.kind).toBe('not-found')
@@ -327,7 +388,7 @@ describe(SIGN_COOKIE_TOOL, () => {
       const home = await homeWithCredentials(
         ['version: 1', 'records:', '  other/thing:', '    kind: grant', ''].join('\n'),
       )
-      const tool = createSignCookieTool(depsFor(configFor(home, { port: 3080 })))
+      const tool = createSignCookieTool(signCookieDepsFor(configFor(home, { port: 3080 })))
 
       const failed = expectFail(await run(tool, { port: 3080 }))
       // 重调同一个调用拿不到新信息 ⇒ 这是**确定性**拒绝，`not-found` 才是对的 kind。
@@ -337,7 +398,7 @@ describe(SIGN_COOKIE_TOOL, () => {
 
     it('密钥格式不对 → `internal`，并说清「别重试」', async () => {
       const home = await homeWithCredentials(credentialsWithGrant(encodeBase64Url(randomBytes(16))))
-      const tool = createSignCookieTool(depsFor(configFor(home, { port: 3080 })))
+      const tool = createSignCookieTool(signCookieDepsFor(configFor(home, { port: 3080 })))
 
       const failed = expectFail(await run(tool, { port: 3080 }))
       expect(failed.kind).toBe('internal')
@@ -347,7 +408,9 @@ describe(SIGN_COOKIE_TOOL, () => {
     it('端口定不出来 → `not-configured`，且 `key` 里没有 authority', async () => {
       const home = await homeWithCredentials(credentialsWithGrant())
       // `port: 0` + 空 env ⇒ `resolvePort` 返回 undefined ⇒ authority 连拼都拼不出。
-      const tool = createSignCookieTool(depsFor(configFor(home, { port: 0 }), { env: {} }))
+      const tool = createSignCookieTool(
+        signCookieDepsFor(configFor(home, { port: 0 }), { env: {} }),
+      )
 
       const failed = expectFail(await run(tool, {}))
       expect(failed.kind).toBe('not-configured')
@@ -366,7 +429,7 @@ describe(SIGN_COOKIE_TOOL, () => {
 
     it('`maxAgeDays` 不是正整数 → 拒绝，且不签', async () => {
       const home = await homeWithCredentials(credentialsWithGrant())
-      const tool = createSignCookieTool(depsFor(configFor(home, { port: 3080 })))
+      const tool = createSignCookieTool(signCookieDepsFor(configFor(home, { port: 3080 })))
 
       for (const bad of [0, -1]) {
         const failed = expectFail(await run(tool, { port: 3080, maxAgeDays: bad }))
@@ -401,11 +464,60 @@ describe(SIGN_COOKIE_TOOL, () => {
         await homeWithCredentials(credentialsWithGrant(encodeBase64Url(randomBytes(16)))),
       ]
       for (const home of cases) {
-        const tool = createSignCookieTool(depsFor(configFor(home, { port: 3080 })))
+        const tool = createSignCookieTool(signCookieDepsFor(configFor(home, { port: 3080 })))
         const failed = expectFail(await run(tool, { port: 3080 }))
         expect(failed.data.key['expiresAt']).toBeUndefined()
         expect(failed.data.key['cookieName']).toBeUndefined()
+        expect(failed.data.key['cookieFile']).toBeUndefined()
       }
+    })
+
+    it('落盘失败 ⇒ `internal` 失败，且**绝不**把值退回模型', async () => {
+      const home = await homeWithCredentials(credentialsWithGrant())
+      const tool = createSignCookieTool(
+        signCookieDepsFor(configFor(home, { port: 3080 }), {
+          cookieFile: {
+            write: async () => {
+              throw new Error('FS_SANDBOX_DENIED: the sandbox refused this write')
+            },
+          },
+        }),
+      )
+
+      const result = await run(tool, { port: 3080 })
+      const failed = expectFail(result)
+      expect(failed.kind).toBe('internal')
+      // 判定行必须说「没有可用的产物」，而不是「签好了但没写出来」。
+      expect(failed.data.verdict).toContain('nothing usable was produced')
+      expect(failed.data.verdict).toContain('write failure')
+      // 失败分支**没有定位符**：文件不存在，印一个路径等于谎称写成了。
+      expect(failed.data.key['cookieFile']).toBeUndefined()
+      // 关键的一格：降级路径**不是**「把值给模型」。
+      const serialized = JSON.stringify(result)
+      expect(serialized).not.toContain('v1.')
+      expect(serialized).not.toContain('never enters this conversation')
+    })
+
+    it('没走到签发就失败的路径，一个字都不会写（无副作用）', async () => {
+      const writes: unknown[] = []
+      const cases = [
+        await homeWithCredentials(undefined),
+        await homeWithCredentials('version: 1\nrecords:\n'),
+        await homeWithCredentials(credentialsWithGrant(encodeBase64Url(randomBytes(16)))),
+      ]
+      for (const home of cases) {
+        const tool = createSignCookieTool(
+          signCookieDepsFor(configFor(home, { port: 3080 }), {
+            cookieFile: {
+              write: async (path, text) => {
+                writes.push({ path, text })
+              },
+            },
+          }),
+        )
+        expectFail(await run(tool, { port: 3080 }))
+      }
+      expect(writes, '失败路径上调用了写端口 —— 那会在盘上留下半成品').toEqual([])
     })
   })
 
@@ -414,7 +526,7 @@ describe(SIGN_COOKIE_TOOL, () => {
       const home = await tempDshHome()
       // `env` 用 Proxy 造「一读就抛」—— `resolvePort` 读它时会把整个工具带崩。
       // 替身**真的被读到**（不是空转）：`port: 0` 让它必须去翻 env。
-      const deps = depsFor(configFor(home, { port: 0 }), {
+      const deps = signCookieDepsFor(configFor(home, { port: 0 }), {
         env: new Proxy({} as NodeJS.ProcessEnv, {
           get() {
             throw new Error('env exploded')
@@ -436,17 +548,22 @@ describe(SIGN_COOKIE_TOOL, () => {
   })
 
   describe('形状（SHAPE §2.1 / §4.1）', () => {
-    it('描述四段齐全（boundary 折行占两行 ⇒ 恰好 4 行）', () => {
+    it('描述四段齐全（四段各一行 ⇒ 恰好 4 行，且含代价段）', () => {
       const text = composeDescription(SIGN_COOKIE_DESCRIPTION)
-      // 4 行 = what / useWhen / boundary 两行。`composeDescription` 先滤空段再
-      // 用 `\n` 连（见 describe.ts 的注释），所以 boundary 内那个换行也占一行。
-      // ⚠️ 这条**精确行数断言**是本工具特有的形状钉子（boundary 带一个换行）——
-      // 骨架的其余判据（段非空 / 行数与字符上界）由红线 B20a 全量覆盖，这里不重抄。
+      // 4 行 = what / useWhen / boundary / cost。派生类**必须**写代价段（SHAPE §2.1），
+      // 而机制（写文件）只允许出现在那一段。
+      // ⚠️ 这条**精确行数断言**是本工具特有的形状钉子 —— 骨架的其余判据（段非空 /
+      // 行数与字符上界）由红线 B20a 全量覆盖，这里不重抄。
       expect(text.split('\n')).toHaveLength(4)
+      // 机制不进 `what`（那是能力段）：否则模型读到的第一句就是「它替我写了个文件」。
+      expect(SIGN_COOKIE_DESCRIPTION.what).not.toContain('file')
+      expect(SIGN_COOKIE_DESCRIPTION.cost).toContain('file')
+      // 承重句：值不进这个结果，但**你拿到了一个定位符**。少了后半句，工具看起来没用。
+      expect(SIGN_COOKIE_DESCRIPTION.boundary).toContain('locator')
     })
 
     it('每个参数都有非空描述（读 `parameters.properties`，不是顶层遍历）', () => {
-      const tool = createSignCookieTool(depsFor(configFor('/tmp/none', { port: 3080 })))
+      const tool = createSignCookieTool(signCookieDepsFor(configFor('/tmp/none', { port: 3080 })))
       const params = tool.parameters as { properties?: Record<string, { description?: string }> }
       const names = Object.keys(params.properties ?? {})
       // 精确闭集是本工具的契约（B20a 只判通用下界）。
@@ -458,10 +575,11 @@ describe(SIGN_COOKIE_TOOL, () => {
 
     it('`data` 恰好三键（顶层不许有第四个）', async () => {
       const home = await homeWithCredentials(credentialsWithGrant())
-      const tool = createSignCookieTool(depsFor(configFor(home, { port: 3080 })))
+      const tool = createSignCookieTool(signCookieDepsFor(configFor(home, { port: 3080 })))
       const result = (await run(tool, { port: 3080 })) as unknown as Record<string, unknown>
 
-      expect(Object.keys(result).sort()).toEqual(['data', 'nextStep', 'ok'])
+      // 成功路径**没有** `nextStep`：动作已经做完，伪造一步就是「裸结论伪装成下一步」。
+      expect(Object.keys(result).sort()).toEqual(['data', 'ok'])
       const data = result['data'] as Record<string, unknown>
       expect(Object.keys(data).sort()).toEqual(['audit', 'key', 'verdict'])
     })
@@ -473,7 +591,9 @@ describe(SIGN_COOKIE_TOOL, () => {
       // 所以「签成功」这件事本身证明它读的是参数那一份 —— 不是靠断言某个字段。
       const configuredHome = await tempDshHome()
       const otherHome = await homeWithCredentials(credentialsWithGrant())
-      const tool = createSignCookieTool(depsFor(configFor(configuredHome, { port: 3080 })))
+      const tool = createSignCookieTool(
+        signCookieDepsFor(configFor(configuredHome, { port: 3080 })),
+      )
 
       const data = expectOk(await run(tool, { port: 3080, dshHome: otherHome }))
       expect(data.key['cookieName']).toBeDefined()
@@ -488,7 +608,9 @@ describe(SIGN_COOKIE_TOOL, () => {
     it('反向：把凭据放在**配置** home 里、参数指一个空 home ⇒ 必须 not-found（判据不恒真）', async () => {
       const configuredHome = await homeWithCredentials(credentialsWithGrant())
       const emptyHome = await tempDshHome()
-      const tool = createSignCookieTool(depsFor(configFor(configuredHome, { port: 3080 })))
+      const tool = createSignCookieTool(
+        signCookieDepsFor(configFor(configuredHome, { port: 3080 })),
+      )
 
       const failed = expectFail(await run(tool, { port: 3080, dshHome: emptyHome }))
       expect(failed.kind).toBe('not-found')

@@ -44,7 +44,7 @@ import { createSignCookieTool } from '../../src/tools/dsh_sign_cookie.ts'
 import { createListInstancesTool } from '../../src/tools/dsh_list_instances.ts'
 import { createRestartTool, type RestartHost } from '../../src/tools/dsh_restart.ts'
 import type { ReloadHost } from '../../src/lib/hot-reload.ts'
-import { configFor, depsFor, stripComments } from './helpers.ts'
+import { configFor, depsFor, signCookieDepsFor, stripComments } from './helpers.ts'
 
 /** 仓根：本文件在 `test/tools/` 下。 */
 const REPO_ROOT = fileURLToPath(new URL('../../', import.meta.url))
@@ -240,7 +240,7 @@ describe('工具只声明工作量：预算一律经 toolBudgetMs 取', () => {
     {
       name: 'dsh_sign_cookie',
       workload: 'quick',
-      build: () => createSignCookieTool(depsFor(probeConfig)),
+      build: () => createSignCookieTool(signCookieDepsFor(probeConfig)),
     },
     {
       // 写侧工具也**不许**自己定预算：它只改进程内树，属快档。
@@ -299,7 +299,7 @@ describe('工具只声明工作量：预算一律经 toolBudgetMs 取', () => {
       case 'dsh_diagnose_plugin_load':
         return createDiagnosePluginLoadTool(depsFor(config)).timeoutMs ?? 0
       case 'dsh_sign_cookie':
-        return createSignCookieTool(depsFor(config)).timeoutMs ?? 0
+        return createSignCookieTool(signCookieDepsFor(config)).timeoutMs ?? 0
       case 'dsh_list_instances':
         return createListInstancesTool(depsFor(config)).timeoutMs ?? 0
       case 'dsh_restart':

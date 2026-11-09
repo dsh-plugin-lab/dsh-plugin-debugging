@@ -25,7 +25,7 @@ import { describe, expect, it } from 'vitest'
 import { createCheckAuthTool } from '../../src/tools/dsh_check_auth.ts'
 import { createSignCookieTool } from '../../src/tools/dsh_sign_cookie.ts'
 import type { FetchImpl } from '../../src/lib/http.ts'
-import { configFor, depsFor, expectOk, run, tempDshHome } from './helpers.ts'
+import { configFor, depsFor, expectOk, run, signCookieDepsFor, tempDshHome } from './helpers.ts'
 
 /** 一个返回固定状态码的 fetch 替身（不联网）。 */
 function fetchWithStatus(status: number): FetchImpl {
@@ -82,7 +82,7 @@ describe('端口来自宿主自己（ctx.webServer.port），不靠环境变量'
     // （端口解析发生在读凭证之前，所以失败不该把证据一起丢掉）。
     const dshHome = await tempDshHome()
     const tool = createSignCookieTool(
-      depsFor(configFor(dshHome), { hostPort: () => 3080, env: {} }),
+      signCookieDepsFor(configFor(dshHome), { hostPort: () => 3080, env: {} }),
     )
     const raw = await run(tool, {})
     expect(raw.ok).toBe(false)

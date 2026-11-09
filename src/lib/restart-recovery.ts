@@ -169,21 +169,22 @@ export const RECOVERY_WAKE_ATTEMPTS = 15
 export const RECOVERY_WAKE_RETRY_MS = 1_000
 
 /**
- * 写 marker 时显式传给宿主 `fs.writeText` 的**文件沙箱**档位。
+ * 写 `$DSH_HOME/<包名>/` 下任何文件时，显式传给宿主 `fs.writeText` 的**文件沙箱**档位。
  *
  * **必须显式给**：默认档 `workspace-write` 下 `$DSH_HOME` 不在 writableRoots 里 ⇒ 必被
  * `FS_SANDBOX_DENIED` 拒掉（`task-31` 真机实测，见 `src/lib/restart-fs.ts` 文件头）。
  * 它只影响文件沙箱，与审批档无关 —— 两道门互不替代。
  *
- * ## 为什么这个字面量住在这里（两半都 import 它）
+ * ## 为什么这个字面量住在这里（三个写者都 import 它）
  *
- * 重启的**两个半边**（工具壳 `src/tools/dsh_restart.ts` 与恢复半）都要显式传它，
- * 所以它只能有**一处**字面量（一处一事实：抄两份就会出现「改了一处、另一处还按旧档」）。
+ * 写本包命名空间的有三处：重启的**两个半边**（工具壳 `src/tools/dsh_restart.ts` 与恢复半）
+ * 与 `dsh_sign_cookie` 的 cookie 文件（装配在 `src/tools/index.ts`）。所以它只能有**一处**
+ * 字面量（一处一事实：抄两份就会出现「改了一处、另一处还按旧档」）。
  * 落点选本文件而不是 `restart-fs.ts` / `restart.ts`：那两份当时的改动范围之外，
- * 而本文件是**两个半边都 import 得到**、且**恢复半不 import 工具半**（反向依赖会成环）
+ * 而本文件是**三个写者都 import 得到**、且**恢复半不 import 工具半**（反向依赖会成环）
  * 的那一格。
  */
-export const RESTART_SANDBOX_MODE = 'danger-full-access'
+export const HOST_DATA_SANDBOX_MODE = 'danger-full-access'
 
 /** 一条 notice 的两半：正文与折叠行上的一句话。 */
 export interface RecoveryNotice {
@@ -960,7 +961,7 @@ export function createRecoveryPorts(ctx: ContextLike): RecoveryPorts {
   return {
     fs: createRestartFsPort(ctx, {
       // 写回 `$DSH_HOME/<包名>/restart/marker.json` 必须显式给档位（理由见文件头）。
-      sandboxPolicy: { mode: RESTART_SANDBOX_MODE, workspaceRoot: process.cwd() },
+      sandboxPolicy: { mode: HOST_DATA_SANDBOX_MODE, workspaceRoot: process.cwd() },
     }),
     channel: createRecoveryChannel(ctx),
     log: recoveryLogOf(ctx),

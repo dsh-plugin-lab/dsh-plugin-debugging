@@ -24,6 +24,7 @@
 
 - **诊断半边的只读工具**（是哪几个见注册处，不在此处抄）：只答问题，不改系统状态。**这是设计决定，不是进度妥协。**
 - **写侧 `dsh_hot_reload`**：只做**不杀进程**的那一种 —— 就地换模块，失败时把旧版本放回（可逆）。
+- **派生 `dsh_sign_cookie`**：产出**凭证**，但产出面是**定位符**（`name=value` 写进本包命名空间，只回路径）。它因此是本仓唯一**会落盘**的派生工具 —— 落点在 B10 已放行的那一层，走宿主 `fs` 服务，写不出去就**失败**而不是把值交出去。
 - **行动类 `dsh_restart`**：**不可逆** —— 它杀掉正在被排障的那个宿主。它因此**多了两道门**，且两道互相独立：**审批档**（先读档位再决定问不问；`never` 是「提示已关闭」，在那一档去问必然被拒）与**文件沙箱档**（写 marker 必须显式带 `danger-full-access`）。流程与顺序（闸门 → 审批 → 写 marker → 拉起 → 退出）见 [SHAPE.md](SHAPE.md) §6.1，宿主侧的退出与拉起契约见 [HOST-CONTRACTS.md](HOST-CONTRACTS.md) §2。
 
 **只读纪律现在由机器判据守着**（真源 `test/redlines.test.ts` 的 `describe('B10…')` / `describe('B15…')`，规则本身不在本文重述）：
@@ -34,6 +35,7 @@
 | **B15** | 写侧只许碰**进程内**的模块缓存与 fiber；记号判据更严（连**读** `DSH_HOME` 都不许） | 按机制入口反推的**写侧实现文件**清单（要求文件存在，不给 skip） |
 
 **唯一被放过的写**：`$DSH_HOME/<包名>/` 这一层（紧跟 home 的**第一段逐字等于包名**；该层以下随便分）。**同前缀兄弟**（`<包名>-logs`）不放 —— 这是维护者 2026-10-14 拍板的「精确命名空间」，与「前缀族白名单」是两种形态。其余位置照旧一律禁止。
+**这一层现在有两个写者**：`dsh_restart`（marker 与窗口信息）与 `dsh_sign_cookie`（`cookies/<cookie 名>.cookie`）。两者共用同一个宿主 `fs` 端口与同一个沙箱档位字面量（`HOST_DATA_SANDBOX_MODE`），所以「档位」只有一处事实。
 
 **观测面按「载体」收窄**（载体 = 谁拉起了这个宿主：`cli` / `desktop-host`）：有些事**不是代码写不写得了，而是这个载体上根本没有那条通道**。桌面宿主由 Electron 壳带出，于是两项能力读不到 —— ① **读配置组合树**：DSH 命令行无条件拒绝它的保留 profile `desktop`，凡依赖这条路的工具都拿不到读数（`dsh_dump_config` 拒答；`dsh_check_effect_mode` 走「这次的答案是否依赖 hmr」分岔，依赖的走诚实失败、不依赖的照常回答）；② **把宿主带回来**：只有 Electron 壳能重启它，插件侧够不到那条通道（`dsh_restart` 在动手之前就拒绝）。**一处探、三处用**（闸④、保留 profile 的筛除、工具的 `nextStep` 兜底），否则同进程里两处判断会不一致、而没有判据照得到那种错。**宿主的物证与决策依据 → [HOST-CONTRACTS.md](HOST-CONTRACTS.md) §2.7 与 [.agents/notes/](../.agents/notes/)，本文只留结论**；面向使用者的形态在两份 README 的载体一列。
 
@@ -170,7 +172,7 @@ src/
 | `dsh_dump_config` | `--dump-config` 退出码**恒 0**，不能当门禁；`--dump-config-schema` 退出码 **1 = 有 error**；`preset-*` 行的 `unrecognized Loader tree carrier` 是已知误报，判定看 error 的 `path` 是否指向**你改过的行**。**「跑了什么」与「读到了什么」必须分开**：`key.notScreened` 记下「工具打算读、但这次没读到」的来源，渲染据此出三值 —— 读到且为空 = `actionable: none` / 读到且有 = 逐条列出 / **没读到 = 绝不许印 `none`**（那会把「不知道」说成「没有」）。`actionable` 里的字段是**宿主按需带的**（实测两种形状：有的条目只有 `path`，有的 `entryId` 与 `path` 都有）—— 工具**原样透传、不自己造** |
 | `dsh_list_instances` | **发现**：列出本机活着的 DSH 宿主。认领靠**专有签名**，不是「401 就算」—— 未认证 `GET /` 必须**401 且 body 逐字**为 `dsh web authentication required; reopen the URL printed by dsh web.`；**别的 401（body 不同）算「不是 DSH」**，连不上 / 超时算**「没探到」**（三值互不重叠 —— 压成两值就是反向结论）。**它只能给 authority（`host:port`），给不出 `DSH_HOME`**：宿主 HTTP 面上没有任何路由能问出「我是谁 / 读哪个 home」，两者之间**没有可推导的关系** ⇒ 要把文件型工具指向另一个实例，**路径必须由调用方手填**（口径见 [SHAPE.md](SHAPE.md) §1.2；同一句话在两份 README 里也有）。只探**回环**（一律 `127.0.0.1`，不扫局域网），候选数与每次探测都有界；`probed` / 没人听 / 有人听但读不到 pid 的**四态语义照旧**。三平台的「列全部监听者」实现在 `src/lib/ports.ts`，与单端口查询**并列**（不改它） |
 | `dsh_hot_reload`（**写侧**） | 就地换一个 entry 的代码，不重启。**顺序是判据**：定位 entry → 备份本地模块闭包 → 只清那批缓存 → **先 `import` 成功** → **再** dispose 旧 fiber → 挂载新的。import 期失败时**旧 fiber 从未被碰**；apply 期失败则从备份回滚（旧版本被真的重新实例化）。匹配 entry 要**两个字段都试 + URL 归一**（只比 id 会得到假阴性）。**它测不到的**：插件在 cordis 之外开的资源（定时器 / socket / `process.on` / 文件句柄 / worker）不会被追踪，会**静默泄漏** —— 所以这一条写在**描述层的边界段**（恒定知识写一次），不进每次输出。宿主事实与真机证据 → [HOST-CONTRACTS.md](HOST-CONTRACTS.md) §1 |
-| `dsh_sign_cookie`（**派生**） | 本仓**唯一经手秘密**的工具：读本机 `.credentials.yaml` 的持久签名密钥，在内存里算 HMAC。**cookie 本体刻意不进返回值** —— 契约要求 `data` 可无损落 JSON，而 `audit` 会被 spill 到磁盘，凭证进 `audit` 就是**凭证落盘**；所以只报「签成了、绑在哪个 authority、cookie 叫什么名」。它**不联网**：签出来与用上去是两个动作（后者由人或浏览器做）。算法**照抄宿主、不自创**（逐步出处见 `src/lib/cookie-sign.ts` 文件头）。⚠️ 一条被真机钉住的反直觉点：cookie 绑定 authority 是**逐字匹配**，而宿主算 audience 读的是 `Host` 请求头 —— 显式设 `Host` 会被静默忽略，实际 authority 由**连接地址**决定，所以 `host` 参数必须填你**真正要连的那个地址** |
+| `dsh_sign_cookie`（**派生**） | 本仓**唯一经手秘密**的工具：读本机 `.credentials.yaml` 的持久签名密钥，在内存里算 HMAC，然后把 `name=value` 写进 `$DSH_HOME/<包名>/cookies/` 并**只把路径交出去**。**cookie 本体刻意不进返回值** —— 契约要求 `data` 可无损落 JSON，而 `audit` 会被 spill 到磁盘，凭证进 `audit` 就是**凭证落盘**；而「只报签成了、却不给可用产物」会让模型自己去读密钥重造签名器（**实测发生过**），所以交付面是**定位符**而不是值。它**不联网**：签出来与用上去是两个动作（后者由脚本或浏览器做）。写盘走宿主 `fs` 服务（与 `dsh_restart` 同一个端口、同一个沙箱档位），**不碰 `node:fs`**。算法**照抄宿主、不自创**（逐步出处见 `src/lib/cookie-sign.ts` 文件头）。⚠️ 一条被真机钉住的反直觉点：cookie 绑定 authority 是**逐字匹配**，而宿主算 audience 读的是 `Host` 请求头 —— 显式设 `Host` 会被静默忽略，实际 authority 由**连接地址**决定，所以 `host` 参数必须填你**真正要连的那个地址** |
 | `dsh_restart`（**行动**） | **唯一不可逆**的工具：它退出本宿主。**顺序是判据**：四道确定性闸门（重启循环 / 忙闲 / 组合 / 启动命令）→ **审批门** → 写 marker → 拉起 → 退出；**审批门排在闸门之后**，因为反过来会出现「先弹窗同意、再告诉用户闸③不过」。实现是**两段式**：`planRestart` 把「四道闸」与「写 marker」收在同一个入口里，所以先用 `dryRun` 探一遍（不落盘）、过了才走审批、再真落盘。**审批语义 = 先读档位再决定问不问**：`ask` ⇒ 走官方审批门，**只有 `allowed-once` 算允许**（`rejected` / `cancelled` / `unavailable` 一律当拒绝）；**`never` ⇒ 不问** —— 它是「提示已关闭」，在那一档主动去问**必然被拒**；读不出来 ⇒ fail-closed。**闸门拒绝不是失败**（`ok: true` + 一句 remedy）：它是设计的一部分，模型应原样报给用户。**闸②的真实收集不许漏成「只查 running agents」** —— 会话回合 / 后台作业 / 定时提醒全算，**含调用方自己的作业与提醒**（只排除「调用方自己那个回合」）。**拉起**走计划任务（`{detached:true}` 实测逃不出宿主 job）；**marker 必须在拉起之前 `await` 完成**，退出走 `ctx.get('appExit')`（**不用 `process.exit`**）。拉起失败 ⇒ 结构化失败且**不退出**：marker 留在盘上，下次启动仍能看出「上次重启没完成」。宿主契约与实测 → [HOST-CONTRACTS.md](HOST-CONTRACTS.md) §2 |
 
 ## 6. 配置

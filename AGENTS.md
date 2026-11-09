@@ -6,7 +6,7 @@
 
 - 版本以 [package.json](package.json) 的 `version` 为准
 - **已发布到 npm**（当前版本见 [package.json](package.json)；`latest` 与 dist-tags 以 registry 为准）。**`0.2.0` 是第一个由 `release.yml` 发出的版本**（带 provenance）；`0.1.0` 是手动发的、**没有** provenance。SLSA 徽章的真实性判据是 [docs/PUBLISHING.md](docs/PUBLISHING.md) 的「provenance 要对具体版本查」那一条 —— 两份门面的徽章注释只留指针，不重述规则（一处一事实）。版本线与判例见 [docs/PUBLISHING.md](docs/PUBLISHING.md)
-- **能力面 = 1 个技能 + 8 个工具**：5 个只读（`dsh_check_effect_mode` / `dsh_diagnose_plugin_load` / `dsh_check_auth` / `dsh_dump_config` / **`dsh_list_instances`** —— 最后一个是 D′ 的**发现**工具：列本机活着的 DSH，**只给 authority（`host:port`）、给不出 `DSH_HOME`**）、**1 个写侧** `dsh_hot_reload`（已实现、已真机验证；算法与关键语义见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §5）、**1 个派生** `dsh_sign_cookie`（唯一会经手秘密的工具，**cookie 值刻意不进返回值**）、**1 个行动** `dsh_restart`（四道闸 → 审批门 → 真拉起 → 退出宿主；**已实现**，且真机闭环已验两次：「工具壳写的 marker 被恢复半真消费」+ **「重启后立刻恢复」的时序**（2026-10-15，`103s`）。默认**关**：配置字段 `enableRestart`（`.volatile()` ⇒ 拨开即生效、不用重启），关着时**结构化拒绝**而**不是**不注册）。**目标形态与后续工具的归属见 [docs/SHAPE.md](docs/SHAPE.md)**
+- **能力面 = 1 个技能 + 8 个工具**：5 个只读（`dsh_check_effect_mode` / `dsh_diagnose_plugin_load` / `dsh_check_auth` / `dsh_dump_config` / **`dsh_list_instances`** —— 最后一个是 D′ 的**发现**工具：列本机活着的 DSH，**只给 authority（`host:port`）、给不出 `DSH_HOME`**）、**1 个写侧** `dsh_hot_reload`（已实现、已真机验证；算法与关键语义见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §5）、**1 个派生** `dsh_sign_cookie`（唯一会经手秘密的工具；**交付面是定位符** —— `name=value` 写进 `$DSH_HOME/<包名>/cookies/`、返回值里只有路径，**值从不进通道**）、**1 个行动** `dsh_restart`（四道闸 → 审批门 → 真拉起 → 退出宿主；**已实现**，且真机闭环已验两次：「工具壳写的 marker 被恢复半真消费」+ **「重启后立刻恢复」的时序**（2026-10-15，`103s`）。默认**关**：配置字段 `enableRestart`（`.volatile()` ⇒ 拨开即生效、不用重启），关着时**结构化拒绝**而**不是**不注册）。**目标形态与后续工具的归属见 [docs/SHAPE.md](docs/SHAPE.md)**
   —— 工具清单以 [src/tools/index.ts](src/tools/index.ts) 的注册处为真源，红线 B9 钉住名字闭集。
 - **本仓是两个半边**：工具半边（`src/tools/`，都是代码）与技能半边（正文 + [src/skills/](src/skills/README.md) 的注册代码）。
   技能正文在 [skills/](skills/README.md)，它**是运行时载荷而不是文档** —— 同一目录下那两份双件才是文档，区别见那条目录的说明。
@@ -66,6 +66,7 @@
   —— 本机「在跑的宿主」与「源码检出」常常不是同一个版本。
 - **能落成校验的就不写散文**：不变量做成 `test/` 下的红线或 `scripts/` 下的检查，这里只留指针。
 - **诊断半边保持只读**：不改 profile、不写 `$DSH_HOME`、不杀进程。**写侧只做「不杀进程」的那一种**（就地换模块，失败放回旧版本）。**会杀掉宿主的重启类动作不并入写侧** —— 它是**独立的行动类**，靠四道闸 + 审批门 + marker 恢复（形态见 [docs/SHAPE.md](docs/SHAPE.md) §6.1）。任何越界的「顺手修一下」先落决策。**这条规则本身由机器判据守着**（`test/redlines.test.ts` 的 B10：杀进程 / fs 写入 / **写宿主数据路径** / 安装面四类，作用域是整个 `src/**`）；写侧的窄作用域与更严的记号判据是 B15。**唯一的例外**（维护者 2026-10-14 拍板，**精确命名空间 / 形态 A**）：`$DSH_HOME/<包名>/` 这一层可以写 —— **只有紧跟 home 的第一段逐字等于包名**才放过，其余顶层项照旧禁止。清单与四条边界用例见 [docs/SHAPE.md](docs/SHAPE.md) §10.3。
+  这一层现在有**两个写者**：`dsh_restart`（marker / 窗口信息）与派生工具 `dsh_sign_cookie`（cookie 文件）；两者共用同一个宿主 `fs` 端口与同一个沙箱档位字面量，所以「怎么写给这一层」只有一处事实。
 - **一处一事实，别处只留指针**：一个事实有两个落点时，删掉一个。
 - **指针要能解析，且分层要能被查**：链路由浅到深是 **门面 → 根 [AGENTS.md](AGENTS.md) 仪表盘 → 子树 [README.md](src/README.md) / [AGENTS.md](src/AGENTS.md) 双件 → [docs/](docs/README.md) 活文档 → 判据**。
   「改一处能查到要同步哪」是这条链的**工程结果**，不是风格偏好。

@@ -6,12 +6,13 @@
  * 1. **独立成工具，绝不并进 `dsh_check_auth`**（SHAPE §1）：判据是「有没有秘密要经手」。
  *    并进去会让一个**判定型**输出带上凭证 —— 它的 `audit` 会被 spill 落盘。
  * 2. **cookie 本体不进返回值**。契约要求 `data` 是可无损落 JSON 的值，而 `audit` 会被
- *    spill 写到磁盘；凭证进 `audit` = 凭证落盘。所以本工具只报**签发成功与否**、
- *    **绑在哪个 authority**、**cookie 叫什么名** —— 值算完即弃，**只活在签名那一侧**。
- *    因此模型**拿不到可用的 cookie 值**：谁要用它，谁就得直接调签名器（`lib/cookie-sign.ts`
- *    导出的 `signCookie` / `cookieHeader`），这条通道读不回来。
- * 3. **只读**（B10）：读一个文件 + 在内存里算 HMAC，**不写**任何东西、不发任何请求。
- *    它不联网 —— 「签出来」与「用上去」是分开的动作，后者由人或浏览器做。
+ *    spill 写到磁盘；凭证进 `audit` = 凭证落盘。所以本工具把 `name=value` 写进**本仓自己的
+ *    命名空间**（`lib/cookie-sign.ts` 的 `cookieFilePath`），只把**路径**交出去：
+ *    调用方拿去喂脚本，值本身在任何返回值里都不出现。
+ * 3. **写盘走宿主 `fs` 服务**（`lib/restart-fs.ts` 的端口），**不用 `node:fs`** —— B10 的
+ *    来源判据与路径无关，`$DSH_HOME/<包名>/` 的白名单只放宽了路径那一半。写不出去就
+ *    **失败**，绝不退回「干脆把值给模型」。
+ * 4. 它**不联网** —— 「签出来」与「用上去」是分开的动作，后者由脚本或浏览器做。
  *
  * ## 一条被真机钉住的反直觉点（`lib/cookie-sign.ts` 有完整出处）
  *
@@ -28,15 +29,17 @@
  */
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools'
 
-import { fail, ok, toToolError, type JsonValue } from '../lib/errors.js'
+import { fail, messageOf, ok, toToolError, type JsonValue } from '../lib/errors.js'
 import { toolBudgetMs, type Workload } from '../lib/timeouts.js'
 import { readTextIfExists } from '../lib/profile.js'
 import { credentialsPath } from '../lib/profile.js'
 import {
+  cookieFilePath,
   cookieHeader,
   DEFAULT_COOKIE_MAX_AGE_DAYS,
   extractBrowserSessionSecret,
   signCookie,
+  type CookieFilePort,
 } from '../lib/cookie-sign.js'
 import type { RenderTable } from '../lib/render.js'
 import { composeDescription, type ToolDescription } from './describe.js'
@@ -114,19 +117,70 @@ interface SignCookieKey {
 }
 
 /**
+ * 本工具的运行期依赖。
+ *
+ * 比只读工具多一个**写**端口：它是本仓**唯一会落盘的派生工具**（落点在本包自己的
+ * 命名空间里，见 `lib/cookie-sign.ts` 的 `cookieFilePath`）。
+ */
+export interface SignCookieToolDeps extends ToolDeps {
+  /** 写 cookie 文件的唯一端口（宿主 `fs` 服务在写，本仓不碰 `node:fs`）。 */
+  readonly cookieFile: CookieFilePort
+}
+
+/**
+ * 签发结果在 `key` 里的投影。
+ *
+ * **`cookieValue` 刻意不在这里**：见文件头第 2 条 —— 值写进文件，返回值里只有路径。
+ *
+ * ⚠️ **四个签发字段都是可选的**，这不是偷懒：失败路径上**没有「签发」这回事**。
+ * 最直接的一条 —— 端口定不出来时 `authority` 连拼都拼不出来（它就是 `host:port`），
+ * 而硬造一个占位值（`:0`、`epoch 0`）会让模型以为「签了，只是没写出来」——
+ * 那比缺字段坏得多。**缺字段 = 没说谎**；占位值 = 说了谎。
+ */
+interface SignCookieKey {
+  /**
+   * cookie 绑定的 authority（`host:port`）。宿主**逐字**匹配它。
+   *
+   * 端口定不出来时整条不出现 —— 那时连 authority 都不存在。
+   */
+  authority?: string
+  /** cookie 名（`dsh-auth-<base64url(sha256(authority))>`）—— **不是秘密**，可以公开。 */
+  cookieName?: string
+  /** 绑定的到期时刻（epoch ms）。 */
+  expiresAt?: number
+  /** 生效起点（epoch ms）。 */
+  issuedAt?: number
+  /**
+   * `name=value` 落在哪个文件 —— 「你要的凭证已经有了，在这儿」的那个定位符。
+   *
+   * **它是决策要素**（调用方要拿它去喂脚本），按 SHAPE §5 判据属于 `key` 而不是 `audit`。
+   * 只有真写成了才有值；**写失败就是没签成**，见 `issueCookie` 里那条分支。
+   */
+  cookieFile?: string
+  /**
+   * 这次调用实际用的是哪份配置。
+   *
+   * 与 `check_auth` 同理：**authority 由端口来源决定**，而 authority 又直接决定
+   * 这个 cookie 有没有用，所以来源必须可见。**它在每条路径上都有** —— 它是「读了
+   * 哪份配置」这个事实，与签没签成无关。
+   */
+  resolved: EffectiveConfigBlock
+}
+
+/**
  * 本工具的描述（SHAPE §2.1 四段骨架）。
  *
- * - `what`：动词 + 对象，并明说它**产出凭证**。
- * - `useWhen`：路由信号 —— `check_auth` 刚报 401，且要让脚本 / 命令行客户端带上 cookie。
- * - `boundary`：**这一类才有代价段**（SHAPE §3.1）：① 它读密钥，这是本仓唯一经手秘密的
- *   工具；② cookie 值**不会**出现在输出里。这两句是承重的 —— 不写，模型会以为返回值里
- *   就有可直接用的 cookie，而那时它会去找一个不存在的东西。
+ * - `what`：动词 + 对象，就是**能力**本身 —— 机制（写文件）不进这一段。
+ * - `useWhen`：路由信号。**不写 `after a 401`**：那会把它误当成 401 的后继动作。
+ * - `boundary`：**承重句** —— 值不进这个通道，但**你拿到了一个定位符**。不写这句，
+ *   模型会以为工具没用而另找路子（那正是本工具上一版解不掉的死结）。
+ * - `cost`：派生类必写代价段。写盘就是它的代价，机制只在这里出现一次。
  */
 export const SIGN_COOKIE_DESCRIPTION: ToolDescription = {
   what: 'Signs a browser-session cookie this host accepts.',
-  useWhen: 'Use after a 401, when a script or CLI client needs to authenticate.',
-  boundary:
-    'Reads the local signing secret; the cookie value is not returned.\nCookies are bound to one exact host:port.',
+  useWhen: 'Use when a script or browser must reach your own instance.',
+  boundary: 'The value stays out of this result; you get a locator to it.',
+  cost: 'Reads the signing key; writes one file under its own directory.',
 }
 
 /** 输出表：L1 就是 `data.verdict` 逐字，L2 由 `key` 投影成行。 */
@@ -135,9 +189,9 @@ const TABLE: RenderTable<SignCookieKey> = { key: (data) => keyText(data.key) }
 /**
  * 造工具。
  *
- * @param deps 运行期依赖。
+ * @param deps 运行期依赖（比只读工具多一个写端口）。
  */
-export function createSignCookieTool(deps: ToolDeps): ToolDefinition {
+export function createSignCookieTool(deps: SignCookieToolDeps): ToolDefinition {
   return defineTool({
     name: SIGN_COOKIE_TOOL,
     description: composeDescription(SIGN_COOKIE_DESCRIPTION),
@@ -194,7 +248,7 @@ export function createSignCookieTool(deps: ToolDeps): ToolDefinition {
 async function issueCookie(
   args: SignCookieArgs,
   signal: AbortSignal,
-  deps: ToolDeps,
+  deps: SignCookieToolDeps,
 ): Promise<JsonValue> {
   // 本次调用认的实例（参数优先）。下面每一处 `deps.config` 都换成 `call.config` ——
   // 唯一要保证的是**读密钥那条路径**跟着换，否则签出来的 cookie 属于另一个实例。
@@ -328,32 +382,44 @@ async function issueCookie(
   // 从这里起就**持有凭证**了。它只在局部变量里活到本函数返回，不进 `data`、不进 `audit`。
   const signed = signCookie(extracted.value.secret, authority, deps.now(), maxAgeDays)
 
+  // 落点与内容：一行 `name=value`（`Cookie:` 头要的就是这个形状，不含 Set-Cookie 属性）。
+  // 文件名是 authority 的函数 ⇒ 同一 authority 永远覆盖同一个路径（幂等，无需协议）。
+  const cookieFile = cookieFilePath(call.config.dshHome, signed.name)
+  try {
+    await deps.cookieFile.write(cookieFile, cookieHeader(signed.name, signed.value))
+  } catch (error) {
+    // ⚠️ **绝不退回「把值给模型」**：写不出去就是没签成。降级路径必须是失败，不是泄密。
+    return toOutput(
+      fail(
+        {
+          kind: 'internal',
+          message: `computed a cookie for ${authority} but could not write ${cookieFile}: ${messageOf(error)}`,
+        },
+        {
+          verdict: `nothing usable was produced: the cookie for ${authority} was computed but could not be written to ${cookieFile}, so no caller can use it — this is a write failure in this plugin, not a credential problem`,
+          key: unsignedKey(resolved),
+          audit: { file, maxAgeDays },
+        },
+      ),
+    )
+  }
+
   const key: SignCookieKey = {
     authority,
     cookieName: signed.name,
     issuedAt: signed.payload.issuedAt,
     expiresAt: signed.payload.expiresAt,
+    cookieFile,
     resolved,
   }
 
   return toOutput(
-    ok(
-      {
-        verdict: `a cookie bound to ${authority} was signed with this host's own browser-session key, valid until ${new Date(signed.payload.expiresAt).toISOString()}; its value is deliberately not returned to this channel — a human or a local script must call the signer directly, because nothing here can read it back`,
-        key,
-        // ⚠️ 这里**必须**是空的：`audit` 会被 spill 写到磁盘，凭证进去 = 凭证落盘。
-        audit: { file, maxAgeDays },
-      },
-      {
-        // ⚠️ 原话是「把这个 authority 当 Cookie 头值发出去、再跑 auth 检查确认签名 cookie 被接受」
-        // —— 三处都不成立：① authority（`host:port`）不是 cookie 值（cookie 头是 `name=value`）；
-        // ② `dsh_check_auth` 的探测**不发任何凭据**（`lib/http.ts`），它没有能力确认 cookie 被接受；
-        // ③ 本工具**不返回 cookie 值**，模型手上根本没有可发的东西。
-        // ⇒ 唯一真实的下一步是人的动作，所以这里是 `manual`。
-        manual: true,
-        why: 'the cookie value never leaves the signing side: a human or a local script must call the signer directly and use the Cookie header it produces — this credential-free auth probe cannot verify it',
-      },
-    ),
+    ok({
+      verdict: `a cookie bound to ${authority} is at ${cookieFile} — one 'name=value' line for a Cookie header, valid until ${new Date(signed.payload.expiresAt).toISOString()}; the value never enters this conversation`,
+      key,
+      // ⚠️ 这里**必须**没有凭证：`audit` 会被 spill 写到磁盘，凭证进去 = 凭证落盘。
+      audit: { file, maxAgeDays },
+    }),
   )
 }
 
@@ -398,6 +464,8 @@ function keyText(key: SignCookieKey): string[] {
   const authority = authorityLine(key.authority)
   if (authority !== undefined) lines.push(authority)
   if (key.cookieName !== undefined) lines.push(`cookie name: ${key.cookieName}`)
+  // 定位符：模型要拿它去喂脚本，所以它在 L2 上（`audit` 进不了模型文本）。
+  if (key.cookieFile !== undefined) lines.push(`cookie file: ${key.cookieFile}`)
   // 到期时刻**只在真签出来时印**。没签出来就不印这一行 —— 印「valid until: not signed」
   // 会让一条「压根没走到签发」的失败路径看起来像「签了但没写出来」。
   if (key.expiresAt !== undefined) {
