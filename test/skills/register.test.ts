@@ -142,7 +142,7 @@ describe('registerSkills —— 成功路径', () => {
     expect(registered.name).toBe('dsh-plugin-debugging')
     expect(registered.source).toBe('runtime')
     expect(registered.description).toBe(
-      'Debugging a DSH plugin against a running DSH instance. Use when a change did not take effect, when unsure whether to reload/restart, when the page returns 401, or when setting up an isolated instance.',
+      'Debugging any DSH plugin or bundle on a live host. Use when a change did not take effect, an installed plugin does nothing, reload versus restart is unclear, a page returns 401 or a script needs a cookie, or you need the port or an isolated instance. Not for writing plugin code.',
     )
 
     // 注册挂在 fiber 上：disposer 必须被 ctx.effect 收到，卸载时才撤得掉。

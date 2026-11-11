@@ -2212,6 +2212,76 @@ describe('B11 双语门面成对，且展示元数据齐全', () => {
   })
 })
 
+/**
+ * `description` 的字符预算。
+ *
+ * **不是审美上限，是截断预算**：宿主 catalog 的 `catalogDescriptionMaxLength` 默认 500，
+ * 超了按 `slice(0, maxLength - 3) + '...'` 砍掉尾巴且**不报错**
+ * （`dsh-tool-skill/lib/index.js:768` 的默认值、`:1094-1097` 的实现）。
+ * 这里比 500 小 40：那个值是**可配置**的，留出被调低的余量，同时任何「把触发场景删掉换成长句」的
+ * 改动都会先撞上它 —— 撞上时人来看一眼，比模型读到半句话便宜得多。
+ */
+const ROUTING_DESCRIPTION_MAX_CHARS = 460
+
+/**
+ * `Use when` 之后至少要出现的场景数。
+ *
+ * 下界而不是等号：场景措辞会变（改词、拆句），钉等号会给出假红；
+ * 而这条判据要挡的是**另一种**退化 —— 描述被改写一句「Debugging DSH plugins」就收工，
+ * 于是技能对模型**不再存在**（技能不进系统提示词，活跃坑 7），且全仓不会有任何东西变红。
+ */
+const ROUTING_MIN_SCENARIOS = 4
+
+/**
+ * 判定一条 `description` 能不能当**模型的路由信号**用，返回违规清单（空 = 通过）。
+ *
+ * 纯函数：反例在内存里造，不必去动真文件 —— 否则「判据可被否证」这条自身就没法证。
+ * 五条都取自实现事实，没有一条是文风偏好（理由见调用处的注释）。
+ *
+ * @param description frontmatter 里 `description` 的值（已 trim）。
+ * @returns 违规描述；空数组表示通过。
+ */
+function judgeRoutingDescription(description: string): string[] {
+  const offenders: string[] = []
+
+  if (description.length > ROUTING_DESCRIPTION_MAX_CHARS) {
+    offenders.push(
+      `长度 ${String(description.length)} 字符 > ${String(ROUTING_DESCRIPTION_MAX_CHARS)} —— ` +
+        '宿主 catalog 会静默截断成 "..."，模型读到的是一句砍断的话',
+    )
+  }
+  // 宿主渲染 catalog 前会把这些字符转成实体（`dsh-skill/lib/index.js:91-93`），
+  // 模型于是读到 `&amp;` / `&lt;` 这类东西。
+  const escaped = /[&<>]/.exec(description)
+  if (escaped !== null) {
+    offenders.push(`含 catalog 会转义的字符 ${JSON.stringify(escaped[0])} —— 模型看到的是实体`)
+  }
+  // plain scalar 里的 `: ` 违反 YAML：换成真 YAML 解析器会整块丢掉 frontmatter。
+  // 本仓解析器按第一个冒号切所以能容忍，两种解析器不该在这一点上分叉。
+  if (description.includes(': ')) {
+    offenders.push(
+      '含 ": " —— plain scalar 里这是 YAML 语法错误，换成真 YAML 解析器会丢掉整个 frontmatter',
+    )
+  }
+  // 块标量的指示符（`|` / `>` 及其截断/保留修饰符）被当成描述文本时，本仓注册会响亮失败。
+  if (/^[|>]/.test(description.trim())) {
+    offenders.push('以块标量指示符开头（| 或 >）—— 本仓注册会响亮失败，而这条只看「非空」时照不到')
+  }
+  if (!description.includes('Use when')) {
+    offenders.push('缺触发段（`Use when ...`）—— 描述是技能对模型存在的唯一证据')
+  }
+  const clause = description.slice(description.indexOf('Use when') + 'Use when'.length)
+  const scenarios = clause.split(',').filter((part) => part.trim() !== '').length
+  if (scenarios < ROUTING_MIN_SCENARIOS) {
+    offenders.push(
+      `触发段只有 ${String(scenarios)} 个场景（下界 ${String(ROUTING_MIN_SCENARIOS)}）—— ` +
+        '退化成一句泛泛的话时技能静默失效',
+    )
+  }
+
+  return offenders
+}
+
 describe('B12 技能文件本体', () => {
   const SKILL_REL = 'skills/dsh-plugin-debugging/SKILL.md'
 
@@ -2258,6 +2328,52 @@ describe('B12 技能文件本体', () => {
     const description = bad?.get('description') ?? ''
     expect(/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name)).toBe(false)
     expect(description.length).toBe(0)
+  })
+
+  /**
+   * `description` 是**唯一**的模型路由信号（技能正文不进系统提示词，活跃坑 7），
+   * 而它的每一种坏法都是**静默**的 —— 所以下面这一族判据照的是「坏法」，不是文风。
+   *
+   * 三条来源（都是宿主/本仓的实现事实，不是偏好）：
+   * 1. **长度**：宿主 catalog 的 `catalogDescriptionMaxLength` 默认 **500**，超了直接切
+   *    `slice(0, maxLength - 3) + '...'`（`dsh-tool-skill/lib/index.js:768`、`:1094-1097`），
+   *    不报错 —— 模型读到的是一句被砍断的话。本仓写死一个更小的预算，留出「配置被调低」的余量。
+   * 2. **`& < >`**：catalog 渲染前会把这些字符转成实体（`dsh-skill/lib/index.js:91-93`），
+   *    模型看到的是 `&amp;` 这类东西。
+   * 3. **`: ` 与 `|` / `>` 开头**：同一份文本还要当 YAML frontmatter 读。本仓解析器只按**第一个**
+   *    冒号切、再剥成对引号，所以它能容忍 `: `；但 plain scalar 里的 `: ` **违反 YAML 规则**，
+   *    换成真 YAML 解析器（skills/AGENTS.md 那条惯例的由来）会把整个 frontmatter 丢掉。
+   *    两种解析器要一致，就不要让它在文本里。块标量同理：写成 `>-` 时本仓注册会**响亮失败**，
+   *    而 B12 只看「非空」是照不出来的。
+   */
+  it('description 是唯一的路由信号：长度 / 转义面 / 冒号面 / 块标量 / 触发段', () => {
+    const description = parseFrontmatter(readRepo(SKILL_REL))?.get('description') ?? ''
+    expect(description.length, 'description 为空 —— 模型唯一的路由信号没了').toBeGreaterThan(0)
+
+    const offenders = judgeRoutingDescription(description)
+    expect(
+      offenders,
+      describeOffenders('description 不合格', offenders) +
+        '\n它是技能**唯一**的触发信号，改坏时不会有任何运行期报错。',
+    ).toEqual([])
+  })
+
+  it('路由判据可被否证：超长 / 转义字符 / 冒号空格 / 块标量 / 缺触发段都会报出来', () => {
+    // 阳性对照先跑：合格样本必须一条都不报，否则下面的「报出来了」可能只是判据恒真。
+    expect(judgeRoutingDescription('Debug DSH plugins. Use when a, b, c, or d.')).toEqual([])
+
+    // 每一条都单独触发，且断言的是**那一类**消息（不看整句措辞）。
+    const tooLong = `Debug when a, b, c, or d. ${'x'.repeat(ROUTING_DESCRIPTION_MAX_CHARS)}`
+    expect(judgeRoutingDescription(tooLong).join(' ')).toMatch(/长度/)
+    expect(judgeRoutingDescription('Debug a & b. Use when a, b, c, or d.').join(' ')).toMatch(
+      /转义/,
+    )
+    expect(
+      judgeRoutingDescription('Debug this: see below. Use when a, b, c, or d.').join(' '),
+    ).toMatch(/YAML/)
+    expect(judgeRoutingDescription('| folded. Use when a, b, c, or d.').join(' ')).toMatch(/块标量/)
+    expect(judgeRoutingDescription('Debugging a DSH plugin.').join(' ')).toMatch(/触发段/)
+    expect(judgeRoutingDescription('Debug. Use when a, or b.').join(' ')).toMatch(/场景/)
   })
 
   it('技能正文不空（正文为空的技能会在渲染 <skill_content> 时才暴露）', () => {

@@ -1,6 +1,6 @@
 ---
 name: dsh-plugin-debugging
-description: Debugging a DSH plugin against a running DSH instance. Use when a change did not take effect, when unsure whether to reload/restart, when the page returns 401, or when setting up an isolated instance.
+description: Debugging any DSH plugin or bundle on a live host. Use when a change did not take effect, an installed plugin does nothing, reload versus restart is unclear, a page returns 401 or a script needs a cookie, or you need the port or an isolated instance. Not for writing plugin code.
 author: zlZayn
 metadata:
   source:
