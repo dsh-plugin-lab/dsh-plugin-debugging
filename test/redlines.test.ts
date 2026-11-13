@@ -199,6 +199,17 @@ interface Manifest {
 
 const packageJson = JSON.parse(readRepo('package.json')) as Manifest
 
+/**
+ * 声明面对外承诺几条宿主线 —— **唯一一处**。
+ *
+ * 单区间罩不住两个预发布族：npm 只在区间内存在**同元组**预发布项时才匹配候选。
+ * 所以「承诺几条线」必须显式写下来，增删一族当场红，逼人回来确认这是有意变更。
+ *
+ * 2026-11-13 从四族收成一族：宿主的 0.2.2 rc 线删了本插件依赖的符号，
+ * 旧的 0.1.7 / 0.2.0 / 0.2.1 承诺随之作废 —— 承诺了却跑不了，比缩窄更不诚实。
+ */
+const PROMISED_FAMILIES = ['^0.2.2-rc.3'] as const
+
 // ── 文档里点名的包管理器命令，必须是本仓真有的脚本 ──────────────────────────
 
 /**
@@ -326,11 +337,11 @@ function judgeEngineRangeAgreement(pkg: Manifest): string[] {
 }
 
 describe('A2 engines.dsh 与每个 @deepseek-ai/dsh-* 区间逐字相同', () => {
-  it('真实清单里逐字一致，且承诺的族不只一族', () => {
+  it('真实清单里逐字一致，且只承诺 PROMISED_FAMILIES 里那几族', () => {
     const engine = packageJson.engines?.['dsh'] ?? ''
-    // 单区间罩不住两个预发布族：npm 只在区间内存在**同元组**预发布项时才匹配候选，
-    // 所以要同时承诺 0.1.7 与 0.2.0 线必须用 `||` 显式枚举。这条防的是「悄悄删掉一族」。
-    expect(engine.split('||').length, `engines.dsh = ${engine} 只承诺了一族`).toBeGreaterThan(1)
+    expect(engine, `engines.dsh = ${engine} 与 PROMISED_FAMILIES 不符`).toBe(
+      PROMISED_FAMILIES.join(' || '),
+    )
 
     const offenders = judgeEngineRangeAgreement(packageJson)
     expect(offenders, describeOffenders('engines.dsh 与 dsh-* 区间不同值', offenders)).toEqual([])
