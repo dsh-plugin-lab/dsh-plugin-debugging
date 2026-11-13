@@ -101,7 +101,7 @@
 ## 常用命令
 
 ```shell
-pnpm run check          # typecheck + build + test
+pnpm run check          # typecheck + build + test + lint + format:check + check:release
 pnpm run check:release  # 发布态不变量（scripts/check-release.mjs）
 pnpm run lint           # ESLint
 pnpm run format:check   # 格式
