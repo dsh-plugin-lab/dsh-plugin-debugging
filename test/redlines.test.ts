@@ -295,6 +295,53 @@ function judgePeerDevAgreement(pkg: Manifest): string[] {
   return offenders
 }
 
+/**
+ * `pnpm run check` 必须覆盖 CI 跑的每一步。
+ *
+ * 组织判据要求这条，理由是两者回答同一个问题：「这样推安全吗」。`check` 是本地那一侧的答案、
+ * CI 是权威那一侧，所以 `check` 不能比它窄 —— 它跳过的每一步都要等几分钟、在 runner 上、
+ * 在推送已经发生之后才被发现。本仓原先跳过了 `lint`、`format:check` 与 `check:release`。
+ *
+ * **反方向刻意不断言**：`check` 还跑 `check:release`，那是发布态守卫，属于「推之前」而不是
+ * 「验证 job」。要求两边相等等于把它塞进 CI。
+ */
+describe('B35 `check` 覆盖 CI 的每一步', () => {
+  /**
+   * CI 真正跑的 `pnpm …` 步骤，`run` 关键字归一化掉。
+   *
+   * 一步有两种写法：行内（`- run: pnpm run lint`）或带 `name:` 的映射（`run: pnpm run format:check`），
+   * 所以前导 `-` 是可选的。锚 `$` 是挡住 `pnpm install --frozen-lockfile …` 与 `pnpm exec …`
+   * 的东西：它们带参数，而且都不是闸门。
+   */
+  function ciSteps(): string[] {
+    const found = [
+      ...readRepo('.github/workflows/ci.yml').matchAll(
+        /^\s*(?:-\s+)?run: pnpm (?:run )?([\w:-]+)$/gmu,
+      ),
+    ].map((match) => match[1] ?? '')
+    return [...new Set(found)].filter((step) => step !== '')
+  }
+
+  it('扫描器真的看到了 CI 步骤（否则本判据是空转的）', () => {
+    expect(ciSteps().length).toBeGreaterThan(0)
+  })
+
+  it('CI 跑的每一步都出现在 `check` 里', () => {
+    const manifest = JSON.parse(readRepo('package.json')) as {
+      scripts?: Record<string, string>
+    }
+    const check = manifest.scripts?.check ?? ''
+    const missing = ciSteps().filter((step) => !check.includes(`pnpm run ${step}`))
+    expect(missing, `CI 跑了而 \`pnpm run check\` 漏了：${missing.join(', ')}`).toEqual([])
+  })
+
+  it('上面那条检测器有牙齿（反向控制）', () => {
+    const detector = (check: string) =>
+      ciSteps().filter((step) => !check.includes(`pnpm run ${step}`))
+    expect(detector('pnpm run typecheck')).toContain('lint')
+  })
+})
+
 describe('A1 官方包的 peer 与 dev 版本逐条相等', () => {
   it('真实清单里没有漂开的官方包', () => {
     const offenders = judgePeerDevAgreement(packageJson)

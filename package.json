@@ -75,7 +75,7 @@
     "format:check": "prettier --check .",
     "check:release": "node scripts/check-release.mjs",
     "check:declaration": "node scripts/check-declaration.mjs",
-    "check": "pnpm run typecheck && pnpm run build && pnpm run test"
+    "check": "pnpm run typecheck && pnpm run build && pnpm run test && pnpm run lint && pnpm run format:check && pnpm run check:release"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.1.0",
