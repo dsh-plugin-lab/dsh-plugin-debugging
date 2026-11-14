@@ -5,7 +5,12 @@
   "keywords": [
     "dsh",
     "deepseek-harness",
-    "dsh-plugin"
+    "dsh-plugin",
+    "debugging",
+    "diagnostics",
+    "hot-reload",
+    "troubleshooting",
+    "plugin-development"
   ],
   "license": "MIT",
   "author": "zlZayn",
