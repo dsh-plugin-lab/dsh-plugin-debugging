@@ -643,9 +643,12 @@ describe('A5 发布流程不得改写版本号', () => {
       const workflowPath = join(root, '.github/workflows/release.yml')
       const original = readFileSync(workflowPath, 'utf8')
       // 注入一处**会执行**的 bump：位置在 Publish 步骤的 run 里，不是注释、不是 echo。
+      // 注入点换了：薄壳里已经没有 `npm publish` 那一行 —— 那一步现在住组织仓的共享发布流。
+      // 这个反例判的是**检测器有没有牙齿**，所以只要注入一处「会执行」的 bump 即可；
+      // 挂在 `with:` 块里的一个多余键，既不是注释也不是 echo。
       const mutated = original.replace(
-        '          npm publish',
-        '          npm version patch --no-git-tag-version\n          npm publish',
+        '    with:',
+        '    with:\n      bump: npm version patch --no-git-tag-version',
       )
       // 自检：变异真的落地了吗。没落地就说明 replace 没匹配上，
       // 那样这个反例证明的不是「守卫有效」，而是「正则没命中」。
@@ -693,9 +696,21 @@ function judgeTagShape(workflowSource: string): string[] {
 }
 
 describe('A6 tag 形状是 v<semver>，且前缀显式', () => {
-  it('真实 release.yml 用的是 v 前缀 + --match 的形状', () => {
-    const offenders = judgeTagShape(readRepo('.github/workflows/release.yml'))
-    expect(offenders, describeOffenders('tag 形状不对', offenders)).toEqual([])
+  it('真实 release.yml 把这条判据交给了共享发布流', () => {
+    // tag 形状（`v` 前缀显式拼出 + `--match 'v[0-9]*'`）判的是**真正打 tag 的那份文件**。
+    // 薄壳里没有 tag 赋值，同样的断言留在这里只会因为「没有东西可读」而绿 —— 比红更坏。
+    // 它现在由组织仓的 `scripts/lib/release-flow.mjs` 对着 `release-publish.yml` 核。
+    const source = readRepo('.github/workflows/release.yml')
+    expect(source, '没有调用共享发布流').toContain(
+      'uses: dsh-plugin-lab/.github/.github/workflows/release-publish.yml@',
+    )
+    // npm 认的是调用方的文件名与环境名；任一不符，registry 都只回 404，不说原因。
+    expect(source, 'environment 名必须与 Trusted Publisher 逐字一致').toMatch(
+      /environment:\s*release\b/,
+    )
+    expect(source, '没有为被调用的 job 转发 id-token').toMatch(/id-token:\s*write/)
+    // 反向控制：自带整份副本的写法必须不满足上面那条。
+    expect('name: Release\non:\n  push:\n').not.toContain('release-publish.yml@')
   })
 
   it('判据可被否证：把前缀拿掉就会红', () => {
