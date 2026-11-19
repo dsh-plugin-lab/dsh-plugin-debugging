@@ -390,7 +390,7 @@ notice 真落进发起者会话。那份 marker 由**工具壳**写（四道闸 
 **此前就留着的**：
 
 - 插件技能在**真实 catalog** 里的 `source` 显示值：层与 rank 的**合并结果**已在真机核过（结论与代价见 [ARCHITECTURE.md](ARCHITECTURE.md) §3 与动态 scope 那篇决策）；
-  ⚠️ **那批真机读数取自「静态写进 preset 组合」那条**（已被否决）**这条路** —— 要读**动态 scope 注入**这条**已落地**的路在 catalog 里的 `source` / `path`，仍要起实例。源码只给恒定 250 与分层规则，那部分不需要再核。
+  ✅ **`path` / `resourceBase` 已闭**：运行时注册带上两者后，`skills/get` 的 `<skill_resources>` 出现了真实基准目录，右栏也能点开 `SKILL.md`。真源：`dsh-skill` 的 `runtimeCandidate`（原样透传）、`dsh-api-session-controller` 的 `SessionSkillCatalog.list`、`dsh-client-ui-skill` 的 `openReference`（缺 `path` 即 `return false`，不报错）。⚠️ `source` 的显示值本身仍**未**读。
 - `ctx.skills.register()` 的注册时机与 catalog 缓存失效是否正确配对（源码有实现，耦合读不出来）。
 - 审批门在真实 UI/策略下的表现：⚠️ **`never` 档（= `danger-full-access`）下主动 `request()` 会被确定性拒绝**（`decide()` 的 `never` 分支），而 `ask` 档会弹窗 —— **「先读策略再决定问不问」这条在真机 UI 上还没跑过**。
 - `schemastery` 两个版本间的行为差异（运行时比检出新一个预发布号）。

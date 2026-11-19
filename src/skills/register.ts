@@ -253,7 +253,16 @@ export function registerSkills(
   }
 
   const contentBytes = Buffer.byteLength(content, 'utf8')
-  const registration: SkillRegistration = { name, description, content, source: 'runtime' }
+  // 运行时注册不自带文件身份（宿主叫它 virtual skill）⇒ 自己给全：
+  // `path` 是右栏能点开的唯一依据（客户端没有它就静默放弃），`resourceBase` 是正文相对路径的基准。
+  const registration: SkillRegistration = {
+    name,
+    description,
+    content,
+    source: 'runtime',
+    path: skillFile,
+    resourceBase: { kind: 'directory', path: join(skillRoot, SKILL_NAME) },
+  }
 
   // 挂在 fiber 上：`ctx.effect` 的生成器体在加载期同步跑到第一个 yield，
   // 宿主会把 yield 出来的 disposer 收进 fiber（cordis `_execute`，`…\cordis\lib\index.js:1142-1153`）。
