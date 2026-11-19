@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import type { Context } from '@deepseek-ai/cordis'
@@ -138,9 +138,20 @@ describe('registerSkills —— 成功路径', () => {
 
     const registered = calls[0]
     expect(registered).toBeDefined()
-    expect(Object.keys(registered).sort()).toEqual(['content', 'description', 'name', 'source'])
+    expect(Object.keys(registered).sort()).toEqual([
+      'content',
+      'description',
+      'name',
+      'path',
+      'resourceBase',
+      'source',
+    ])
     expect(registered.name).toBe('dsh-plugin-debugging')
     expect(registered.source).toBe('runtime')
+    // 文件身份：缺 `path` 右栏点不开（客户端没有它只放弃，不报错），缺 `resourceBase` 模型拿不到基准。
+    // 指错与缺字段一样静默，所以落到真实文件上。
+    expect(registered.path).toBe(SKILL_PATH)
+    expect(registered.resourceBase).toEqual({ kind: 'directory', path: dirname(SKILL_PATH) })
     expect(registered.description).toBe(
       'Debugging any DSH plugin or bundle on a live host. Use when a change did not take effect, an installed plugin does nothing, reload versus restart is unclear, a page returns 401 or a script needs a cookie, or you need the port or an isolated instance. Not for writing plugin code.',
     )
